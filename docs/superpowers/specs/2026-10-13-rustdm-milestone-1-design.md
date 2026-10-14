@@ -163,7 +163,8 @@ Each step starts with a short explanation of the concept, then tests, then code.
 - `Accept-Encoding: identity` and `If-Range` on every range request.
 - Test server written from raw TCP, not a framework.
 - Expired-link refresh and cookie/auth persistence are deferred.
-- **Open, author to decide:** (a) keep the `bytes=0-0` probe, which IDM does not use (section 4.1), or send a plain GET first; (b) start all segments at once, or ramp up 1, 4, 8 as IDM does (section 4.2). The current draft keeps the probe and starts all at once.
+- **Decided by the author (2026-10-14):** (a) keep the `bytes=0-0` probe, which IDM does not use (section 4.1); (b) start all segments at once. The 1, 4, 8 ramp that IDM uses (section 4.2) stays a later option, to be added if measurement shows it helps.
+- **Build location:** WSL for steps 1 to 3, then the Windows MSVC toolchain before step 5 (`next-steps.md`).
 
 ## 9. Open questions
 
