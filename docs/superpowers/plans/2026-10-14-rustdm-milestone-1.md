@@ -89,7 +89,7 @@ README.md
 **Interfaces:**
 - Produces: `pub const VERSION: &str` in `src/lib.rs` (equal to `env!("CARGO_PKG_VERSION")`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // tests/smoke.rs
@@ -99,25 +99,25 @@ fn library_exposes_version() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test smoke`
 Expected: FAIL, `rustdm` has no `VERSION`.
 
-- [ ] **Step 3: Create the scaffold**
+- [x] **Step 3: Create the scaffold**
 
 `src/lib.rs` declares `#![deny(clippy::print_stdout, clippy::print_stderr)]` and `pub const VERSION`. `src/main.rs` is a placeholder `fn main() {}`. `Cargo.toml` sets `[[bin]] name = "rdm"` and `[features] testing = []`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test`
 Expected: `test result: ok` for `library_exposes_version`.
 
-- [ ] **Step 5: Add CI**
+- [x] **Step 5: Add CI**
 
 `ci.yml` runs on push and pull request, with a matrix of `windows-latest` and `ubuntu-latest`. Jobs: `cargo fmt --check`, `cargo clippy --all-targets --features testing -- -D warnings`, `cargo test --features testing`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml src/ tests/smoke.rs .github/
