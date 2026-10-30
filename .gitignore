@@ -1,2 +1,10 @@
 # Temporary notes and scratch work (not tracked)
 scratch/
+
+# Rust build target
+/target/
+
+# rustdm download state & parts
+*.part
+*.part.rdm
+

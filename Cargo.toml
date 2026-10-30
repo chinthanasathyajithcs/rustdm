@@ -1,0 +1,19 @@
+[package]
+name = "rustdm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rustdm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rdm"
+path = "src/main.rs"
+
+[features]
+testing = []
+
+[dependencies]
+
+[dev-dependencies]
