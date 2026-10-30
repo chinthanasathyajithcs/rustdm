@@ -27,8 +27,15 @@ Where an idea comes from IDM's observed behavior, the source is `docs/idm-behavi
 - **Machine-readable output.** A `--json` status output and a request log, so scripts and bug reports can use the same data.
 - **Rules for finished files.** Sort downloads into folders by type or site, and show where each file went.
 
-## Browser side (later)
+## Browser side & Media Sniffer (Milestones 2 & 3)
 
+- **Automatic browser download interception (Native Messaging).** A lightweight WebExtension (Chrome/Firefox/Edge) hooks `chrome.downloads.onDeterminingFilename` or `chrome.webRequest`. When a file download link is clicked (.iso, .zip, .exe, installers), it cancels the browser's slow single-stream download and hands off the URL, file name, full cookies, User-Agent, and Referer to `rustdm` over stdio via the standard browser Native Messaging protocol.
+- **Universal network media sniffer (Floating grabber).** Instead of fragile site-specific scrapers that break whenever YouTube or TikTok changes their HTML, the extension sniffs network requests for media MIME types (`video/*`, `audio/*`, `application/x-mpegurl` / `.m3u8`, `application/dash+xml` / `.mpd`).
+  - **Universal:** Works on any website without custom scrapers.
+  - **Authenticated:** Seamlessly inherits user login sessions, cookies, and paywall access because the browser is already playing the media.
+  - **Not just videos:** Catches streaming audio/podcasts, embedded viewer PDFs, high-res web assets.
+  - **In-page quality picker:** Injects a floating "Download Video/Audio" button above active media players, listing detected qualities, bitrates, and estimated file sizes for the user to pick.
+- **Adaptive streaming & muxing (HLS / DASH).** For chunked streams (`.m3u8` / `.mpd`), the extension passes the playlist manifest to `rustdm`, which fetches chunks concurrently using its segmented engine. When video and audio streams are delivered separately, trigger a zero-reencode mux via `ffmpeg` to produce a clean `.mp4`.
 - **Cookies from the page.** The extension sends the cookies and headers the page is already using. Don't read browser cookie stores.
 - **"Send to rustdm" control.** Show it on file links, with the page's referrer and cookies.
 - **File list.** List the downloadable files on the current page, so the user can choose.
