@@ -141,7 +141,7 @@ git commit -m "chore: scaffold crate and Windows and Linux CI"
   - `pub fn initial_segments(total: u64, connections: u32) -> Vec<ByteRange>`
   - `pub fn split_upper_half(r: ByteRange) -> Option<(ByteRange, ByteRange)>`, returning `(keep, take)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -174,21 +174,21 @@ fn split_needs_two_min_segments() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test ranges`
 Expected: FAIL, items not defined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `RangeSet` keeps a sorted `Vec<ByteRange>` with no overlaps and merges on insert. `initial_segments` uses `n = min(connections, total / MIN_SEGMENT)`, at least 1 when `total > 0`. Each segment has `total / n` bytes, and the last one ends at `total`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test ranges`
 Expected: all six tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/ranges.rs src/lib.rs
