@@ -6,6 +6,7 @@ pub mod engine;
 pub mod error;
 pub mod probe;
 pub mod ranges;
+pub mod retry;
 pub mod template;
 #[cfg(feature = "testing")]
 pub mod testing;

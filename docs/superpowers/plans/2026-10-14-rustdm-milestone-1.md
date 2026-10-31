@@ -597,7 +597,7 @@ git commit -m "feat: download in parallel ranges with If-Range checks"
 - Worker: on a dropped connection, a short body, a wrong `Content-Range`, or a `429` or `503`, wait (`Retry-After` if present, otherwise backoff) and retry from the last written byte. After `MAX_SEGMENT_ATTEMPTS`, return `Protocol`. A `403`, `404` or `410` returns `LinkExpired` at once, with no retry.
 - New test modes: `FailThenOk { status: u16, times: u32, retry_after: Option<u32> }`, `ShortBody`, `WrongContentRange`, `DropMidBodyOnce`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn backoff_grows_then_caps() {
@@ -615,19 +615,19 @@ git commit -m "feat: download in parallel ranges with If-Range checks"
 #[tokio::test] async fn resumes_from_last_written_byte_after_drop() { /* DropMidBodyOnce: second Range start > segment start, bytes == source */ } // review focus 4 prep
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the retry loop in `worker.rs`, with the delay chosen by `backoff_delay(attempt, fastrand::f64())`.
+- [x] **Step 3: Implement** the retry loop in `worker.rs`, with the delay chosen by `backoff_delay(attempt, fastrand::f64())`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/retry.rs src/worker.rs src/testing/ tests/download.rs

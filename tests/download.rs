@@ -227,3 +227,181 @@ async fn fetch_range_reports_file_changed_when_validator_stale() {
         other => panic!("expected FileChanged, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn honors_retry_after_on_503() {
+    let size = 1000;
+    let body = pattern_bytes(size);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::FailThenOk {
+            status: 503,
+            times: 2,
+            retry_after: Some(0),
+        },
+    )
+    .await;
+    let dir = tempdir().unwrap();
+
+    let client = build_client();
+    let progress = Arc::new(Progress::new());
+    let req = DownloadRequest {
+        url: srv.url().join("retry503.bin").unwrap(),
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 1,
+        progress: Arc::clone(&progress),
+    };
+
+    let outcome = download(&client, req).await.unwrap();
+    match outcome {
+        Outcome::Completed { path, .. } => {
+            assert_eq!(fs::read(path).unwrap(), body);
+        }
+    }
+}
+
+#[tokio::test]
+async fn link_expired_fails_without_retry() {
+    let srv = TestServer::start(vec![], Mode::Status(403)).await;
+    let client = build_client();
+    let dir = tempdir().unwrap();
+    let part_path = dir.path().join("link_exp.bin.part");
+    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(1000)).unwrap());
+    let progress = Arc::new(Progress::new());
+    let validator = rustdm::probe::Validator::default();
+
+    let err = rustdm::worker::fetch_range(
+        &client,
+        &srv.url().join("test.bin").unwrap(),
+        &validator,
+        rustdm::ranges::ByteRange {
+            start: 0,
+            end: 1000,
+        },
+        part,
+        progress,
+    )
+    .await
+    .unwrap_err();
+
+    match err {
+        rustdm::error::Error::LinkExpired { status } => assert_eq!(status, 403),
+        other => panic!("expected LinkExpired, got {other:?}"),
+    }
+    assert_eq!(srv.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn short_body_fails_at_attempt_cap() {
+    let body = pattern_bytes(2000);
+    let srv = TestServer::start(body, Mode::ShortBody).await;
+    let client = build_client();
+    let dir = tempdir().unwrap();
+    let part_path = dir.path().join("short.bin.part");
+    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(2000)).unwrap());
+    let progress = Arc::new(Progress::new());
+    let validator = rustdm::probe::Validator::default();
+
+    let err = rustdm::worker::fetch_range(
+        &client,
+        &srv.url().join("short.bin").unwrap(),
+        &validator,
+        rustdm::ranges::ByteRange {
+            start: 0,
+            end: 2000,
+        },
+        part,
+        progress,
+    )
+    .await
+    .unwrap_err();
+
+    match err {
+        rustdm::error::Error::Protocol(_) => {}
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+    let range_reqs = srv
+        .requests()
+        .into_iter()
+        .filter(|r| r.range.is_some() && r.range.as_deref() != Some("bytes=0-0"))
+        .count();
+    assert_eq!(range_reqs as u32, rustdm::retry::MAX_SEGMENT_ATTEMPTS);
+}
+
+#[tokio::test]
+async fn wrong_content_range_is_protocol_error() {
+    let body = pattern_bytes(2000);
+    let srv = TestServer::start(body, Mode::WrongContentRange).await;
+    let client = build_client();
+    let dir = tempdir().unwrap();
+    let part_path = dir.path().join("wrong_cr.bin.part");
+    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(2000)).unwrap());
+    let progress = Arc::new(Progress::new());
+    let validator = rustdm::probe::Validator::default();
+
+    let err = rustdm::worker::fetch_range(
+        &client,
+        &srv.url().join("wrong_cr.bin").unwrap(),
+        &validator,
+        rustdm::ranges::ByteRange {
+            start: 0,
+            end: 2000,
+        },
+        part,
+        progress,
+    )
+    .await
+    .unwrap_err();
+
+    match err {
+        rustdm::error::Error::Protocol(_) => {}
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn resumes_from_last_written_byte_after_drop() {
+    let size = 2000;
+    let body = pattern_bytes(size);
+    let srv = TestServer::start(body.clone(), Mode::DropMidBodyOnce).await;
+    let client = build_client();
+    let dir = tempdir().unwrap();
+    let part_path = dir.path().join("drop.bin.part");
+    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(size)).unwrap());
+    let progress = Arc::new(Progress::new());
+    let validator = rustdm::probe::Validator::default();
+
+    rustdm::worker::fetch_range(
+        &client,
+        &srv.url().join("drop.bin").unwrap(),
+        &validator,
+        rustdm::ranges::ByteRange {
+            start: 0,
+            end: size,
+        },
+        Arc::clone(&part),
+        progress,
+    )
+    .await
+    .unwrap();
+
+    let logs: Vec<_> = srv
+        .requests()
+        .into_iter()
+        .filter(|r| r.range.is_some() && r.range.as_deref() != Some("bytes=0-0"))
+        .collect();
+    assert_eq!(logs.len(), 2);
+    let second_range = logs[1].range.as_deref().unwrap();
+    assert!(second_range.starts_with("bytes="));
+    let start_byte: u64 = second_range
+        .strip_prefix("bytes=")
+        .unwrap()
+        .split('-')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(start_byte > 0);
+    assert_eq!(fs::read(&part_path).unwrap(), body);
+}

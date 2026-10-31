@@ -23,6 +23,14 @@ pub enum Mode {
     Status(u16),
     Redirect,
     Chunked,
+    FailThenOk {
+        status: u16,
+        times: u32,
+        retry_after: Option<u32>,
+    },
+    ShortBody,
+    WrongContentRange,
+    DropMidBodyOnce,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +63,7 @@ impl TestServer {
         let server_etag = Arc::clone(&etag);
         let server_requests = Arc::clone(&requests);
         let server_body = Arc::new(body);
+        let mode_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
         tokio::spawn(async move {
             loop {
@@ -71,6 +80,7 @@ impl TestServer {
                         let reqs_lock = Arc::clone(&server_requests);
                         let body_ref = Arc::clone(&server_body);
                         let mode_clone = mode.clone();
+                        let counter = Arc::clone(&mode_counter);
 
                         tokio::spawn(async move {
                             let mut buf = Vec::new();
@@ -161,6 +171,83 @@ impl TestServer {
                                         "HTTP/1.1 {status} Status\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
                                     )
                                     .into_bytes()
+                                }
+                                Mode::FailThenOk {
+                                    status,
+                                    times,
+                                    retry_after,
+                                } => {
+                                    let count = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    if count < *times {
+                                        let ra_hdr = if let Some(sec) = retry_after {
+                                            format!("Retry-After: {sec}\r\n")
+                                        } else {
+                                            String::new()
+                                        };
+                                        format!(
+                                            "HTTP/1.1 {status} Status\r\n{ra_hdr}Connection: close\r\nContent-Length: 0\r\n\r\n"
+                                        )
+                                        .into_bytes()
+                                    } else {
+                                        let total = body_ref.len();
+                                        let mut resp = format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                        )
+                                        .into_bytes();
+                                        resp.extend_from_slice(&body_ref);
+                                        resp
+                                    }
+                                }
+                                Mode::ShortBody => {
+                                    let total = body_ref.len();
+                                    let serve_range = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let (start, end) = serve_range;
+                                    let slice_len = end - start + 1;
+                                    let short_len = (slice_len / 2).max(1);
+                                    let mut resp = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    )
+                                    .into_bytes();
+                                    resp.extend_from_slice(&body_ref[start..start + short_len]);
+                                    resp
+                                }
+                                Mode::WrongContentRange => {
+                                    let total = body_ref.len();
+                                    let mut resp = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 9999-9999/{total}\r\nContent-Length: 1\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    )
+                                    .into_bytes();
+                                    resp.push(42);
+                                    resp
+                                }
+                                Mode::DropMidBodyOnce => {
+                                    let count = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    let total = body_ref.len();
+                                    let serve_range = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let (start, end) = serve_range;
+                                    let slice_len = end - start + 1;
+                                    if count == 0 {
+                                        let part_len = (slice_len / 2).max(1);
+                                        let mut resp = format!(
+                                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                        )
+                                        .into_bytes();
+                                        resp.extend_from_slice(&body_ref[start..start + part_len]);
+                                        resp
+                                    } else {
+                                        let mut resp = format!(
+                                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                        )
+                                        .into_bytes();
+                                        resp.extend_from_slice(&body_ref[start..=end]);
+                                        resp
+                                    }
                                 }
                                 Mode::Chunked => {
                                     let mut resp =

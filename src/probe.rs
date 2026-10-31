@@ -1,6 +1,8 @@
 use crate::error::Error;
+use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE,
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED,
+    RANGE, RETRY_AFTER,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,12 +33,46 @@ pub fn parse_content_range_total(value: &str) -> Option<u64> {
 }
 
 pub async fn probe(client: &reqwest::Client, url: &url::Url) -> Result<Probe, Error> {
-    let res = client
-        .get(url.clone())
-        .header(RANGE, "bytes=0-0")
-        .header(ACCEPT_ENCODING, "identity")
-        .send()
-        .await?;
+    let mut attempt = 0u32;
+    let res = loop {
+        let response = match client
+            .get(url.clone())
+            .header(RANGE, "bytes=0-0")
+            .header(ACCEPT_ENCODING, "identity")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                attempt += 1;
+                if attempt >= MAX_SEGMENT_ATTEMPTS {
+                    return Err(Error::Http(e));
+                }
+                tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+                continue;
+            }
+        };
+
+        let status_code = response.status().as_u16();
+        if status_code == 429 || status_code == 503 {
+            attempt += 1;
+            if attempt >= MAX_SEGMENT_ATTEMPTS {
+                return Err(Error::Protocol(format!(
+                    "probe received status {status_code} after {MAX_SEGMENT_ATTEMPTS} attempts"
+                )));
+            }
+            let delay = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after_secs)
+                .unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+
+        break response;
+    };
 
     let status = res.status();
     let status_code = status.as_u16();

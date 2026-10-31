@@ -2,10 +2,21 @@ use crate::engine::Progress;
 use crate::error::Error;
 use crate::probe::Validator;
 use crate::ranges::ByteRange;
+use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
 use crate::writer::PartFile;
-use reqwest::header::{ACCEPT_ENCODING, IF_RANGE, RANGE};
+use reqwest::header::{ACCEPT_ENCODING, CONTENT_RANGE, IF_RANGE, RANGE, RETRY_AFTER};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+fn parse_content_range_bounds(value: &str) -> Option<(u64, u64)> {
+    let s = value.trim();
+    let s = s.strip_prefix("bytes ")?;
+    let (range_part, _total) = s.split_once('/')?;
+    let (start_str, end_str) = range_part.split_once('-')?;
+    let start: u64 = start_str.trim().parse().ok()?;
+    let end: u64 = end_str.trim().parse().ok()?;
+    Some((start, end))
+}
 
 pub async fn fetch_range(
     client: &reqwest::Client,
@@ -19,65 +30,150 @@ pub async fn fetch_range(
         return Ok(());
     }
 
-    let mut req_builder = client
-        .get(url.clone())
-        .header(RANGE, format!("bytes={}-{}", range.start, range.end - 1))
-        .header(ACCEPT_ENCODING, "identity");
+    let mut current_offset = range.start;
+    let mut attempt = 0u32;
 
-    let has_if_range = if let Some(etag) = &validator.etag {
-        req_builder = req_builder.header(IF_RANGE, etag.as_str());
-        true
-    } else if let Some(lm) = &validator.last_modified {
-        req_builder = req_builder.header(IF_RANGE, lm.as_str());
-        true
-    } else {
-        false
-    };
+    while current_offset < range.end {
+        if attempt >= MAX_SEGMENT_ATTEMPTS {
+            return Err(Error::Protocol(format!(
+                "max attempts ({MAX_SEGMENT_ATTEMPTS}) reached for range [{}, {})",
+                range.start, range.end
+            )));
+        }
 
-    let mut res = req_builder.send().await?;
-    let status = res.status();
-    let status_code = status.as_u16();
+        let mut req_builder = client
+            .get(url.clone())
+            .header(RANGE, format!("bytes={}-{}", current_offset, range.end - 1))
+            .header(ACCEPT_ENCODING, "identity");
 
-    if status_code == 200 && has_if_range {
-        return Err(Error::FileChanged);
-    }
+        let has_if_range = if let Some(etag) = &validator.etag {
+            req_builder = req_builder.header(IF_RANGE, etag.as_str());
+            true
+        } else if let Some(lm) = &validator.last_modified {
+            req_builder = req_builder.header(IF_RANGE, lm.as_str());
+            true
+        } else {
+            false
+        };
 
-    if status_code == 403 || status_code == 404 || status_code == 410 {
-        return Err(Error::LinkExpired {
-            status: status_code,
-        });
-    }
+        let res = match req_builder.send().await {
+            Ok(r) => r,
+            Err(_) => {
+                attempt += 1;
+                if attempt >= MAX_SEGMENT_ATTEMPTS {
+                    return Err(Error::Protocol(format!(
+                        "connection failed after {MAX_SEGMENT_ATTEMPTS} attempts"
+                    )));
+                }
+                tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+                continue;
+            }
+        };
 
-    if status_code != 206 {
-        return Err(Error::Protocol(format!(
-            "expected 206 Partial Content, received status {status_code}"
-        )));
-    }
+        let status = res.status();
+        let status_code = status.as_u16();
 
-    let mut offset = range.start;
-    while let Some(chunk) = res.chunk().await? {
-        let chunk_len = chunk.len() as u64;
-        let part_clone = Arc::clone(&part);
-        let curr_offset = offset;
+        // 403, 404, 410 -> LinkExpired at once, no retry
+        if status_code == 403 || status_code == 404 || status_code == 410 {
+            return Err(Error::LinkExpired {
+                status: status_code,
+            });
+        }
 
-        tokio::task::spawn_blocking(move || part_clone.write_at(curr_offset, &chunk))
-            .await
-            .map_err(|e| Error::Protocol(e.to_string()))??;
+        // 200 on request that carried If-Range -> FileChanged at once, no retry
+        if status_code == 200 && has_if_range {
+            return Err(Error::FileChanged);
+        }
 
-        offset += chunk_len;
-        progress.downloaded.fetch_add(chunk_len, Ordering::SeqCst);
-        progress.completed.lock().unwrap().insert(ByteRange {
-            start: curr_offset,
-            end: offset,
-        });
-    }
+        // 429 or 503 -> retry with Retry-After or backoff
+        if status_code == 429 || status_code == 503 {
+            attempt += 1;
+            if attempt >= MAX_SEGMENT_ATTEMPTS {
+                return Err(Error::Protocol(format!(
+                    "server returned status {status_code} after {MAX_SEGMENT_ATTEMPTS} attempts"
+                )));
+            }
+            let delay = res
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(retry_after_secs)
+                .unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
+            tokio::time::sleep(delay).await;
+            continue;
+        }
 
-    if offset != range.end {
-        return Err(Error::Protocol(format!(
-            "range underflow: expected {} bytes, got {}",
-            range.len(),
-            offset - range.start
-        )));
+        if status_code != 206 {
+            attempt += 1;
+            if attempt >= MAX_SEGMENT_ATTEMPTS {
+                return Err(Error::Protocol(format!(
+                    "expected 206 Partial Content, received status {status_code}"
+                )));
+            }
+            tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+            continue;
+        }
+
+        // Validate Content-Range
+        let content_range = res
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok());
+
+        let valid_cr = content_range
+            .and_then(parse_content_range_bounds)
+            .is_some_and(|(start, _)| start == current_offset);
+
+        if !valid_cr {
+            attempt += 1;
+            if attempt >= MAX_SEGMENT_ATTEMPTS {
+                return Err(Error::Protocol("wrong Content-Range".to_string()));
+            }
+            tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+            continue;
+        }
+
+        // Stream body
+        let mut stream = res;
+        let mut stream_failed = false;
+
+        loop {
+            match stream.chunk().await {
+                Ok(Some(chunk)) => {
+                    let chunk_len = chunk.len() as u64;
+                    let part_clone = Arc::clone(&part);
+                    let curr_offset = current_offset;
+
+                    tokio::task::spawn_blocking(move || part_clone.write_at(curr_offset, &chunk))
+                        .await
+                        .map_err(|e| Error::Protocol(e.to_string()))
+                        .and_then(|res| res.map_err(Error::from))?;
+
+                    current_offset += chunk_len;
+                    progress.downloaded.fetch_add(chunk_len, Ordering::SeqCst);
+                    progress.completed.lock().unwrap().insert(ByteRange {
+                        start: curr_offset,
+                        end: current_offset,
+                    });
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    stream_failed = true;
+                    break;
+                }
+            }
+        }
+
+        if stream_failed || current_offset < range.end {
+            attempt += 1;
+            if attempt >= MAX_SEGMENT_ATTEMPTS {
+                return Err(Error::Protocol(format!(
+                    "short body or connection drop reached max attempts ({MAX_SEGMENT_ATTEMPTS})"
+                )));
+            }
+            tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+            continue;
+        }
     }
 
     Ok(())
