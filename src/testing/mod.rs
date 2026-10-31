@@ -59,8 +59,12 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn start(body: Vec<u8>, mode: Mode) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_addr: SocketAddr = listener.local_addr().unwrap();
+        Self::start_at("127.0.0.1:0", body, mode).await.unwrap()
+    }
+
+    pub async fn start_at(bind_addr: &str, body: Vec<u8>, mode: Mode) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(bind_addr).await?;
+        let local_addr: SocketAddr = listener.local_addr()?;
         let url = url::Url::parse(&format!("http://{local_addr}/")).unwrap();
 
         let etag = Arc::new(RwLock::new("\"v1\"".to_string()));
@@ -402,12 +406,12 @@ impl TestServer {
             }
         });
 
-        TestServer {
+        Ok(TestServer {
             url,
             etag,
             requests,
             shutdown_tx: Some(shutdown_tx),
-        }
+        })
     }
 
     pub fn url(&self) -> url::Url {

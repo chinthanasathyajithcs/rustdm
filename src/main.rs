@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 use rustdm::engine::{build_client, download, resume, DownloadRequest, Outcome, Progress};
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(
@@ -65,6 +68,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             let progress = Arc::new(Progress::new());
+            let progress_printer = {
+                let prog = Arc::clone(&progress);
+                tokio::spawn(async move {
+                    let mut last_bytes = 0u64;
+                    let mut last_time = Instant::now();
+                    let mut interval = tokio::time::interval(Duration::from_millis(500));
+
+                    loop {
+                        interval.tick().await;
+                        let downloaded = prog.downloaded.load(Ordering::SeqCst);
+                        let elapsed = last_time.elapsed().as_secs_f64();
+                        let bytes_diff = downloaded.saturating_sub(last_bytes);
+                        let speed_mb = if elapsed > 0.0 {
+                            (bytes_diff as f64 / (1024.0 * 1024.0)) / elapsed
+                        } else {
+                            0.0
+                        };
+
+                        let mb_done = downloaded as f64 / (1024.0 * 1024.0);
+                        eprint!(
+                            "\r[rdm] Downloaded: {:.2} MB | Speed: {:.2} MB/s",
+                            mb_done, speed_mb
+                        );
+                        let _ = std::io::stderr().flush();
+
+                        last_bytes = downloaded;
+                        last_time = Instant::now();
+                    }
+                })
+            };
+
             let req = DownloadRequest {
                 url: parsed_url,
                 template: out,
@@ -74,7 +108,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cancel: Some(cancel_rx),
             };
 
-            match download(&client, req).await? {
+            let result = download(&client, req).await;
+            progress_printer.abort();
+            eprintln!();
+
+            match result? {
                 Outcome::Completed { path, steals } => {
                     eprintln!("Download complete: {} (steals: {steals})", path.display());
                 }

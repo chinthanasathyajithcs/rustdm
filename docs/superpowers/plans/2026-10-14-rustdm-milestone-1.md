@@ -790,24 +790,24 @@ git commit -m "feat: pause on cancel and expired links, add rdm CLI and crash te
 **Interfaces:**
 - Consumes: `testing::TestServer` and `Mode::Throttle { bytes_per_sec: u64 }` (added here, serves a `Normal` file with throttling on every connection).
 
-- [ ] **Step 1: Write the failing check**
+- [x] **Step 1: Write the failing check**
 
 Run: `cargo llvm-cov --features testing --fail-under-lines 80`
 Expected: FAIL if line coverage is below 80%. Write the missing tests for whatever it reports.
 
-- [ ] **Step 2: Run the check**
+- [x] **Step 2: Run the check**
 
 Run: `cargo llvm-cov --features testing --fail-under-lines 80`
 Expected: PASS.
 
-- [ ] **Step 3: Implement** the progress line, the `serve` example (`cargo run --features testing --example serve`, which serves a 64 MiB file at `127.0.0.1:8080`), and the README. The README covers: what rdm is, build (`cargo build --release`), test (`cargo test --features testing`), the demo (serve, then `rdm download http://127.0.0.1:8080/demo.bin`), and the limits of this milestone (no GUI, no speed limit, no expired-link refresh).
+- [x] **Step 3: Implement** the progress line, the `serve` example (`cargo run --features testing --example serve`, which serves a 64 MiB file at `127.0.0.1:8080`), and the README. The README covers: what rdm is, build (`cargo build --release`), test (`cargo test --features testing`), the demo (serve, then `rdm download http://127.0.0.1:8080/demo.bin`), and the limits of this milestone (no GUI, no speed limit, no expired-link refresh).
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `cargo fmt --check && cargo clippy --all-targets --features testing -- -D warnings && cargo test --features testing`
 Expected: all pass, on both CI operating systems.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/main.rs examples/serve.rs README.md .github/workflows/ci.yml src/testing/
