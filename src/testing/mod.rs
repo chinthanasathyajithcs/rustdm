@@ -22,6 +22,7 @@ pub enum Mode {
     IgnoreRange,
     Status(u16),
     Redirect,
+    Chunked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +161,20 @@ impl TestServer {
                                         "HTTP/1.1 {status} Status\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
                                     )
                                     .into_bytes()
+                                }
+                                Mode::Chunked => {
+                                    let mut resp =
+                                        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                                            .to_vec();
+                                    for chunk in body_ref.chunks(1024) {
+                                        resp.extend_from_slice(
+                                            format!("{:X}\r\n", chunk.len()).as_bytes(),
+                                        );
+                                        resp.extend_from_slice(chunk);
+                                        resp.extend_from_slice(b"\r\n");
+                                    }
+                                    resp.extend_from_slice(b"0\r\n\r\n");
+                                    resp
                                 }
                                 Mode::IgnoreRange => {
                                     let total = body_ref.len();

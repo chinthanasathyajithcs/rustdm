@@ -509,7 +509,7 @@ git commit -m "feat: add preallocated part file with offset writes"
 
 This task uses one plain `GET` with no `Range` header, whatever the probe said. Chunks are written sequentially through `Arc<PartFile>` with `spawn_blocking`. On completion, if the total is known and the byte count differs, return `Protocol`. Otherwise `finish` the part file.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn downloads_whole_file_when_range_ignored() { /* IgnoreRange, 1 MiB + 17 bytes, output bytes == source */ }
@@ -518,19 +518,19 @@ This task uses one plain `GET` with no `Range` header, whatever the probe said. 
 #[tokio::test] async fn never_overwrites_existing_file() { /* existing "x.bin" -> output "x (1).bin", old file unchanged */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing --test download`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** `build_client`, `resolve_output`, and `download` as described. Keep the single-connection path in its own function, so Task 9 can add the multi-connection path beside it.
+- [x] **Step 3: Implement** `build_client`, `resolve_output`, and `download` as described. Keep the single-connection path in its own function, so Task 9 can add the multi-connection path beside it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing --test download`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/engine.rs src/lib.rs src/testing/ tests/download.rs
