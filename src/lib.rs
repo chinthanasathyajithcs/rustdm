@@ -2,6 +2,8 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod error;
+pub mod probe;
 pub mod ranges;
 pub mod template;
 #[cfg(feature = "testing")]

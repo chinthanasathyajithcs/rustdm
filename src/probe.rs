@@ -1,0 +1,106 @@
+use crate::error::Error;
+use reqwest::header::{
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED, RANGE,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Validator {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Probe {
+    pub final_url: url::Url,
+    pub total: Option<u64>,
+    pub ranges_supported: bool,
+    pub validator: Validator,
+    pub content_disposition: Option<String>,
+}
+
+pub fn parse_content_range_total(value: &str) -> Option<u64> {
+    let s = value.trim();
+    let (_range_part, total_str) = s.rsplit_once('/')?;
+    let total_str = total_str.trim();
+    if total_str == "*" {
+        None
+    } else {
+        total_str.parse::<u64>().ok()
+    }
+}
+
+pub async fn probe(client: &reqwest::Client, url: &url::Url) -> Result<Probe, Error> {
+    let res = client
+        .get(url.clone())
+        .header(RANGE, "bytes=0-0")
+        .header(ACCEPT_ENCODING, "identity")
+        .send()
+        .await?;
+
+    let status = res.status();
+    let status_code = status.as_u16();
+
+    if status_code == 403 || status_code == 404 || status_code == 410 {
+        return Err(Error::LinkExpired {
+            status: status_code,
+        });
+    }
+
+    let final_url = res.url().clone();
+    let headers = res.headers();
+
+    // Extract strong ETag (must not start with W/ or w/)
+    let etag = headers
+        .get(ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.starts_with("W/") && !s.starts_with("w/"));
+
+    let last_modified = headers
+        .get(LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+
+    let content_disposition = headers
+        .get(CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+
+    let (ranges_supported, total) = match status_code {
+        206 => {
+            let total = headers
+                .get(CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_content_range_total);
+            (true, total)
+        }
+        200 => {
+            let total = headers
+                .get(CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            (false, total)
+        }
+        416 => (false, None),
+        _ if status.is_success() => (false, None),
+        code => {
+            return Err(Error::Protocol(format!(
+                "probe received unexpected status {code}"
+            )))
+        }
+    };
+
+    drop(res);
+
+    Ok(Probe {
+        final_url,
+        total,
+        ranges_supported,
+        validator: Validator {
+            etag,
+            last_modified,
+        },
+        content_disposition,
+    })
+}

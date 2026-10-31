@@ -404,7 +404,7 @@ git commit -m "test: add raw TCP test server with range and If-Range handling"
 
 Behavior by status: `206` means ranges are supported and the total comes from `Content-Range`. `200` means ranges are not supported and the total comes from `Content-Length`. `416` means no total and no ranges. `403`, `404` and `410` return `Error::LinkExpired`. Other errors return `Error::Protocol`. Only a strong ETag (one that does not start with `W/`) is recorded.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn probe_reports_size_and_range_support_on_206() { /* Mode::Normal, 1000 bytes -> total 1000, ranges true */ }
@@ -420,19 +420,19 @@ fn content_range_total_parses_only_numeric_totals() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing --test probe`
 Expected: FAIL, `probe` not defined.
 
-- [ ] **Step 3: Implement** `probe`. Build the request with `Range: bytes=0-0` and `Accept-Encoding: identity`, and do not read the body. `Redirect` mode returns `302` to `/moved/<path>` on the first request and serves normally under `/moved/`.
+- [x] **Step 3: Implement** `probe`. Build the request with `Range: bytes=0-0` and `Accept-Encoding: identity`, and do not read the body. `Redirect` mode returns `302` to `/moved/<path>` on the first request and serves normally under `/moved/`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing --test probe`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/error.rs src/probe.rs src/testing/ src/lib.rs tests/probe.rs Cargo.toml Cargo.lock

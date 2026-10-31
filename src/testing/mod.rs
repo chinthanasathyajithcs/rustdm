@@ -21,6 +21,7 @@ pub enum Mode {
     Normal,
     IgnoreRange,
     Status(u16),
+    Redirect,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +125,7 @@ impl TestServer {
 
                             let log_entry = RequestLog {
                                 method,
-                                path,
+                                path: path.clone(),
                                 range: range_hdr.clone(),
                                 if_range: if_range_hdr.clone(),
                                 accept_encoding: accept_encoding_hdr,
@@ -137,6 +138,23 @@ impl TestServer {
                             let last_modified = "Sun, 06 Nov 1994 08:49:37 GMT";
 
                             let response = match &mode_clone {
+                                Mode::Redirect => {
+                                    if !path.starts_with("/moved/") {
+                                        let redirect_target = format!("/moved{}", if path.starts_with('/') { &path } else { "/" });
+                                        format!(
+                                            "HTTP/1.1 302 Found\r\nLocation: {redirect_target}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                                        )
+                                        .into_bytes()
+                                    } else {
+                                        let total = body_ref.len();
+                                        let mut resp = format!(
+                                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                        )
+                                        .into_bytes();
+                                        resp.extend_from_slice(&body_ref);
+                                        resp
+                                    }
+                                }
                                 Mode::Status(status) => {
                                     format!(
                                         "HTTP/1.1 {status} Status\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
