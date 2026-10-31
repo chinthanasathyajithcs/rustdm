@@ -215,7 +215,7 @@ Rules, applied in order (spec 4.7):
 5. If the part before the first dot is a reserved device name (CON, PRN, AUX, NUL, COM1 to COM9, LPT1 to LPT9, case-insensitive), prefix `_`.
 6. Cap at 255 characters.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -239,19 +239,19 @@ fn sanitize_caps_length_at_255_chars() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test template`
 Expected: FAIL, `sanitize_component` not defined.
 
-- [ ] **Step 3: Implement** `sanitize_component` in the order listed above.
+- [x] **Step 3: Implement** `sanitize_component` in the order listed above.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test template`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/template.rs src/lib.rs
