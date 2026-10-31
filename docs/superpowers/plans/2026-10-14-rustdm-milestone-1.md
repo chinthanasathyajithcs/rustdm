@@ -700,7 +700,7 @@ git commit -m "feat: work stealing for idle connections"
   - `pub async fn resume(client: &reqwest::Client, state_path: &Path, url_override: Option<url::Url>) -> Result<Outcome, Error>`. Loads the state, probes again, and returns `FileChanged` if the total or the validator differs. Downloads the complement of `completed`, then finishes and deletes the state file.
 - Ordering rule (spec 4.5): snapshot `completed`, then `sync` the part file, then `save_atomic`. Only ranges in the snapshot are ever recorded as done.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn state_round_trips_through_json() { /* save_atomic then load == original */ }
@@ -714,19 +714,19 @@ git commit -m "feat: work stealing for idle connections"
 #[tokio::test] async fn resume_errors_when_part_file_missing() { /* state exists, part deleted: Err(Io(_)) */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** `state.rs`. In `engine.rs`, `download` writes the state file right after the part file is created, with `completed` empty. That way a kill at any moment leaves something to resume from. Checkpoints follow the ordering rule above.
+- [x] **Step 3: Implement** `state.rs`. In `engine.rs`, `download` writes the state file right after the part file is created, with `completed` empty. That way a kill at any moment leaves something to resume from. Checkpoints follow the ordering rule above.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/state.rs src/engine.rs tests/resume.rs

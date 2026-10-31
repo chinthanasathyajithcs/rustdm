@@ -1,12 +1,15 @@
 use crate::error::Error;
 use crate::probe::{self, Probe};
 use crate::ranges::{ByteRange, RangeSet};
+use crate::state::{self, part_path, State, STATE_VERSION};
 use crate::template::{self, Tokens};
 use crate::writer::PartFile;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub const DEFAULT_CONNECTIONS: u32 = 8;
 
 pub struct Progress {
     pub downloaded: AtomicU64,
@@ -67,10 +70,6 @@ fn utc_date_str() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-pub fn part_path(output: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.part", output.display()))
-}
-
 fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
     let base_name = template::pick_name(probe.content_disposition.as_deref(), &probe.final_url);
     let host = probe.final_url.host_str().unwrap_or("").to_string();
@@ -100,12 +99,11 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
     }
 }
 
-pub const DEFAULT_CONNECTIONS: u32 = 8;
-
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
     let probe_result = probe::probe(client, &req.url).await?;
     let final_path = resolve_output(&req, &probe_result);
     let part_p = part_path(&final_path);
+    let state_p = state::state_path(&final_path);
 
     let part_file = PartFile::create(&part_p, probe_result.total)?;
     let part_arc = Arc::new(part_file);
@@ -116,116 +114,293 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
         req.connections.clamp(1, 16)
     };
 
-    let mut total_steals = 0u32;
+    let initial_state = State {
+        version: STATE_VERSION,
+        url: req.url.to_string(),
+        final_url: probe_result.final_url.to_string(),
+        total: probe_result.total.unwrap_or(0),
+        validator: probe_result.validator.clone(),
+        completed: vec![],
+        output: final_path.clone(),
+    };
+    state::save_atomic(&state_p, &initial_state)?;
 
-    if probe_result.ranges_supported && probe_result.total.is_some_and(|t| t > 0) {
+    let total_steals = if probe_result.ranges_supported && probe_result.total.is_some_and(|t| t > 0)
+    {
         let total = probe_result.total.unwrap();
         let segments = crate::ranges::initial_segments(total, conns);
-        let now = std::time::Instant::now();
-        let lanes: Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>> =
-            Arc::new(std::sync::RwLock::new(
-                segments
-                    .iter()
-                    .map(|s| crate::scheduler::Lane::new(s.start, s.end, now))
-                    .collect(),
-            ));
-
-        let steals_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let mut set = tokio::task::JoinSet::new();
-
-        for i in 0..segments.len() {
-            let client_clone = client.clone();
-            let url_clone = probe_result.final_url.clone();
-            let validator_clone = probe_result.validator.clone();
-            let part_clone = Arc::clone(&part_arc);
-            let prog_clone = Arc::clone(&req.progress);
-            let lanes_clone = Arc::clone(&lanes);
-            let steals_clone = Arc::clone(&steals_count);
-
-            set.spawn(async move {
-                let initial_lane = {
-                    let guard = lanes_clone.read().unwrap();
-                    guard[i].clone()
-                };
-
-                crate::worker::fetch_lane(
-                    &client_clone,
-                    &url_clone,
-                    &validator_clone,
-                    Arc::new(initial_lane),
-                    Arc::clone(&part_clone),
-                    Arc::clone(&prog_clone),
-                )
-                .await?;
-
-                loop {
-                    let stolen_range = {
-                        let guard = lanes_clone.read().unwrap();
-                        if let Some(victim_idx) =
-                            crate::scheduler::pick_victim(&guard, std::time::Instant::now())
-                        {
-                            crate::scheduler::steal(&guard[victim_idx])
-                        } else {
-                            None
-                        }
-                    };
-
-                    let Some(range) = stolen_range else {
-                        break;
-                    };
-
-                    steals_clone.fetch_add(1, Ordering::SeqCst);
-                    let stolen_lane = crate::scheduler::Lane::new(
-                        range.start,
-                        range.end,
-                        std::time::Instant::now(),
-                    );
-                    {
-                        lanes_clone.write().unwrap().push(stolen_lane.clone());
-                    }
-
-                    crate::worker::fetch_lane(
-                        &client_clone,
-                        &url_clone,
-                        &validator_clone,
-                        Arc::new(stolen_lane),
-                        Arc::clone(&part_clone),
-                        Arc::clone(&prog_clone),
-                    )
-                    .await?;
-                }
-
-                Ok::<(), Error>(())
-            });
-        }
-
-        while let Some(res) = set.join_next().await {
-            match res {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    set.abort_all();
-                    return Err(err);
-                }
-                Err(join_err) => {
-                    set.abort_all();
-                    return Err(Error::Protocol(join_err.to_string()));
-                }
-            }
-        }
-        total_steals = steals_count.load(Ordering::SeqCst);
+        download_ranges(
+            client,
+            &probe_result.final_url,
+            &probe_result.validator,
+            &segments,
+            Arc::clone(&part_arc),
+            Arc::clone(&req.progress),
+            conns,
+            Some(&state_p),
+            Some(&initial_state),
+        )
+        .await?
     } else {
         download_single(client, &probe_result, Arc::clone(&part_arc), &req).await?;
-    }
+        0
+    };
 
     let part_file = Arc::try_unwrap(part_arc)
         .map_err(|_| Error::Protocol("failed to acquire ownership of part file".to_string()))?;
 
     part_file.finish(&final_path)?;
+    let _ = std::fs::remove_file(&state_p);
 
     Ok(Outcome::Completed {
         path: final_path,
         steals: total_steals,
     })
+}
+
+fn validator_matches(expected: &probe::Validator, actual: &probe::Validator) -> bool {
+    if let (Some(e1), Some(e2)) = (&expected.etag, &actual.etag) {
+        return e1 == e2;
+    }
+    if let (Some(lm1), Some(lm2)) = (&expected.last_modified, &actual.last_modified) {
+        return lm1 == lm2;
+    }
+    expected == actual
+}
+
+pub async fn resume(
+    client: &reqwest::Client,
+    state_path: &Path,
+    url_override: Option<url::Url>,
+) -> Result<Outcome, Error> {
+    let state = state::load(state_path)?;
+
+    let part_p = state::part_path(&state.output);
+    if !part_p.exists() {
+        return Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "part file not found",
+        )));
+    }
+
+    let target_url = if let Some(u) = url_override {
+        u
+    } else {
+        url::Url::parse(&state.url).map_err(|e| Error::Protocol(e.to_string()))?
+    };
+
+    let probe_result = probe::probe(client, &target_url).await?;
+
+    if probe_result.total != Some(state.total)
+        || !validator_matches(&state.validator, &probe_result.validator)
+    {
+        return Err(Error::FileChanged);
+    }
+
+    let part_file = PartFile::open(&part_p)?;
+    let part_arc = Arc::new(part_file);
+
+    let mut range_set = RangeSet::new();
+    for r in &state.completed {
+        range_set.insert(*r);
+    }
+    let missing_ranges = range_set.complement(state.total);
+
+    let progress = Arc::new(Progress::new());
+    progress
+        .downloaded
+        .store(range_set.covered(), Ordering::SeqCst);
+    {
+        *progress.completed.lock().unwrap() = range_set;
+    }
+
+    let steals = if !missing_ranges.is_empty() {
+        download_ranges(
+            client,
+            &probe_result.final_url,
+            &probe_result.validator,
+            &missing_ranges,
+            Arc::clone(&part_arc),
+            Arc::clone(&progress),
+            DEFAULT_CONNECTIONS,
+            Some(state_path),
+            Some(&state),
+        )
+        .await?
+    } else {
+        0
+    };
+
+    let part_file = Arc::try_unwrap(part_arc)
+        .map_err(|_| Error::Protocol("failed to acquire ownership of part file".to_string()))?;
+
+    part_file.finish(&state.output)?;
+    let _ = std::fs::remove_file(state_path);
+
+    Ok(Outcome::Completed {
+        path: state.output,
+        steals,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_ranges(
+    client: &reqwest::Client,
+    final_url: &url::Url,
+    validator: &probe::Validator,
+    segments: &[ByteRange],
+    part: Arc<PartFile>,
+    progress: Arc<Progress>,
+    _conns: u32,
+    state_file_path: Option<&Path>,
+    state_template: Option<&State>,
+) -> Result<u32, Error> {
+    let now = Instant::now();
+    let lanes: Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>> =
+        Arc::new(std::sync::RwLock::new(
+            segments
+                .iter()
+                .map(|s| crate::scheduler::Lane::new(s.start, s.end, now))
+                .collect(),
+        ));
+
+    let steals_count = Arc::new(AtomicU64::new(0));
+    let mut set = tokio::task::JoinSet::new();
+
+    // Checkpoint coordinator channel
+    let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
+    let checkpoint_handle = if let (Some(sp), Some(st)) = (state_file_path, state_template) {
+        let sp = sp.to_path_buf();
+        let st = st.clone();
+        let part_clone = Arc::clone(&part);
+        let prog_clone = Arc::clone(&progress);
+
+        Some(tokio::spawn(async move {
+            let mut last_bytes = prog_clone.downloaded.load(Ordering::SeqCst);
+            let mut last_time = Instant::now();
+
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                        let cur_bytes = prog_clone.downloaded.load(Ordering::SeqCst);
+                        let bytes_diff = cur_bytes.saturating_sub(last_bytes);
+                        let time_diff = last_time.elapsed();
+
+                        if state::should_checkpoint(bytes_diff, time_diff) {
+                            let completed_snapshot: Vec<ByteRange> = {
+                                let guard = prog_clone.completed.lock().unwrap();
+                                guard.ranges().to_vec()
+                            };
+                            let _ = part_clone.sync();
+                            let mut s = st.clone();
+                            s.completed = completed_snapshot;
+                            let _ = state::save_atomic(&sp, &s);
+
+                            last_bytes = cur_bytes;
+                            last_time = Instant::now();
+                        }
+                    }
+                    _ = done_rx.changed() => {
+                        break;
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
+
+    for i in 0..segments.len() {
+        let client_clone = client.clone();
+        let url_clone = final_url.clone();
+        let validator_clone = validator.clone();
+        let part_clone = Arc::clone(&part);
+        let prog_clone = Arc::clone(&progress);
+        let lanes_clone = Arc::clone(&lanes);
+        let steals_clone = Arc::clone(&steals_count);
+
+        set.spawn(async move {
+            let initial_lane = {
+                let guard = lanes_clone.read().unwrap();
+                guard[i].clone()
+            };
+
+            crate::worker::fetch_lane(
+                &client_clone,
+                &url_clone,
+                &validator_clone,
+                Arc::new(initial_lane),
+                Arc::clone(&part_clone),
+                Arc::clone(&prog_clone),
+            )
+            .await?;
+
+            loop {
+                let stolen_range = {
+                    let guard = lanes_clone.read().unwrap();
+                    if let Some(victim_idx) = crate::scheduler::pick_victim(&guard, Instant::now())
+                    {
+                        crate::scheduler::steal(&guard[victim_idx])
+                    } else {
+                        None
+                    }
+                };
+
+                let Some(range) = stolen_range else {
+                    break;
+                };
+
+                steals_clone.fetch_add(1, Ordering::SeqCst);
+                let stolen_lane =
+                    crate::scheduler::Lane::new(range.start, range.end, Instant::now());
+                {
+                    lanes_clone.write().unwrap().push(stolen_lane.clone());
+                }
+
+                crate::worker::fetch_lane(
+                    &client_clone,
+                    &url_clone,
+                    &validator_clone,
+                    Arc::new(stolen_lane),
+                    Arc::clone(&part_clone),
+                    Arc::clone(&prog_clone),
+                )
+                .await?;
+            }
+
+            Ok::<(), Error>(())
+        });
+    }
+
+    let mut first_error = None;
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
+                set.abort_all();
+            }
+            Err(join_err) => {
+                if first_error.is_none() {
+                    first_error = Some(Error::Protocol(join_err.to_string()));
+                }
+                set.abort_all();
+            }
+        }
+    }
+
+    let _ = done_tx.send(true);
+    if let Some(h) = checkpoint_handle {
+        let _ = h.await;
+    }
+
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+
+    Ok(steals_count.load(Ordering::SeqCst) as u32)
 }
 
 async fn download_single(
