@@ -52,6 +52,7 @@ async fn resume_completes_partial_download() {
             assert!(!part_p.exists());
             assert!(!state_p.exists());
         }
+        Outcome::Paused { .. } => panic!("expected Completed on resume"),
     }
 
     let range_requests: Vec<_> = srv
