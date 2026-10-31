@@ -1,6 +1,6 @@
 # rustdm milestone 1: segmented download engine
 
-Status: draft for review. Date: 2026-10-13. Updated 2026-10-14 with IDM wire findings (section 10).
+Status: implemented and verified (2026-10-31), PR #4. Date: 2026-10-13. Updated 2026-10-14 with IDM wire findings (section 10).
 
 ## 1. Intent
 
