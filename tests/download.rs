@@ -405,3 +405,35 @@ async fn resumes_from_last_written_byte_after_drop() {
     assert!(start_byte > 0);
     assert_eq!(fs::read(&part_path).unwrap(), body);
 }
+
+#[tokio::test]
+async fn stealing_with_slow_low_half_is_byte_identical() {
+    let size = 8 * 1024 * 1024;
+    let body = pattern_bytes(size);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::SlowLowHalf {
+            bytes_per_sec: 1024 * 1024,
+        },
+    )
+    .await;
+    let dir = tempdir().unwrap();
+
+    let client = build_client();
+    let progress = Arc::new(Progress::new());
+    let req = DownloadRequest {
+        url: srv.url().join("steal.bin").unwrap(),
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 2,
+        progress: Arc::clone(&progress),
+    };
+
+    let outcome = download(&client, req).await.unwrap();
+    match outcome {
+        Outcome::Completed { path, steals } => {
+            assert!(steals >= 1, "expected at least 1 steal, got {steals}");
+            assert_eq!(fs::read(path).unwrap(), body);
+        }
+    }
+}

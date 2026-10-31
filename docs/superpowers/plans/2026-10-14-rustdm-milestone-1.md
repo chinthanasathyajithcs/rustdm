@@ -651,7 +651,7 @@ git commit -m "feat: retry segments with backoff and honor Retry-After"
   - `pub fn steal(lane: &Lane) -> Option<ByteRange>`. Reads `end` and `cursor`. If `end - cursor >= 2 * MIN_SEGMENT`, it sets `end` to the midpoint and returns `[midpoint, old_end)`. A compare-and-swap loop on `end` makes concurrent thieves safe.
   - `Outcome::Completed.steals` counts the successful steals.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn pick_victim_chooses_longest_eta() { /* two lanes, equal speed, larger remaining wins */ }
@@ -661,19 +661,19 @@ git commit -m "feat: retry segments with backoff and honor Retry-After"
 #[tokio::test] async fn stealing_with_slow_low_half_is_byte_identical() { /* SlowLowHalf, 8 MiB, 2 connections: bytes == source, steals >= 1 */ } // spec 6
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** `scheduler.rs`. When a worker finishes, it calls `pick_victim` and then `steal`, and registers the new lane. The worker's chunk loop reads `end` before each write and clamps the chunk to it.
+- [x] **Step 3: Implement** `scheduler.rs`. When a worker finishes, it calls `pick_victim` and then `steal`, and registers the new lane. The worker's chunk loop reads `end` before each write and clamps the chunk to it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scheduler.rs src/worker.rs src/engine.rs src/testing/ tests/download.rs

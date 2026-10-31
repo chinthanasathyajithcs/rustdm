@@ -31,6 +31,9 @@ pub enum Mode {
     ShortBody,
     WrongContentRange,
     DropMidBodyOnce,
+    SlowLowHalf {
+        bytes_per_sec: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -248,6 +251,35 @@ impl TestServer {
                                         resp.extend_from_slice(&body_ref[start..=end]);
                                         resp
                                     }
+                                }
+                                Mode::SlowLowHalf { bytes_per_sec } => {
+                                    let total = body_ref.len();
+                                    let serve_range = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let (start, end) = serve_range;
+                                    let slice_len = end - start + 1;
+                                    let header = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    );
+                                    let _ = socket.write_all(header.as_bytes()).await;
+
+                                    let slice = &body_ref[start..=end];
+                                    if (start as u64) < (total as u64) / 2 {
+                                        let chunk_size = (*bytes_per_sec as usize / 10).max(512).min(slice.len());
+                                        let delay_ms = (chunk_size as u64 * 1000) / bytes_per_sec.max(&1);
+                                        for chunk in slice.chunks(chunk_size) {
+                                            if socket.write_all(chunk).await.is_err() {
+                                                break;
+                                            }
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                                        }
+                                    } else {
+                                        let _ = socket.write_all(slice).await;
+                                    }
+                                    let _ = socket.shutdown().await;
+                                    return;
                                 }
                                 Mode::Chunked => {
                                     let mut resp =

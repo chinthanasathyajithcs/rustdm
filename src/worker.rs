@@ -3,6 +3,7 @@ use crate::error::Error;
 use crate::probe::Validator;
 use crate::ranges::ByteRange;
 use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
+use crate::scheduler::Lane;
 use crate::writer::PartFile;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_RANGE, IF_RANGE, RANGE, RETRY_AFTER};
 use std::sync::atomic::Ordering;
@@ -26,24 +27,39 @@ pub async fn fetch_range(
     part: Arc<PartFile>,
     progress: Arc<Progress>,
 ) -> Result<(), Error> {
-    if range.is_empty() {
-        return Ok(());
-    }
+    let lane = Arc::new(Lane::new(range.start, range.end, std::time::Instant::now()));
+    fetch_lane(client, url, validator, lane, part, progress).await
+}
 
-    let mut current_offset = range.start;
+pub async fn fetch_lane(
+    client: &reqwest::Client,
+    url: &url::Url,
+    validator: &Validator,
+    lane: Arc<Lane>,
+    part: Arc<PartFile>,
+    progress: Arc<Progress>,
+) -> Result<(), Error> {
+    let mut current_offset = lane.cursor.load(Ordering::SeqCst);
     let mut attempt = 0u32;
 
-    while current_offset < range.end {
+    while current_offset < lane.end.load(Ordering::SeqCst) {
+        let current_end = lane.end.load(Ordering::SeqCst);
+        if current_offset >= current_end {
+            break;
+        }
+
         if attempt >= MAX_SEGMENT_ATTEMPTS {
             return Err(Error::Protocol(format!(
-                "max attempts ({MAX_SEGMENT_ATTEMPTS}) reached for range [{}, {})",
-                range.start, range.end
+                "max attempts ({MAX_SEGMENT_ATTEMPTS}) reached for range starting at {current_offset}"
             )));
         }
 
         let mut req_builder = client
             .get(url.clone())
-            .header(RANGE, format!("bytes={}-{}", current_offset, range.end - 1))
+            .header(
+                RANGE,
+                format!("bytes={}-{}", current_offset, current_end - 1),
+            )
             .header(ACCEPT_ENCODING, "identity");
 
         let has_if_range = if let Some(etag) = &validator.etag {
@@ -140,21 +156,40 @@ pub async fn fetch_range(
         loop {
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
-                    let chunk_len = chunk.len() as u64;
+                    let end_limit = lane.end.load(Ordering::SeqCst);
+                    if current_offset >= end_limit {
+                        break;
+                    }
+
+                    let allowed = (end_limit - current_offset) as usize;
+                    let to_write_len = chunk.len().min(allowed);
+                    let to_write = chunk.slice(..to_write_len);
+
                     let part_clone = Arc::clone(&part);
                     let curr_offset = current_offset;
 
-                    tokio::task::spawn_blocking(move || part_clone.write_at(curr_offset, &chunk))
-                        .await
-                        .map_err(|e| Error::Protocol(e.to_string()))
-                        .and_then(|res| res.map_err(Error::from))?;
+                    tokio::task::spawn_blocking(move || {
+                        part_clone.write_at(curr_offset, &to_write)
+                    })
+                    .await
+                    .map_err(|e| Error::Protocol(e.to_string()))
+                    .and_then(|res| res.map_err(Error::from))?;
 
-                    current_offset += chunk_len;
-                    progress.downloaded.fetch_add(chunk_len, Ordering::SeqCst);
+                    current_offset += to_write_len as u64;
+                    lane.cursor.store(current_offset, Ordering::SeqCst);
+                    lane.bytes_done
+                        .fetch_add(to_write_len as u64, Ordering::SeqCst);
+                    progress
+                        .downloaded
+                        .fetch_add(to_write_len as u64, Ordering::SeqCst);
                     progress.completed.lock().unwrap().insert(ByteRange {
                         start: curr_offset,
                         end: current_offset,
                     });
+
+                    if current_offset >= end_limit {
+                        break;
+                    }
                 }
                 Ok(None) => break,
                 Err(_) => {
@@ -164,7 +199,8 @@ pub async fn fetch_range(
             }
         }
 
-        if stream_failed || current_offset < range.end {
+        let target_end = lane.end.load(Ordering::SeqCst);
+        if stream_failed && current_offset < target_end {
             attempt += 1;
             if attempt >= MAX_SEGMENT_ATTEMPTS {
                 return Err(Error::Protocol(format!(

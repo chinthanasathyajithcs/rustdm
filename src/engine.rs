@@ -116,28 +116,86 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
         req.connections.clamp(1, 16)
     };
 
+    let mut total_steals = 0u32;
+
     if probe_result.ranges_supported && probe_result.total.is_some_and(|t| t > 0) {
         let total = probe_result.total.unwrap();
         let segments = crate::ranges::initial_segments(total, conns);
+        let now = std::time::Instant::now();
+        let lanes: Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>> =
+            Arc::new(std::sync::RwLock::new(
+                segments
+                    .iter()
+                    .map(|s| crate::scheduler::Lane::new(s.start, s.end, now))
+                    .collect(),
+            ));
+
+        let steals_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let mut set = tokio::task::JoinSet::new();
 
-        for seg in segments {
+        for i in 0..segments.len() {
             let client_clone = client.clone();
             let url_clone = probe_result.final_url.clone();
             let validator_clone = probe_result.validator.clone();
             let part_clone = Arc::clone(&part_arc);
             let prog_clone = Arc::clone(&req.progress);
+            let lanes_clone = Arc::clone(&lanes);
+            let steals_clone = Arc::clone(&steals_count);
 
             set.spawn(async move {
-                crate::worker::fetch_range(
+                let initial_lane = {
+                    let guard = lanes_clone.read().unwrap();
+                    guard[i].clone()
+                };
+
+                crate::worker::fetch_lane(
                     &client_clone,
                     &url_clone,
                     &validator_clone,
-                    seg,
-                    part_clone,
-                    prog_clone,
+                    Arc::new(initial_lane),
+                    Arc::clone(&part_clone),
+                    Arc::clone(&prog_clone),
                 )
-                .await
+                .await?;
+
+                loop {
+                    let stolen_range = {
+                        let guard = lanes_clone.read().unwrap();
+                        if let Some(victim_idx) =
+                            crate::scheduler::pick_victim(&guard, std::time::Instant::now())
+                        {
+                            crate::scheduler::steal(&guard[victim_idx])
+                        } else {
+                            None
+                        }
+                    };
+
+                    let Some(range) = stolen_range else {
+                        break;
+                    };
+
+                    steals_clone.fetch_add(1, Ordering::SeqCst);
+                    let stolen_lane = crate::scheduler::Lane::new(
+                        range.start,
+                        range.end,
+                        std::time::Instant::now(),
+                    );
+                    {
+                        lanes_clone.write().unwrap().push(stolen_lane.clone());
+                    }
+
+                    crate::worker::fetch_lane(
+                        &client_clone,
+                        &url_clone,
+                        &validator_clone,
+                        Arc::new(stolen_lane),
+                        Arc::clone(&part_clone),
+                        Arc::clone(&prog_clone),
+                    )
+                    .await?;
+                }
+
+                Ok::<(), Error>(())
             });
         }
 
@@ -154,6 +212,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
                 }
             }
         }
+        total_steals = steals_count.load(Ordering::SeqCst);
     } else {
         download_single(client, &probe_result, Arc::clone(&part_arc), &req).await?;
     }
@@ -165,7 +224,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
 
     Ok(Outcome::Completed {
         path: final_path,
-        steals: 0,
+        steals: total_steals,
     })
 }
 
