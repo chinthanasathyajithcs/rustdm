@@ -15,5 +15,7 @@ path = "src/main.rs"
 testing = []
 
 [dependencies]
+percent-encoding = "2.3"
+url = "2.5"
 
 [dev-dependencies]

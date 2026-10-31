@@ -276,7 +276,7 @@ git commit -m "feat: sanitize download file name components"
   - `pub fn is_inside(base: &str, candidate: &str) -> bool`. True only if `candidate` starts with `base` followed by `\` or `/`, and has no `..` segment.
   - `pub fn collision_name(file_name: &str, n: u32) -> String`, for example `file (1).iso`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -314,19 +314,19 @@ fn collision_names_use_numbered_suffix() {
 
 `tokens(downloads, name)` is a small test helper that fills `host`, `date` and `stem`/`ext` with fixed values.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test template`
 Expected: FAIL, functions not defined.
 
-- [ ] **Step 3: Implement** the functions above. Add the `url` and `percent-encoding` dependencies (approved in this plan) to `Cargo.toml`. `pick_name` parses `filename*` as `charset'lang'value` and percent-decodes the value.
+- [x] **Step 3: Implement** the functions above. Add the `url` and `percent-encoding` dependencies (approved in this plan) to `Cargo.toml`. `pick_name` parses `filename*` as `charset'lang'value` and percent-decodes the value.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test template`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/template.rs Cargo.toml
