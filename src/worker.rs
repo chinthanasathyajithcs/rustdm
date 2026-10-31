@@ -28,7 +28,7 @@ pub async fn fetch_range(
     progress: Arc<Progress>,
 ) -> Result<(), Error> {
     let lane = Arc::new(Lane::new(range.start, range.end, std::time::Instant::now()));
-    fetch_lane(client, url, validator, lane, part, progress).await
+    fetch_lane(client, url, validator, lane, part, progress, None).await
 }
 
 pub async fn fetch_lane(
@@ -38,11 +38,18 @@ pub async fn fetch_lane(
     lane: Arc<Lane>,
     part: Arc<PartFile>,
     progress: Arc<Progress>,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<(), Error> {
     let mut current_offset = lane.cursor.load(Ordering::SeqCst);
     let mut attempt = 0u32;
 
     while current_offset < lane.end.load(Ordering::SeqCst) {
+        if let Some(ref rx) = cancel {
+            if *rx.borrow() {
+                return Err(Error::Cancelled);
+            }
+        }
+
         let current_end = lane.end.load(Ordering::SeqCst);
         if current_offset >= current_end {
             break;
@@ -154,6 +161,12 @@ pub async fn fetch_lane(
         let mut stream_failed = false;
 
         loop {
+            if let Some(ref rx) = cancel {
+                if *rx.borrow() {
+                    return Err(Error::Cancelled);
+                }
+            }
+
             match stream.chunk().await {
                 Ok(Some(chunk)) => {
                     let end_limit = lane.end.load(Ordering::SeqCst);

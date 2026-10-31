@@ -37,11 +37,19 @@ pub struct DownloadRequest {
     pub downloads_dir: PathBuf,
     pub connections: u32,
     pub progress: Arc<Progress>,
+    pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PauseReason {
+    Cancelled,
+    LinkExpired { status: u16 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Completed { path: PathBuf, steals: u32 },
+    Paused { reason: PauseReason, state: PathBuf },
 }
 
 pub fn build_client() -> reqwest::Client {
@@ -125,8 +133,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
     };
     state::save_atomic(&state_p, &initial_state)?;
 
-    let total_steals = if probe_result.ranges_supported && probe_result.total.is_some_and(|t| t > 0)
-    {
+    let result = if probe_result.ranges_supported && probe_result.total.is_some_and(|t| t > 0) {
         let total = probe_result.total.unwrap();
         let segments = crate::ranges::initial_segments(total, conns);
         download_ranges(
@@ -139,23 +146,45 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
             conns,
             Some(&state_p),
             Some(&initial_state),
+            req.cancel.clone(),
         )
-        .await?
+        .await
     } else {
-        download_single(client, &probe_result, Arc::clone(&part_arc), &req).await?;
-        0
+        download_single(
+            client,
+            &probe_result,
+            Arc::clone(&part_arc),
+            &req,
+            Some(&state_p),
+            Some(&initial_state),
+        )
+        .await
+        .map(|_| 0)
     };
 
-    let part_file = Arc::try_unwrap(part_arc)
-        .map_err(|_| Error::Protocol("failed to acquire ownership of part file".to_string()))?;
+    match result {
+        Ok(steals) => {
+            let part_file = Arc::try_unwrap(part_arc).map_err(|_| {
+                Error::Protocol("failed to acquire ownership of part file".to_string())
+            })?;
+            part_file.finish(&final_path)?;
+            let _ = std::fs::remove_file(&state_p);
 
-    part_file.finish(&final_path)?;
-    let _ = std::fs::remove_file(&state_p);
-
-    Ok(Outcome::Completed {
-        path: final_path,
-        steals: total_steals,
-    })
+            Ok(Outcome::Completed {
+                path: final_path,
+                steals,
+            })
+        }
+        Err(Error::Cancelled) => Ok(Outcome::Paused {
+            reason: PauseReason::Cancelled,
+            state: state_p,
+        }),
+        Err(Error::LinkExpired { status }) => Ok(Outcome::Paused {
+            reason: PauseReason::LinkExpired { status },
+            state: state_p,
+        }),
+        Err(err) => Err(err),
+    }
 }
 
 fn validator_matches(expected: &probe::Validator, actual: &probe::Validator) -> bool {
@@ -214,7 +243,7 @@ pub async fn resume(
         *progress.completed.lock().unwrap() = range_set;
     }
 
-    let steals = if !missing_ranges.is_empty() {
+    let result = if !missing_ranges.is_empty() {
         download_ranges(
             client,
             &probe_result.final_url,
@@ -225,22 +254,36 @@ pub async fn resume(
             DEFAULT_CONNECTIONS,
             Some(state_path),
             Some(&state),
+            None,
         )
-        .await?
+        .await
     } else {
-        0
+        Ok(0)
     };
 
-    let part_file = Arc::try_unwrap(part_arc)
-        .map_err(|_| Error::Protocol("failed to acquire ownership of part file".to_string()))?;
+    match result {
+        Ok(steals) => {
+            let part_file = Arc::try_unwrap(part_arc).map_err(|_| {
+                Error::Protocol("failed to acquire ownership of part file".to_string())
+            })?;
+            part_file.finish(&state.output)?;
+            let _ = std::fs::remove_file(state_path);
 
-    part_file.finish(&state.output)?;
-    let _ = std::fs::remove_file(state_path);
-
-    Ok(Outcome::Completed {
-        path: state.output,
-        steals,
-    })
+            Ok(Outcome::Completed {
+                path: state.output,
+                steals,
+            })
+        }
+        Err(Error::Cancelled) => Ok(Outcome::Paused {
+            reason: PauseReason::Cancelled,
+            state: state_path.to_path_buf(),
+        }),
+        Err(Error::LinkExpired { status }) => Ok(Outcome::Paused {
+            reason: PauseReason::LinkExpired { status },
+            state: state_path.to_path_buf(),
+        }),
+        Err(err) => Err(err),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -254,6 +297,7 @@ async fn download_ranges(
     _conns: u32,
     state_file_path: Option<&Path>,
     state_template: Option<&State>,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<u32, Error> {
     let now = Instant::now();
     let lanes: Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>> =
@@ -267,7 +311,6 @@ async fn download_ranges(
     let steals_count = Arc::new(AtomicU64::new(0));
     let mut set = tokio::task::JoinSet::new();
 
-    // Checkpoint coordinator channel
     let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
     let checkpoint_handle = if let (Some(sp), Some(st)) = (state_file_path, state_template) {
         let sp = sp.to_path_buf();
@@ -318,6 +361,7 @@ async fn download_ranges(
         let prog_clone = Arc::clone(&progress);
         let lanes_clone = Arc::clone(&lanes);
         let steals_clone = Arc::clone(&steals_count);
+        let cancel_clone = cancel.clone();
 
         set.spawn(async move {
             let initial_lane = {
@@ -332,6 +376,7 @@ async fn download_ranges(
                 Arc::new(initial_lane),
                 Arc::clone(&part_clone),
                 Arc::clone(&prog_clone),
+                cancel_clone.clone(),
             )
             .await?;
 
@@ -364,6 +409,7 @@ async fn download_ranges(
                     Arc::new(stolen_lane),
                     Arc::clone(&part_clone),
                     Arc::clone(&prog_clone),
+                    cancel_clone.clone(),
                 )
                 .await?;
             }
@@ -396,7 +442,18 @@ async fn download_ranges(
         let _ = h.await;
     }
 
+    // If an error occurred (like Cancelled or LinkExpired), save state now
     if let Some(err) = first_error {
+        if let (Some(sp), Some(st)) = (state_file_path, state_template) {
+            let completed_snapshot: Vec<ByteRange> = {
+                let guard = progress.completed.lock().unwrap();
+                guard.ranges().to_vec()
+            };
+            let _ = part.sync();
+            let mut s = st.clone();
+            s.completed = completed_snapshot;
+            let _ = state::save_atomic(sp, &s);
+        }
         return Err(err);
     }
 
@@ -408,6 +465,8 @@ async fn download_single(
     probe: &Probe,
     part: Arc<PartFile>,
     req: &DownloadRequest,
+    state_file_path: Option<&Path>,
+    state_template: Option<&State>,
 ) -> Result<(), Error> {
     let mut res = client
         .get(probe.final_url.clone())
@@ -418,6 +477,10 @@ async fn download_single(
     if !res.status().is_success() {
         let status = res.status().as_u16();
         if status == 403 || status == 404 || status == 410 {
+            if let (Some(sp), Some(st)) = (state_file_path, state_template) {
+                let _ = part.sync();
+                let _ = state::save_atomic(sp, st);
+            }
             return Err(Error::LinkExpired { status });
         }
         return Err(Error::Protocol(format!(
@@ -428,6 +491,22 @@ async fn download_single(
 
     let mut offset = 0u64;
     while let Some(chunk) = res.chunk().await? {
+        if let Some(ref rx) = req.cancel {
+            if *rx.borrow() {
+                if let (Some(sp), Some(st)) = (state_file_path, state_template) {
+                    let completed_snapshot: Vec<ByteRange> = {
+                        let guard = req.progress.completed.lock().unwrap();
+                        guard.ranges().to_vec()
+                    };
+                    let _ = part.sync();
+                    let mut s = st.clone();
+                    s.completed = completed_snapshot;
+                    let _ = state::save_atomic(sp, &s);
+                }
+                return Err(Error::Cancelled);
+            }
+        }
+
         let chunk_len = chunk.len() as u64;
         let part_clone = Arc::clone(&part);
         let curr_offset = offset;

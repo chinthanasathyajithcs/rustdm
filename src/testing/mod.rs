@@ -34,6 +34,10 @@ pub enum Mode {
     SlowLowHalf {
         bytes_per_sec: u64,
     },
+    ExpireAfter(u32),
+    Throttle {
+        bytes_per_sec: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,6 +307,59 @@ impl TestServer {
                                     .into_bytes();
                                     resp.extend_from_slice(&body_ref);
                                     resp
+                                }
+                                Mode::ExpireAfter(limit) => {
+                                    let count = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                    if count >= *limit {
+                                        b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_vec()
+                                    } else {
+                                        let total = body_ref.len();
+                                        let mut serve_range = None;
+                                        if let Some(r) = range_hdr {
+                                            serve_range = parse_range(&r, total);
+                                        }
+                                        if let Some((start, end)) = serve_range {
+                                            let slice_len = end - start + 1;
+                                            let mut resp = format!(
+                                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                            )
+                                            .into_bytes();
+                                            resp.extend_from_slice(&body_ref[start..=end]);
+                                            resp
+                                        } else {
+                                            let mut resp = format!(
+                                                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                            )
+                                            .into_bytes();
+                                            resp.extend_from_slice(&body_ref);
+                                            resp
+                                        }
+                                    }
+                                }
+                                Mode::Throttle { bytes_per_sec } => {
+                                    let total = body_ref.len();
+                                    let serve_range = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let (start, end) = serve_range;
+                                    let slice_len = end - start + 1;
+                                    let header = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    );
+                                    let _ = socket.write_all(header.as_bytes()).await;
+
+                                    let slice = &body_ref[start..=end];
+                                    let chunk_size = (*bytes_per_sec as usize / 10).max(512).min(slice.len());
+                                    let delay_ms = (chunk_size as u64 * 1000) / bytes_per_sec.max(&1);
+                                    for chunk in slice.chunks(chunk_size) {
+                                        if socket.write_all(chunk).await.is_err() {
+                                            break;
+                                        }
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                                    }
+                                    let _ = socket.shutdown().await;
+                                    return;
                                 }
                                 Mode::Normal => {
                                     let total = body_ref.len();

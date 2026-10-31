@@ -2,6 +2,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("download cancelled")]
+    Cancelled,
     #[error("link expired or removed (status {status})")]
     LinkExpired { status: u16 },
     #[error("server file changed between sessions")]

@@ -20,6 +20,7 @@ async fn downloads_whole_file_when_range_ignored() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 1,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -28,6 +29,7 @@ async fn downloads_whole_file_when_range_ignored() {
             assert_eq!(steals, 0);
             assert_eq!(fs::read(path).unwrap(), body);
         }
+        Outcome::Paused { .. } => panic!("expected completed outcome"),
     }
 }
 
@@ -45,6 +47,7 @@ async fn downloads_unknown_length_stream() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 1,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -52,6 +55,7 @@ async fn downloads_unknown_length_stream() {
         Outcome::Completed { path, .. } => {
             assert_eq!(fs::read(path).unwrap(), body);
         }
+        Outcome::Paused { .. } => panic!("expected completed outcome"),
     }
 }
 
@@ -69,6 +73,7 @@ async fn progress_reaches_total() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 1,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let _ = download(&client, req).await.unwrap();
@@ -92,6 +97,7 @@ async fn never_overwrites_existing_file() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 1,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -101,6 +107,7 @@ async fn never_overwrites_existing_file() {
             assert_eq!(fs::read(path).unwrap(), body);
             assert_eq!(fs::read(&existing_path).unwrap(), b"original content");
         }
+        Outcome::Paused { .. } => panic!("expected completed outcome"),
     }
 }
 
@@ -120,6 +127,7 @@ async fn multi_connection_download_matches_source() {
             downloads_dir: dir.path().to_path_buf(),
             connections: conns,
             progress: Arc::clone(&progress),
+            cancel: None,
         };
 
         let outcome = download(&client, req).await.unwrap();
@@ -127,6 +135,7 @@ async fn multi_connection_download_matches_source() {
             Outcome::Completed { path, .. } => {
                 assert_eq!(fs::read(path).unwrap(), body);
             }
+            Outcome::Paused { .. } => panic!("expected completed outcome"),
         }
     }
 }
@@ -146,6 +155,7 @@ async fn small_file_uses_one_range_request() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 8,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let _ = download(&client, req).await.unwrap();
@@ -172,6 +182,7 @@ async fn every_range_request_sends_if_range_and_identity() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 4,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let _ = download(&client, req).await.unwrap();
@@ -251,6 +262,7 @@ async fn honors_retry_after_on_503() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 1,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -258,6 +270,7 @@ async fn honors_retry_after_on_503() {
         Outcome::Completed { path, .. } => {
             assert_eq!(fs::read(path).unwrap(), body);
         }
+        Outcome::Paused { .. } => panic!("expected completed outcome"),
     }
 }
 
@@ -427,6 +440,7 @@ async fn stealing_with_slow_low_half_is_byte_identical() {
         downloads_dir: dir.path().to_path_buf(),
         connections: 2,
         progress: Arc::clone(&progress),
+        cancel: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -435,5 +449,91 @@ async fn stealing_with_slow_low_half_is_byte_identical() {
             assert!(steals >= 1, "expected at least 1 steal, got {steals}");
             assert_eq!(fs::read(path).unwrap(), body);
         }
+        Outcome::Paused { .. } => panic!("expected completed outcome"),
+    }
+}
+
+#[tokio::test]
+async fn cancel_pauses_and_state_resumes() {
+    let size = 8 * 1024 * 1024;
+    let body = pattern_bytes(size);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 2 * 1024 * 1024,
+        },
+    )
+    .await;
+    let dir = tempdir().unwrap();
+
+    let client = build_client();
+    let progress = Arc::new(Progress::new());
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+    let req = DownloadRequest {
+        url: srv.url().join("cancel.bin").unwrap(),
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 4,
+        progress: Arc::clone(&progress),
+        cancel: Some(cancel_rx),
+    };
+
+    let download_handle = tokio::spawn(async move { download(&client, req).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    cancel_tx.send(true).unwrap();
+
+    let outcome = download_handle.await.unwrap().unwrap();
+    let state_path = match outcome {
+        Outcome::Paused { reason, state } => {
+            assert_eq!(reason, rustdm::engine::PauseReason::Cancelled);
+            assert!(state.exists());
+            state
+        }
+        Outcome::Completed { .. } => panic!("expected Paused, got Completed"),
+    };
+
+    let resume_client = build_client();
+    let resume_outcome = rustdm::engine::resume(&resume_client, &state_path, None)
+        .await
+        .unwrap();
+    match resume_outcome {
+        Outcome::Completed { path, .. } => {
+            assert_eq!(std::fs::read(path).unwrap(), body);
+        }
+        Outcome::Paused { .. } => panic!("expected Completed on resume"),
+    }
+}
+
+#[tokio::test]
+async fn link_expired_pauses_with_state_saved() {
+    let size = 8 * 1024 * 1024;
+    let body = pattern_bytes(size);
+    let srv = TestServer::start(body.clone(), Mode::ExpireAfter(3)).await;
+    let dir = tempdir().unwrap();
+
+    let client = build_client();
+    let progress = Arc::new(Progress::new());
+
+    let req = DownloadRequest {
+        url: srv.url().join("expire.bin").unwrap(),
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 4,
+        progress: Arc::clone(&progress),
+        cancel: None,
+    };
+
+    let outcome = download(&client, req).await.unwrap();
+    match outcome {
+        Outcome::Paused { reason, state } => {
+            assert_eq!(
+                reason,
+                rustdm::engine::PauseReason::LinkExpired { status: 403 }
+            );
+            assert!(state.exists());
+        }
+        Outcome::Completed { .. } => panic!("expected Paused, got Completed"),
     }
 }

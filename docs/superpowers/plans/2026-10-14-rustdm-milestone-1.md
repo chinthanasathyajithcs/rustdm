@@ -752,7 +752,7 @@ git commit -m "feat: save resumable state and resume downloads"
 - On cancel or `LinkExpired`: stop the workers, snapshot `completed`, `sync`, `save_atomic`, and return `Paused`.
 - The crash test runs the binary through `env!("CARGO_BIN_EXE_rdm")`. Each run starts a server with `Mode::Throttle`, starts `download`, waits a random 300 to 1500 ms (`fastrand`), kills the process with `Child::kill`, runs `resume`, and compares bytes. Run count is `RDM_CRASH_RUNS`, default 5.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn cancel_pauses_and_state_resumes() { /* cancel after 300 ms: Paused{Cancelled}; state exists; resume == source */ }
@@ -760,19 +760,19 @@ git commit -m "feat: save resumable state and resume downloads"
 #[test] fn crash_then_resume_is_byte_identical() { /* tests/crash.rs: RDM_CRASH_RUNS runs of kill-and-resume */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the cancel path and the expiry path. Write the state file after the part file is created, as in Task 12. Then add the clap CLI in `main.rs`. Call `tracing_subscriber` once in `main`, with `RUST_LOG` respected. Default output is `%USERPROFILE%\Downloads` (or `$HOME/Downloads` on WSL), with `{date}` filled from `SystemTime` in UTC.
+- [x] **Step 3: Implement** the cancel path and the expiry path. Write the state file after the part file is created, as in Task 12. Then add the clap CLI in `main.rs`. Call `tracing_subscriber` once in `main`, with `RUST_LOG` respected. Default output is `%USERPROFILE%\Downloads` (or `$HOME/Downloads` on WSL), with `{date}` filled from `SystemTime` in UTC.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS. Also run `RDM_CRASH_RUNS=20 cargo test --features testing --test crash` once, locally, to check for flakes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/engine.rs src/main.rs src/testing/ tests/download.rs tests/crash.rs
