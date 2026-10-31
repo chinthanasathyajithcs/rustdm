@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 pub const MIN_SEGMENT: u64 = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteRange {
     pub start: u64,
     pub end: u64,

@@ -215,7 +215,7 @@ Rules, applied in order (spec 4.7):
 5. If the part before the first dot is a reserved device name (CON, PRN, AUX, NUL, COM1 to COM9, LPT1 to LPT9, case-insensitive), prefix `_`.
 6. Cap at 255 characters.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -239,19 +239,19 @@ fn sanitize_caps_length_at_255_chars() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test template`
 Expected: FAIL, `sanitize_component` not defined.
 
-- [ ] **Step 3: Implement** `sanitize_component` in the order listed above.
+- [x] **Step 3: Implement** `sanitize_component` in the order listed above.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test template`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/template.rs src/lib.rs
@@ -276,7 +276,7 @@ git commit -m "feat: sanitize download file name components"
   - `pub fn is_inside(base: &str, candidate: &str) -> bool`. True only if `candidate` starts with `base` followed by `\` or `/`, and has no `..` segment.
   - `pub fn collision_name(file_name: &str, n: u32) -> String`, for example `file (1).iso`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -314,19 +314,19 @@ fn collision_names_use_numbered_suffix() {
 
 `tokens(downloads, name)` is a small test helper that fills `host`, `date` and `stem`/`ext` with fixed values.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test template`
 Expected: FAIL, functions not defined.
 
-- [ ] **Step 3: Implement** the functions above. Add the `url` and `percent-encoding` dependencies (approved in this plan) to `Cargo.toml`. `pick_name` parses `filename*` as `charset'lang'value` and percent-decodes the value.
+- [x] **Step 3: Implement** the functions above. Add the `url` and `percent-encoding` dependencies (approved in this plan) to `Cargo.toml`. `pick_name` parses `filename*` as `charset'lang'value` and percent-decodes the value.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test template`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/template.rs Cargo.toml
@@ -350,7 +350,7 @@ git commit -m "feat: expand path templates and pick file names"
 
 Server behavior: serves over HTTP/1.1 with `Connection: close`, `Content-Length`, `ETag` (the current value, initially `"v1"`) and `Last-Modified`. HTTP ranges are inclusive, so `bytes=10-19` means 10 bytes starting at 10. In `Normal` mode, a `Range` request returns `206` with `Content-Range`. If `If-Range` is present and does not match the current ETag, the server returns `200` with the full body. `IgnoreRange` always returns `200` with the full body. `Status(c)` returns `c` with an empty body.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[tokio::test]
@@ -366,19 +366,19 @@ async fn ranged_get_returns_slice_and_stale_if_range_returns_full() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --features testing --test test_server`
 Expected: FAIL, `testing` module not defined.
 
-- [ ] **Step 3: Implement** the server on a `tokio::net::TcpListener`. Read the request head until `\r\n\r\n`, parse the request line and the headers used in `RequestLog`, record the log, then respond.
+- [x] **Step 3: Implement** the server on a `tokio::net::TcpListener`. Read the request head until `\r\n\r\n`, parse the request line and the headers used in `RequestLog`, record the log, then respond.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test --features testing --test test_server`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/testing/ src/lib.rs tests/test_server.rs Cargo.toml Cargo.lock
@@ -404,7 +404,7 @@ git commit -m "test: add raw TCP test server with range and If-Range handling"
 
 Behavior by status: `206` means ranges are supported and the total comes from `Content-Range`. `200` means ranges are not supported and the total comes from `Content-Length`. `416` means no total and no ranges. `403`, `404` and `410` return `Error::LinkExpired`. Other errors return `Error::Protocol`. Only a strong ETag (one that does not start with `W/`) is recorded.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn probe_reports_size_and_range_support_on_206() { /* Mode::Normal, 1000 bytes -> total 1000, ranges true */ }
@@ -420,19 +420,19 @@ fn content_range_total_parses_only_numeric_totals() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing --test probe`
 Expected: FAIL, `probe` not defined.
 
-- [ ] **Step 3: Implement** `probe`. Build the request with `Range: bytes=0-0` and `Accept-Encoding: identity`, and do not read the body. `Redirect` mode returns `302` to `/moved/<path>` on the first request and serves normally under `/moved/`.
+- [x] **Step 3: Implement** `probe`. Build the request with `Range: bytes=0-0` and `Accept-Encoding: identity`, and do not read the body. `Redirect` mode returns `302` to `/moved/<path>` on the first request and serves normally under `/moved/`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing --test probe`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/error.rs src/probe.rs src/testing/ src/lib.rs tests/probe.rs Cargo.toml Cargo.lock
@@ -459,7 +459,7 @@ git commit -m "feat: probe file size, range support and validators"
 
 Platform: `std::os::windows::fs::FileExt::seek_write` on Windows, and `std::os::unix::fs::FileExt::write_at` elsewhere, behind `cfg`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn create_preallocates_to_total() { /* metadata().len() == total */ }
@@ -469,19 +469,19 @@ Platform: `std::os::windows::fs::FileExt::seek_write` on Windows, and `std::os::
 #[test] fn finish_refuses_to_overwrite_existing_target() { /* Err(AlreadyExists), existing file unchanged */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test writer`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the methods above. `write_at` loops because `seek_write` and `write_at` may write fewer bytes than requested.
+- [x] **Step 3: Implement** the methods above. `write_at` loops because `seek_write` and `write_at` may write fewer bytes than requested.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --test writer`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/writer.rs src/lib.rs tests/writer.rs Cargo.toml Cargo.lock
@@ -509,7 +509,7 @@ git commit -m "feat: add preallocated part file with offset writes"
 
 This task uses one plain `GET` with no `Range` header, whatever the probe said. Chunks are written sequentially through `Arc<PartFile>` with `spawn_blocking`. On completion, if the total is known and the byte count differs, return `Protocol`. Otherwise `finish` the part file.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn downloads_whole_file_when_range_ignored() { /* IgnoreRange, 1 MiB + 17 bytes, output bytes == source */ }
@@ -518,19 +518,19 @@ This task uses one plain `GET` with no `Range` header, whatever the probe said. 
 #[tokio::test] async fn never_overwrites_existing_file() { /* existing "x.bin" -> output "x (1).bin", old file unchanged */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing --test download`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** `build_client`, `resolve_output`, and `download` as described. Keep the single-connection path in its own function, so Task 9 can add the multi-connection path beside it.
+- [x] **Step 3: Implement** `build_client`, `resolve_output`, and `download` as described. Keep the single-connection path in its own function, so Task 9 can add the multi-connection path beside it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing --test download`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/engine.rs src/lib.rs src/testing/ tests/download.rs
@@ -552,7 +552,7 @@ git commit -m "feat: download a whole file over one connection"
   - `pub async fn fetch_range(client: &reqwest::Client, url: &url::Url, validator: &Validator, range: ByteRange, part: Arc<PartFile>, progress: Arc<Progress>) -> Result<(), Error>`. Sends `Range: bytes=start-(end-1)`, `Accept-Encoding: identity`, and `If-Range`, using the ETag when present and the Last-Modified otherwise. Expects `206`. A `200` answer to a request that carried `If-Range` returns `FileChanged`. Each chunk is written at its offset and recorded in `progress`.
   - `engine::download` takes the multi-connection path when `ranges_supported`, the total is known and greater than zero, and `connections > 1`. It clamps `connections` to `1..=16` and uses `DEFAULT_CONNECTIONS = 8` as the default. It starts one task per segment with `JoinSet` and aborts the others on the first error.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn multi_connection_download_matches_source() { /* 8 MiB, connections in [1, 2, 4, 8, 16], bytes == source */ }
@@ -561,19 +561,19 @@ git commit -m "feat: download a whole file over one connection"
 #[tokio::test] async fn fetch_range_reports_file_changed_when_validator_stale() { /* set_etag("v2"), validator "\"v1\"": Err(FileChanged) */ } // review focus 5
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL on the new tests.
 
-- [ ] **Step 3: Implement** `fetch_range` and the multi-connection path. The worker counts a range as done only after its bytes are written.
+- [x] **Step 3: Implement** `fetch_range` and the multi-connection path. The worker counts a range as done only after its bytes are written.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/worker.rs src/engine.rs tests/download.rs
@@ -597,7 +597,7 @@ git commit -m "feat: download in parallel ranges with If-Range checks"
 - Worker: on a dropped connection, a short body, a wrong `Content-Range`, or a `429` or `503`, wait (`Retry-After` if present, otherwise backoff) and retry from the last written byte. After `MAX_SEGMENT_ATTEMPTS`, return `Protocol`. A `403`, `404` or `410` returns `LinkExpired` at once, with no retry.
 - New test modes: `FailThenOk { status: u16, times: u32, retry_after: Option<u32> }`, `ShortBody`, `WrongContentRange`, `DropMidBodyOnce`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn backoff_grows_then_caps() {
@@ -615,19 +615,19 @@ git commit -m "feat: download in parallel ranges with If-Range checks"
 #[tokio::test] async fn resumes_from_last_written_byte_after_drop() { /* DropMidBodyOnce: second Range start > segment start, bytes == source */ } // review focus 4 prep
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the retry loop in `worker.rs`, with the delay chosen by `backoff_delay(attempt, fastrand::f64())`.
+- [x] **Step 3: Implement** the retry loop in `worker.rs`, with the delay chosen by `backoff_delay(attempt, fastrand::f64())`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/retry.rs src/worker.rs src/testing/ tests/download.rs
@@ -651,7 +651,7 @@ git commit -m "feat: retry segments with backoff and honor Retry-After"
   - `pub fn steal(lane: &Lane) -> Option<ByteRange>`. Reads `end` and `cursor`. If `end - cursor >= 2 * MIN_SEGMENT`, it sets `end` to the midpoint and returns `[midpoint, old_end)`. A compare-and-swap loop on `end` makes concurrent thieves safe.
   - `Outcome::Completed.steals` counts the successful steals.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn pick_victim_chooses_longest_eta() { /* two lanes, equal speed, larger remaining wins */ }
@@ -661,19 +661,19 @@ git commit -m "feat: retry segments with backoff and honor Retry-After"
 #[tokio::test] async fn stealing_with_slow_low_half_is_byte_identical() { /* SlowLowHalf, 8 MiB, 2 connections: bytes == source, steals >= 1 */ } // spec 6
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** `scheduler.rs`. When a worker finishes, it calls `pick_victim` and then `steal`, and registers the new lane. The worker's chunk loop reads `end` before each write and clamps the chunk to it.
+- [x] **Step 3: Implement** `scheduler.rs`. When a worker finishes, it calls `pick_victim` and then `steal`, and registers the new lane. The worker's chunk loop reads `end` before each write and clamps the chunk to it.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scheduler.rs src/worker.rs src/engine.rs src/testing/ tests/download.rs
@@ -700,7 +700,7 @@ git commit -m "feat: work stealing for idle connections"
   - `pub async fn resume(client: &reqwest::Client, state_path: &Path, url_override: Option<url::Url>) -> Result<Outcome, Error>`. Loads the state, probes again, and returns `FileChanged` if the total or the validator differs. Downloads the complement of `completed`, then finishes and deletes the state file.
 - Ordering rule (spec 4.5): snapshot `completed`, then `sync` the part file, then `save_atomic`. Only ranges in the snapshot are ever recorded as done.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn state_round_trips_through_json() { /* save_atomic then load == original */ }
@@ -714,19 +714,19 @@ git commit -m "feat: work stealing for idle connections"
 #[tokio::test] async fn resume_errors_when_part_file_missing() { /* state exists, part deleted: Err(Io(_)) */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** `state.rs`. In `engine.rs`, `download` writes the state file right after the part file is created, with `completed` empty. That way a kill at any moment leaves something to resume from. Checkpoints follow the ordering rule above.
+- [x] **Step 3: Implement** `state.rs`. In `engine.rs`, `download` writes the state file right after the part file is created, with `completed` empty. That way a kill at any moment leaves something to resume from. Checkpoints follow the ordering rule above.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/state.rs src/engine.rs tests/resume.rs
@@ -752,7 +752,7 @@ git commit -m "feat: save resumable state and resume downloads"
 - On cancel or `LinkExpired`: stop the workers, snapshot `completed`, `sync`, `save_atomic`, and return `Paused`.
 - The crash test runs the binary through `env!("CARGO_BIN_EXE_rdm")`. Each run starts a server with `Mode::Throttle`, starts `download`, waits a random 300 to 1500 ms (`fastrand`), kills the process with `Child::kill`, runs `resume`, and compares bytes. Run count is `RDM_CRASH_RUNS`, default 5.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn cancel_pauses_and_state_resumes() { /* cancel after 300 ms: Paused{Cancelled}; state exists; resume == source */ }
@@ -760,19 +760,19 @@ git commit -m "feat: save resumable state and resume downloads"
 #[test] fn crash_then_resume_is_byte_identical() { /* tests/crash.rs: RDM_CRASH_RUNS runs of kill-and-resume */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the cancel path and the expiry path. Write the state file after the part file is created, as in Task 12. Then add the clap CLI in `main.rs`. Call `tracing_subscriber` once in `main`, with `RUST_LOG` respected. Default output is `%USERPROFILE%\Downloads` (or `$HOME/Downloads` on WSL), with `{date}` filled from `SystemTime` in UTC.
+- [x] **Step 3: Implement** the cancel path and the expiry path. Write the state file after the part file is created, as in Task 12. Then add the clap CLI in `main.rs`. Call `tracing_subscriber` once in `main`, with `RUST_LOG` respected. Default output is `%USERPROFILE%\Downloads` (or `$HOME/Downloads` on WSL), with `{date}` filled from `SystemTime` in UTC.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS. Also run `RDM_CRASH_RUNS=20 cargo test --features testing --test crash` once, locally, to check for flakes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/engine.rs src/main.rs src/testing/ tests/download.rs tests/crash.rs
@@ -790,24 +790,24 @@ git commit -m "feat: pause on cancel and expired links, add rdm CLI and crash te
 **Interfaces:**
 - Consumes: `testing::TestServer` and `Mode::Throttle { bytes_per_sec: u64 }` (added here, serves a `Normal` file with throttling on every connection).
 
-- [ ] **Step 1: Write the failing check**
+- [x] **Step 1: Write the failing check**
 
 Run: `cargo llvm-cov --features testing --fail-under-lines 80`
 Expected: FAIL if line coverage is below 80%. Write the missing tests for whatever it reports.
 
-- [ ] **Step 2: Run the check**
+- [x] **Step 2: Run the check**
 
 Run: `cargo llvm-cov --features testing --fail-under-lines 80`
 Expected: PASS.
 
-- [ ] **Step 3: Implement** the progress line, the `serve` example (`cargo run --features testing --example serve`, which serves a 64 MiB file at `127.0.0.1:8080`), and the README. The README covers: what rdm is, build (`cargo build --release`), test (`cargo test --features testing`), the demo (serve, then `rdm download http://127.0.0.1:8080/demo.bin`), and the limits of this milestone (no GUI, no speed limit, no expired-link refresh).
+- [x] **Step 3: Implement** the progress line, the `serve` example (`cargo run --features testing --example serve`, which serves a 64 MiB file at `127.0.0.1:8080`), and the README. The README covers: what rdm is, build (`cargo build --release`), test (`cargo test --features testing`), the demo (serve, then `rdm download http://127.0.0.1:8080/demo.bin`), and the limits of this milestone (no GUI, no speed limit, no expired-link refresh).
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `cargo fmt --check && cargo clippy --all-targets --features testing -- -D warnings && cargo test --features testing`
 Expected: all pass, on both CI operating systems.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/main.rs examples/serve.rs README.md .github/workflows/ci.yml src/testing/
