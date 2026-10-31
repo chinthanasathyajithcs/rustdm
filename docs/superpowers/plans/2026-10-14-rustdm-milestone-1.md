@@ -350,7 +350,7 @@ git commit -m "feat: expand path templates and pick file names"
 
 Server behavior: serves over HTTP/1.1 with `Connection: close`, `Content-Length`, `ETag` (the current value, initially `"v1"`) and `Last-Modified`. HTTP ranges are inclusive, so `bytes=10-19` means 10 bytes starting at 10. In `Normal` mode, a `Range` request returns `206` with `Content-Range`. If `If-Range` is present and does not match the current ETag, the server returns `200` with the full body. `IgnoreRange` always returns `200` with the full body. `Status(c)` returns `c` with an empty body.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[tokio::test]
@@ -366,19 +366,19 @@ async fn ranged_get_returns_slice_and_stale_if_range_returns_full() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --features testing --test test_server`
 Expected: FAIL, `testing` module not defined.
 
-- [ ] **Step 3: Implement** the server on a `tokio::net::TcpListener`. Read the request head until `\r\n\r\n`, parse the request line and the headers used in `RequestLog`, record the log, then respond.
+- [x] **Step 3: Implement** the server on a `tokio::net::TcpListener`. Read the request head until `\r\n\r\n`, parse the request line and the headers used in `RequestLog`, record the log, then respond.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test --features testing --test test_server`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/testing/ src/lib.rs tests/test_server.rs Cargo.toml Cargo.lock

@@ -16,6 +16,7 @@ testing = []
 
 [dependencies]
 percent-encoding = "2.3"
+tokio = { version = "1.43", features = ["full"] }
 url = "2.5"
 
 [dev-dependencies]
