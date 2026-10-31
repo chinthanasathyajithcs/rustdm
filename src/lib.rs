@@ -8,3 +8,4 @@ pub mod ranges;
 pub mod template;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod writer;

@@ -459,7 +459,7 @@ git commit -m "feat: probe file size, range support and validators"
 
 Platform: `std::os::windows::fs::FileExt::seek_write` on Windows, and `std::os::unix::fs::FileExt::write_at` elsewhere, behind `cfg`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test] fn create_preallocates_to_total() { /* metadata().len() == total */ }
@@ -469,19 +469,19 @@ Platform: `std::os::windows::fs::FileExt::seek_write` on Windows, and `std::os::
 #[test] fn finish_refuses_to_overwrite_existing_target() { /* Err(AlreadyExists), existing file unchanged */ }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --test writer`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement** the methods above. `write_at` loops because `seek_write` and `write_at` may write fewer bytes than requested.
+- [x] **Step 3: Implement** the methods above. `write_at` loops because `seek_write` and `write_at` may write fewer bytes than requested.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --test writer`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/writer.rs src/lib.rs tests/writer.rs Cargo.toml Cargo.lock
