@@ -552,7 +552,7 @@ git commit -m "feat: download a whole file over one connection"
   - `pub async fn fetch_range(client: &reqwest::Client, url: &url::Url, validator: &Validator, range: ByteRange, part: Arc<PartFile>, progress: Arc<Progress>) -> Result<(), Error>`. Sends `Range: bytes=start-(end-1)`, `Accept-Encoding: identity`, and `If-Range`, using the ETag when present and the Last-Modified otherwise. Expects `206`. A `200` answer to a request that carried `If-Range` returns `FileChanged`. Each chunk is written at its offset and recorded in `progress`.
   - `engine::download` takes the multi-connection path when `ranges_supported`, the total is known and greater than zero, and `connections > 1`. It clamps `connections` to `1..=16` and uses `DEFAULT_CONNECTIONS = 8` as the default. It starts one task per segment with `JoinSet` and aborts the others on the first error.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[tokio::test] async fn multi_connection_download_matches_source() { /* 8 MiB, connections in [1, 2, 4, 8, 16], bytes == source */ }
@@ -561,19 +561,19 @@ git commit -m "feat: download a whole file over one connection"
 #[tokio::test] async fn fetch_range_reports_file_changed_when_validator_stale() { /* set_etag("v2"), validator "\"v1\"": Err(FileChanged) */ } // review focus 5
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test --features testing`
 Expected: FAIL on the new tests.
 
-- [ ] **Step 3: Implement** `fetch_range` and the multi-connection path. The worker counts a range as done only after its bytes are written.
+- [x] **Step 3: Implement** `fetch_range` and the multi-connection path. The worker counts a range as done only after its bytes are written.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --features testing`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/worker.rs src/engine.rs tests/download.rs

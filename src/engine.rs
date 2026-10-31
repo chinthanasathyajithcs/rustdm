@@ -100,6 +100,8 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
     }
 }
 
+pub const DEFAULT_CONNECTIONS: u32 = 8;
+
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
     let probe_result = probe::probe(client, &req.url).await?;
     let final_path = resolve_output(&req, &probe_result);
@@ -108,7 +110,53 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
     let part_file = PartFile::create(&part_p, probe_result.total)?;
     let part_arc = Arc::new(part_file);
 
-    download_single(client, &probe_result, Arc::clone(&part_arc), &req).await?;
+    let conns = if req.connections == 0 {
+        DEFAULT_CONNECTIONS
+    } else {
+        req.connections.clamp(1, 16)
+    };
+
+    if probe_result.ranges_supported && probe_result.total.is_some_and(|t| t > 0) {
+        let total = probe_result.total.unwrap();
+        let segments = crate::ranges::initial_segments(total, conns);
+        let mut set = tokio::task::JoinSet::new();
+
+        for seg in segments {
+            let client_clone = client.clone();
+            let url_clone = probe_result.final_url.clone();
+            let validator_clone = probe_result.validator.clone();
+            let part_clone = Arc::clone(&part_arc);
+            let prog_clone = Arc::clone(&req.progress);
+
+            set.spawn(async move {
+                crate::worker::fetch_range(
+                    &client_clone,
+                    &url_clone,
+                    &validator_clone,
+                    seg,
+                    part_clone,
+                    prog_clone,
+                )
+                .await
+            });
+        }
+
+        while let Some(res) = set.join_next().await {
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    set.abort_all();
+                    return Err(err);
+                }
+                Err(join_err) => {
+                    set.abort_all();
+                    return Err(Error::Protocol(join_err.to_string()));
+                }
+            }
+        }
+    } else {
+        download_single(client, &probe_result, Arc::clone(&part_arc), &req).await?;
+    }
 
     let part_file = Arc::try_unwrap(part_arc)
         .map_err(|_| Error::Protocol("failed to acquire ownership of part file".to_string()))?;
