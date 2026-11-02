@@ -6,6 +6,7 @@ Where an idea comes from IDM's observed behavior, the source is `docs/idm-behavi
 
 ## Engine
 
+- **Pre-flight disk space check (Milestone 2 Priority).** Query target filesystem free space (`GetDiskFreeSpaceExW` on Windows, `statvfs` on Unix) before allocating files. If `available_space < total_size + margin`, refuse to start or pause with clear guidance rather than failing mid-download on sparse allocation or filling the disk.
 - **No repeated bytes.** Stop the victim exactly at the split point, or skip bytes already on disk, so the thief and victim never download the same data. IDM re-downloads overlapping bytes. Measure: bytes received divided by file size.
 - **Adaptive connection count.** After repeated `503` responses, lower the connection count to what the server accepts. IDM keeps the same count and retries in bursts. Measure: refused requests per download.
 - **Small first request.** Probe with a few bytes (the `bytes=0-0` probe in the spec) instead of a full GET that gets cut off. IDM's first request was cut off after about 240 KB in the wire runs.
@@ -43,6 +44,9 @@ Where an idea comes from IDM's observed behavior, the source is `docs/idm-behavi
 
 ## Architecture
 
+- **Engine as a daemon (`rdmd`).** Runs as a background service independent of the active terminal, listening on local IPC (Windows Named Pipes `\\.\pipe\rustdm` or Unix Domain Sockets `/tmp/rustdm.sock`). Manages multi-download queues and persists across terminal exits.
+- **Adaptive Terminal UI (TUI via `ratatui` + `crossterm`).** Full mouse-clickable buttons, browsable downloads queue, and live segment visualizer. Drops cleanly to single-line streaming when not interactive or `--plain`.
+- **Desktop Native GUI (Approach 2, later).** Connects to the same daemon IPC without touching engine code.
 - **Engine as a library.** A GUI, the CLI, and the extension all call the same code. The spec already splits a `lib` crate from a `bin`.
 - **Completion hook.** Run a script or command when a download finishes.
 
