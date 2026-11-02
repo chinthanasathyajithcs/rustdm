@@ -38,6 +38,7 @@ pub enum Mode {
     Throttle {
         bytes_per_sec: u64,
     },
+    SimulateSize(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -364,6 +365,29 @@ impl TestServer {
                                     }
                                     let _ = socket.shutdown().await;
                                     return;
+                                }
+                                Mode::SimulateSize(fake_total) => {
+                                    let total = *fake_total;
+                                    let mut serve_range = (0, 0);
+                                    if let Some(r) = range_hdr {
+                                        if let Some((s, e)) = parse_range(&r, body_ref.len()) {
+                                            serve_range = (s, e);
+                                        }
+                                    }
+                                    let (start, end) = serve_range;
+                                    let slice_len = end - start + 1;
+                                    let mut resp = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    )
+                                    .into_bytes();
+                                    let body_slice = if !body_ref.is_empty() {
+                                        let end_idx = (start + slice_len).min(body_ref.len());
+                                        &body_ref[start..end_idx]
+                                    } else {
+                                        &[]
+                                    };
+                                    resp.extend_from_slice(body_slice);
+                                    resp
                                 }
                                 Mode::Normal => {
                                     let total = body_ref.len();

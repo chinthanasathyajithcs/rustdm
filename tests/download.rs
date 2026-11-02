@@ -537,3 +537,47 @@ async fn link_expired_pauses_with_state_saved() {
         Outcome::Completed { .. } => panic!("expected Paused, got Completed"),
     }
 }
+
+#[tokio::test]
+async fn pre_flight_disk_space_check_aborts_before_creating_part_file() {
+    let fake_huge_size = u64::MAX / 2;
+    let srv = TestServer::start(vec![0u8; 100], Mode::SimulateSize(fake_huge_size)).await;
+    let dir = tempdir().unwrap();
+
+    let client = build_client();
+    let progress = Arc::new(Progress::new());
+    let req = DownloadRequest {
+        url: srv.url().join("huge_file.bin").unwrap(),
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 4,
+        progress: Arc::clone(&progress),
+        cancel: None,
+    };
+
+    let err = download(&client, req).await.unwrap_err();
+    match err {
+        rustdm::error::Error::InsufficientDiskSpace {
+            target,
+            required,
+            available,
+        } => {
+            assert!(target.contains("huge_file.bin.part"));
+            assert!(required >= fake_huge_size);
+            assert!(available < required);
+        }
+        other => panic!("expected InsufficientDiskSpace, got {other:?}"),
+    }
+
+    // Crucial guarantee: verify NO part file or state file was created on disk!
+    let part_path = dir.path().join("huge_file.bin.part");
+    assert!(
+        !part_path.exists(),
+        "part file must NOT be created when disk space is insufficient"
+    );
+    let state_path = dir.path().join("huge_file.bin.part.rdm");
+    assert!(
+        !state_path.exists(),
+        "state file must NOT be created when disk space is insufficient"
+    );
+}

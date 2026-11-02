@@ -113,6 +113,10 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
     let part_p = part_path(&final_path);
     let state_p = state::state_path(&final_path);
 
+    if let Some(total) = probe_result.total {
+        crate::disk::ensure_disk_space(&part_p, total, crate::disk::SAFETY_MARGIN_BYTES)?;
+    }
+
     let part_file = PartFile::create(&part_p, probe_result.total)?;
     let part_arc = Arc::new(part_file);
 

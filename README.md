@@ -57,11 +57,15 @@ To test pause and resume, press `Ctrl+C` while downloading, then resume with:
 cargo run -- resume path/to/demo.bin.part.rdm
 ```
 
-## Milestone 1 Scope & Limitations
+## Milestone Roadmap
 
-Milestone 1 implements the complete core download engine and CLI. The following features are planned for future milestones:
-- Graphical User Interface (GUI)
-- Browser extension integration & native messaging
-- Multi-file download queues & bandwidth speed limiters
-- Automatic re-resolution of expired links
-- HTTP/3 and FTP support
+- **Milestone 1 (Complete):** Core multi-connection segmented download engine, dynamic work-stealing, direct-to-disk positional writes, atomic crash recovery, and `rdm` CLI utility.
+- **Milestone 2 (In Progress):**
+  - **Pre-flight disk space check:** Verifies available drive space before allocating or writing.
+  - **Background Daemon (`rdmd`):** Runs downloads in the background over local IPC (Windows Named Pipes / Unix sockets), surviving terminal closure.
+  - **Multi-Download Queue:** Concurrency management, prioritization, and global queue persistence.
+  - **Interactive Terminal UI (TUI):** Mouse-clickable buttons (`[Pause]`, `[Resume]`, `[Add]`), browsable downloads table, and live IDM-style segment map using Ratatui.
+- **Milestone 3+ (Planned):**
+  - Native Desktop GUI (Slint/Tauri) connecting to the daemon.
+  - Browser extension integration & native messaging host.
+  - Universal media sniffer & adaptive HLS/DASH chunk muxing with ffmpeg.
