@@ -43,6 +43,17 @@ fn os_available_space(existing_path: &Path) -> io::Result<u64> {
 }
 
 #[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetDiskFreeSpaceExW(
+        lp_directory_name: *const u16,
+        lp_free_bytes_available_to_caller: *mut u64,
+        lp_total_number_of_bytes: *mut u64,
+        lp_total_number_of_free_bytes: *mut u64,
+    ) -> i32;
+}
+
+#[cfg(windows)]
 fn os_available_space(existing_path: &Path) -> io::Result<u64> {
     use std::os::windows::ffi::OsStrExt;
 
@@ -54,7 +65,7 @@ fn os_available_space(existing_path: &Path) -> io::Result<u64> {
     let mut total_number_of_free_bytes: u64 = 0;
 
     let ret = unsafe {
-        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+        GetDiskFreeSpaceExW(
             wide.as_ptr(),
             &mut free_bytes_available,
             &mut total_number_of_bytes,
