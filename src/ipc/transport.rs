@@ -365,7 +365,7 @@ impl IpcListener {
             let server = self
                 .server
                 .take()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Named pipe server missing"))?;
+                .ok_or_else(|| io::Error::other("Named pipe server missing"))?;
             server.connect().await?;
 
             // Instantly create the subsequent server instance for future clients
