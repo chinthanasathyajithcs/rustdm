@@ -1,0 +1,744 @@
+use std::path::PathBuf;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
+
+pub const JSONRPC_VERSION: &str = "2.0";
+
+// --- Standard JSON-RPC 2.0 Error Codes ---
+pub const CODE_PARSE_ERROR: i32 = -32700;
+pub const CODE_INVALID_REQUEST: i32 = -32600;
+pub const CODE_METHOD_NOT_FOUND: i32 = -32601;
+pub const CODE_INVALID_PARAMS: i32 = -32602;
+pub const CODE_INTERNAL_ERROR: i32 = -32603;
+
+// --- Download Lifecycle & State Error Codes (-32000..-32019) ---
+pub const CODE_DOWNLOAD_NOT_FOUND: i32 = -32001;
+pub const CODE_CANNOT_PAUSE_COMPLETED: i32 = -32002;
+pub const CODE_ALREADY_COMPLETED: i32 = -32003;
+pub const CODE_OPERATION_IN_PROGRESS: i32 = -32004;
+pub const CODE_DUPLICATE_DOWNLOAD: i32 = -32005;
+
+// --- Storage & Filesystem Error Codes (-32020..-32039) ---
+pub const CODE_INSUFFICIENT_DISK_SPACE: i32 = -32020;
+pub const CODE_DISK_FULL_MID_FLIGHT: i32 = -32021;
+pub const CODE_DESTINATION_EXISTS: i32 = -32022;
+pub const CODE_INVALID_PATH: i32 = -32023;
+pub const CODE_PERMISSION_DENIED: i32 = -32024;
+pub const CODE_FILE_LOCKED: i32 = -32025;
+pub const CODE_CORRUPT_STATE_FILE: i32 = -32026;
+
+// --- Network & Protocol Error Codes (-32040..-32059) ---
+pub const CODE_NETWORK_ERROR: i32 = -32040;
+pub const CODE_LINK_EXPIRED: i32 = -32041;
+pub const CODE_FILE_CHANGED_ON_SERVER: i32 = -32042;
+pub const CODE_SERVER_LOST_RANGE_SUPPORT: i32 = -32043;
+pub const CODE_RATE_LIMITED: i32 = -32044;
+pub const CODE_TOO_MANY_REDIRECTS: i32 = -32045;
+
+// --- Daemon Lifecycle Error Codes (-32060..-32079) ---
+pub const CODE_DAEMON_ALREADY_RUNNING: i32 = -32060;
+pub const CODE_DAEMON_SHUTTING_DOWN: i32 = -32061;
+
+/// JSON-RPC Message identifier (either integer or string).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RpcId {
+    Number(i64),
+    String(String),
+}
+
+/// JSON-RPC 2.0 Request frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcRequest {
+    pub jsonrpc: String,
+    pub id: RpcId,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
+impl RpcRequest {
+    pub fn new(id: RpcId, method: impl Into<String>, params: Option<Value>) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            method: method.into(),
+            params,
+        }
+    }
+}
+
+/// JSON-RPC 2.0 Notification frame (no `id`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+}
+
+impl RpcNotification {
+    pub fn new(method: impl Into<String>, params: Option<Value>) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
+/// JSON-RPC 2.0 Error object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RpcError {
+    pub code: i32,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl RpcError {
+    pub fn new(code: i32, message: impl Into<String>, data: Option<Value>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data,
+        }
+    }
+
+    // Standard JSON-RPC errors
+    pub fn parse_error(detail: Option<String>) -> Self {
+        Self::new(
+            CODE_PARSE_ERROR,
+            "Parse error: invalid JSON was received by the server",
+            detail.map(Value::String),
+        )
+    }
+
+    pub fn invalid_request(detail: Option<String>) -> Self {
+        Self::new(
+            CODE_INVALID_REQUEST,
+            "Invalid Request: the JSON sent is not a valid Request object",
+            detail.map(Value::String),
+        )
+    }
+
+    pub fn method_not_found(method: &str) -> Self {
+        Self::new(
+            CODE_METHOD_NOT_FOUND,
+            format!("Method not found: '{}'", method),
+            None,
+        )
+    }
+
+    pub fn invalid_params(detail: impl Into<String>) -> Self {
+        Self::new(
+            CODE_INVALID_PARAMS,
+            format!("Invalid params: {}", detail.into()),
+            None,
+        )
+    }
+
+    pub fn internal_error(detail: impl Into<String>) -> Self {
+        Self::new(
+            CODE_INTERNAL_ERROR,
+            format!("Internal error: {}", detail.into()),
+            None,
+        )
+    }
+
+    // Domain errors
+    pub fn download_not_found(id: &str) -> Self {
+        Self::new(
+            CODE_DOWNLOAD_NOT_FOUND,
+            format!("Download not found: '{}'", id),
+            Some(serde_json::json!({ "id": id })),
+        )
+    }
+
+    pub fn cannot_pause_completed(id: &str) -> Self {
+        Self::new(
+            CODE_CANNOT_PAUSE_COMPLETED,
+            format!("Cannot pause download '{}' because it is already completed", id),
+            Some(serde_json::json!({ "id": id })),
+        )
+    }
+
+    pub fn already_completed(id: &str) -> Self {
+        Self::new(
+            CODE_ALREADY_COMPLETED,
+            format!("Download '{}' is already completed", id),
+            Some(serde_json::json!({ "id": id })),
+        )
+    }
+
+    pub fn operation_in_progress(id: &str, operation: &str) -> Self {
+        Self::new(
+            CODE_OPERATION_IN_PROGRESS,
+            format!("Operation '{}' already in progress for download '{}'", operation, id),
+            Some(serde_json::json!({ "id": id, "operation": operation })),
+        )
+    }
+
+    pub fn duplicate_download(url: &str, existing_id: &str) -> Self {
+        Self::new(
+            CODE_DUPLICATE_DOWNLOAD,
+            format!("URL '{}' is already being downloaded as '{}'", url, existing_id),
+            Some(serde_json::json!({ "url": url, "existing_id": existing_id })),
+        )
+    }
+
+    pub fn insufficient_disk_space(required_bytes: u64, available_bytes: u64) -> Self {
+        Self::new(
+            CODE_INSUFFICIENT_DISK_SPACE,
+            format!(
+                "Insufficient disk space: required {} bytes, available {} bytes",
+                required_bytes, available_bytes
+            ),
+            Some(serde_json::json!({
+                "required_bytes": required_bytes,
+                "available_bytes": available_bytes
+            })),
+        )
+    }
+
+    pub fn disk_full_mid_flight(id: &str) -> Self {
+        Self::new(
+            CODE_DISK_FULL_MID_FLIGHT,
+            format!("Disk became full while downloading '{}'. Download paused.", id),
+            Some(serde_json::json!({ "id": id })),
+        )
+    }
+
+    pub fn destination_exists(path: &std::path::Path) -> Self {
+        Self::new(
+            CODE_DESTINATION_EXISTS,
+            format!("Destination file already exists: '{}'", path.display()),
+            Some(serde_json::json!({ "path": path.to_string_lossy() })),
+        )
+    }
+
+    pub fn invalid_path(path: &std::path::Path, reason: &str) -> Self {
+        Self::new(
+            CODE_INVALID_PATH,
+            format!("Invalid destination path '{}': {}", path.display(), reason),
+            Some(serde_json::json!({ "path": path.to_string_lossy(), "reason": reason })),
+        )
+    }
+
+    pub fn permission_denied(path: &std::path::Path) -> Self {
+        Self::new(
+            CODE_PERMISSION_DENIED,
+            format!("Permission denied accessing '{}'", path.display()),
+            Some(serde_json::json!({ "path": path.to_string_lossy() })),
+        )
+    }
+
+    pub fn file_locked(path: &std::path::Path) -> Self {
+        Self::new(
+            CODE_FILE_LOCKED,
+            format!("File is locked by another process: '{}'", path.display()),
+            Some(serde_json::json!({ "path": path.to_string_lossy() })),
+        )
+    }
+
+    pub fn corrupt_state_file(path: &std::path::Path, reason: &str) -> Self {
+        Self::new(
+            CODE_CORRUPT_STATE_FILE,
+            format!("Corrupt state file '{}': {}", path.display(), reason),
+            Some(serde_json::json!({ "path": path.to_string_lossy(), "reason": reason })),
+        )
+    }
+
+    pub fn network_error(detail: impl Into<String>) -> Self {
+        let msg = detail.into();
+        Self::new(
+            CODE_NETWORK_ERROR,
+            format!("Network error: {}", msg),
+            Some(serde_json::json!({ "detail": msg })),
+        )
+    }
+
+    pub fn link_expired(id: &str, url: &str) -> Self {
+        Self::new(
+            CODE_LINK_EXPIRED,
+            format!("Download link expired (HTTP 403/410) for download '{}'", id),
+            Some(serde_json::json!({ "id": id, "url": url })),
+        )
+    }
+
+    pub fn file_changed_on_server(id: &str, expected_validator: &str, actual_validator: &str) -> Self {
+        Self::new(
+            CODE_FILE_CHANGED_ON_SERVER,
+            format!("File changed on remote server for download '{}'", id),
+            Some(serde_json::json!({
+                "id": id,
+                "expected": expected_validator,
+                "actual": actual_validator
+            })),
+        )
+    }
+
+    pub fn server_lost_range_support(id: &str) -> Self {
+        Self::new(
+            CODE_SERVER_LOST_RANGE_SUPPORT,
+            format!("Remote server refused byte-ranges on resume (returned 200 OK) for download '{}'", id),
+            Some(serde_json::json!({ "id": id })),
+        )
+    }
+
+    pub fn rate_limited(retry_after_secs: Option<u64>) -> Self {
+        Self::new(
+            CODE_RATE_LIMITED,
+            format!(
+                "Server rate-limited request (429/503){}",
+                retry_after_secs
+                    .map(|s| format!("; retry after {}s", s))
+                    .unwrap_or_default()
+            ),
+            Some(serde_json::json!({ "retry_after_secs": retry_after_secs })),
+        )
+    }
+
+    pub fn too_many_redirects(url: &str) -> Self {
+        Self::new(
+            CODE_TOO_MANY_REDIRECTS,
+            format!("Too many redirects following '{}'", url),
+            Some(serde_json::json!({ "url": url })),
+        )
+    }
+
+    pub fn daemon_already_running() -> Self {
+        Self::new(
+            CODE_DAEMON_ALREADY_RUNNING,
+            "Another rustdm daemon instance is already running",
+            None,
+        )
+    }
+
+    pub fn daemon_shutting_down() -> Self {
+        Self::new(
+            CODE_DAEMON_SHUTTING_DOWN,
+            "Daemon is currently shutting down and not accepting new tasks",
+            None,
+        )
+    }
+}
+
+/// JSON-RPC 2.0 Response frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RpcResponse {
+    pub jsonrpc: String,
+    pub id: RpcId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RpcError>,
+}
+
+impl RpcResponse {
+    pub fn success(id: RpcId, result: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn error(id: RpcId, error: RpcError) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            result: None,
+            error: Some(error),
+        }
+    }
+}
+
+/// Top-level message enum returned by line parser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RpcMessage {
+    Request(RpcRequest),
+    Response(RpcResponse),
+    Notification(RpcNotification),
+}
+
+// --- Parameter & Result Payloads ---
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PingResult {
+    pub version: String,
+    pub uptime_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShutdownResult {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddDownloadParams {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connections: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadIdParam {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelDownloadParams {
+    pub id: String,
+    pub delete_partial: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateUrlParams {
+    pub id: String,
+    pub new_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscribeParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadStatus {
+    Queued,
+    Active,
+    Pausing,
+    Paused,
+    Retrying,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadSummary {
+    pub id: String,
+    pub url: String,
+    pub destination: PathBuf,
+    pub filename: String,
+    pub status: DownloadStatus,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub speed_bps: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentProgress {
+    pub start: u64,
+    pub end: u64,
+    pub downloaded_bytes: u64,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelemetryTick {
+    pub id: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub speed_bps: u64,
+    pub active_connections: usize,
+    pub segments: Vec<SegmentProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadStateChanged {
+    pub id: String,
+    pub previous_state: DownloadStatus,
+    pub new_state: DownloadStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+// --- Encoding & Decoding Helpers ---
+
+/// Encode a value to a compact JSON string terminated with `\n`.
+pub fn encode_message<T: Serialize>(val: &T) -> Result<String, serde_json::Error> {
+    let mut s = serde_json::to_string(val)?;
+    s.push('\n');
+    Ok(s)
+}
+
+/// Decode a JSON line (ignoring trailing whitespace or newline characters).
+pub fn decode_message<T: DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    serde_json::from_str(trimmed)
+}
+
+/// Parse an incoming raw line into a typed `RpcMessage`, verifying JSON-RPC 2.0 conformance.
+pub fn parse_rpc_message(raw: &str) -> Result<RpcMessage, RpcError> {
+    let trimmed = raw.trim_end_matches(['\r', '\n']);
+    let val: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(e) => return Err(RpcError::parse_error(Some(e.to_string()))),
+    };
+
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return Err(RpcError::invalid_request(Some("Payload is not a JSON object".into()))),
+    };
+
+    let version = obj.get("jsonrpc").and_then(|v| v.as_str());
+    if version != Some(JSONRPC_VERSION) {
+        return Err(RpcError::invalid_request(Some("Missing or invalid 'jsonrpc' field, expected '2.0'".into())));
+    }
+
+    let has_id = obj.contains_key("id");
+    let has_method = obj.contains_key("method");
+    let has_result = obj.contains_key("result");
+    let has_error = obj.contains_key("error");
+
+    if has_method && has_id {
+        // Request
+        serde_json::from_value(val)
+            .map(RpcMessage::Request)
+            .map_err(|e| RpcError::invalid_request(Some(e.to_string())))
+    } else if has_method && !has_id {
+        // Notification
+        serde_json::from_value(val)
+            .map(RpcMessage::Notification)
+            .map_err(|e| RpcError::invalid_request(Some(e.to_string())))
+    } else if has_id && (has_result || has_error) {
+        // Response
+        serde_json::from_value(val)
+            .map(RpcMessage::Response)
+            .map_err(|e| RpcError::invalid_request(Some(e.to_string())))
+    } else {
+        Err(RpcError::invalid_request(Some("Malformed JSON-RPC message structure".into())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_rpc_request_roundtrip_number_id() {
+        let req = RpcRequest::new(
+            RpcId::Number(42),
+            "daemon.ping".to_string(),
+            None,
+        );
+        let encoded = encode_message(&req).unwrap();
+        assert!(encoded.ends_with('\n'));
+        let parsed: RpcRequest = decode_message(&encoded).unwrap();
+        assert_eq!(parsed.jsonrpc, "2.0");
+        assert_eq!(parsed.id, RpcId::Number(42));
+        assert_eq!(parsed.method, "daemon.ping");
+        assert_eq!(parsed.params, None);
+    }
+
+    #[test]
+    fn test_rpc_request_with_string_id_and_params() {
+        let params = AddDownloadParams {
+            url: "https://example.com/file.bin".to_string(),
+            destination: Some(PathBuf::from("/downloads")),
+            filename: Some("file.bin".to_string()),
+            connections: Some(8),
+        };
+        let req = RpcRequest::new(
+            RpcId::String("req_01".to_string()),
+            "download.add",
+            Some(serde_json::to_value(&params).unwrap()),
+        );
+
+        let encoded = encode_message(&req).unwrap();
+        let parsed_msg = parse_rpc_message(&encoded).unwrap();
+        match parsed_msg {
+            RpcMessage::Request(r) => {
+                assert_eq!(r.id, RpcId::String("req_01".to_string()));
+                assert_eq!(r.method, "download.add");
+                let parsed_params: AddDownloadParams = serde_json::from_value(r.params.unwrap()).unwrap();
+                assert_eq!(parsed_params.url, "https://example.com/file.bin");
+                assert_eq!(parsed_params.connections, Some(8));
+            }
+            _ => panic!("Expected RpcMessage::Request"),
+        }
+    }
+
+    #[test]
+    fn test_rpc_response_success() {
+        let result = PingResult {
+            version: "0.1.0".to_string(),
+            uptime_secs: 120,
+        };
+        let resp = RpcResponse::success(
+            RpcId::Number(1),
+            serde_json::to_value(&result).unwrap(),
+        );
+
+        let encoded = encode_message(&resp).unwrap();
+        let parsed = parse_rpc_message(&encoded).unwrap();
+        match parsed {
+            RpcMessage::Response(r) => {
+                assert_eq!(r.id, RpcId::Number(1));
+                assert!(r.error.is_none());
+                let res: PingResult = serde_json::from_value(r.result.unwrap()).unwrap();
+                assert_eq!(res.version, "0.1.0");
+                assert_eq!(res.uptime_secs, 120);
+            }
+            _ => panic!("Expected RpcMessage::Response"),
+        }
+    }
+
+    #[test]
+    fn test_rpc_response_error_roundtrip() {
+        let err = RpcError::download_not_found("dl_999");
+        let resp = RpcResponse::error(RpcId::String("req_err".to_string()), err);
+
+        let encoded = encode_message(&resp).unwrap();
+        let parsed = parse_rpc_message(&encoded).unwrap();
+        match parsed {
+            RpcMessage::Response(r) => {
+                assert_eq!(r.id, RpcId::String("req_err".to_string()));
+                assert!(r.result.is_none());
+                let e = r.error.unwrap();
+                assert_eq!(e.code, CODE_DOWNLOAD_NOT_FOUND);
+                assert!(e.message.contains("dl_999"));
+                assert_eq!(e.data.unwrap()["id"], "dl_999");
+            }
+            _ => panic!("Expected RpcMessage::Response"),
+        }
+    }
+
+    #[test]
+    fn test_rpc_notification_roundtrip() {
+        let tick = TelemetryTick {
+            id: "dl_abc".to_string(),
+            downloaded_bytes: 1048576,
+            total_bytes: Some(10485760),
+            speed_bps: 524288,
+            active_connections: 4,
+            segments: vec![SegmentProgress {
+                start: 0,
+                end: 5242879,
+                downloaded_bytes: 1048576,
+                state: "active".to_string(),
+            }],
+        };
+        let notif = RpcNotification::new(
+            "telemetry.tick",
+            Some(serde_json::to_value(&tick).unwrap()),
+        );
+
+        let encoded = encode_message(&notif).unwrap();
+        let parsed = parse_rpc_message(&encoded).unwrap();
+        match parsed {
+            RpcMessage::Notification(n) => {
+                assert_eq!(n.method, "telemetry.tick");
+                let parsed_tick: TelemetryTick = serde_json::from_value(n.params.unwrap()).unwrap();
+                assert_eq!(parsed_tick.downloaded_bytes, 1048576);
+                assert_eq!(parsed_tick.active_connections, 4);
+                assert_eq!(parsed_tick.segments.len(), 1);
+            }
+            _ => panic!("Expected RpcMessage::Notification"),
+        }
+    }
+
+    #[test]
+    fn test_parse_rpc_message_invalid_json() {
+        let err = parse_rpc_message("this is not json\n").unwrap_err();
+        assert_eq!(err.code, CODE_PARSE_ERROR);
+    }
+
+    #[test]
+    fn test_parse_rpc_message_missing_version() {
+        let raw = r#"{"id": 1, "method": "ping"}"#;
+        let err = parse_rpc_message(raw).unwrap_err();
+        assert_eq!(err.code, CODE_INVALID_REQUEST);
+    }
+
+    #[test]
+    fn test_all_domain_errors_codes_and_payloads() {
+        // Lifecycle
+        assert_eq!(RpcError::download_not_found("x").code, CODE_DOWNLOAD_NOT_FOUND);
+        assert_eq!(RpcError::cannot_pause_completed("x").code, CODE_CANNOT_PAUSE_COMPLETED);
+        assert_eq!(RpcError::already_completed("x").code, CODE_ALREADY_COMPLETED);
+        assert_eq!(RpcError::operation_in_progress("x", "pause").code, CODE_OPERATION_IN_PROGRESS);
+        assert_eq!(RpcError::duplicate_download("http://a", "dl_1").code, CODE_DUPLICATE_DOWNLOAD);
+
+        // Storage & FS
+        let space_err = RpcError::insufficient_disk_space(2000, 1000);
+        assert_eq!(space_err.code, CODE_INSUFFICIENT_DISK_SPACE);
+        assert_eq!(space_err.data.unwrap()["required_bytes"], 2000);
+
+        assert_eq!(RpcError::disk_full_mid_flight("x").code, CODE_DISK_FULL_MID_FLIGHT);
+        assert_eq!(RpcError::destination_exists(Path::new("/tmp/foo")).code, CODE_DESTINATION_EXISTS);
+        assert_eq!(RpcError::invalid_path(Path::new("/tmp/foo"), "bad char").code, CODE_INVALID_PATH);
+        assert_eq!(RpcError::permission_denied(Path::new("/tmp/foo")).code, CODE_PERMISSION_DENIED);
+        assert_eq!(RpcError::file_locked(Path::new("/tmp/foo")).code, CODE_FILE_LOCKED);
+        assert_eq!(RpcError::corrupt_state_file(Path::new("/tmp/foo"), "bad crc").code, CODE_CORRUPT_STATE_FILE);
+
+        // Network
+        assert_eq!(RpcError::network_error("timeout").code, CODE_NETWORK_ERROR);
+        let exp_err = RpcError::link_expired("dl_1", "http://example.com");
+        assert_eq!(exp_err.code, CODE_LINK_EXPIRED);
+        assert_eq!(exp_err.data.unwrap()["url"], "http://example.com");
+
+        let drift_err = RpcError::file_changed_on_server("dl_1", "etag_1", "etag_2");
+        assert_eq!(drift_err.code, CODE_FILE_CHANGED_ON_SERVER);
+        assert_eq!(drift_err.data.unwrap()["actual"], "etag_2");
+
+        assert_eq!(RpcError::server_lost_range_support("dl_1").code, CODE_SERVER_LOST_RANGE_SUPPORT);
+        assert_eq!(RpcError::rate_limited(Some(60)).code, CODE_RATE_LIMITED);
+        assert_eq!(RpcError::too_many_redirects("http://loop").code, CODE_TOO_MANY_REDIRECTS);
+
+        // Daemon
+        assert_eq!(RpcError::daemon_already_running().code, CODE_DAEMON_ALREADY_RUNNING);
+        assert_eq!(RpcError::daemon_shutting_down().code, CODE_DAEMON_SHUTTING_DOWN);
+    }
+
+    #[test]
+    fn test_download_status_serialization() {
+        let statuses = vec![
+            (DownloadStatus::Queued, "\"queued\""),
+            (DownloadStatus::Active, "\"active\""),
+            (DownloadStatus::Pausing, "\"pausing\""),
+            (DownloadStatus::Paused, "\"paused\""),
+            (DownloadStatus::Retrying, "\"retrying\""),
+            (DownloadStatus::Completed, "\"completed\""),
+            (DownloadStatus::Failed, "\"failed\""),
+            (DownloadStatus::Cancelled, "\"cancelled\""),
+        ];
+
+        for (status, expected_json) in statuses {
+            let serialized = serde_json::to_string(&status).unwrap();
+            assert_eq!(serialized, expected_json);
+            let deserialized: DownloadStatus = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, status);
+        }
+    }
+
+    #[test]
+    fn test_decode_message_handles_crlf_and_lf() {
+        let req = RpcRequest::new(RpcId::Number(1), "daemon.ping", None);
+        let json_str = serde_json::to_string(&req).unwrap();
+
+        let lf = format!("{}\n", json_str);
+        let crlf = format!("{}\r\n", json_str);
+
+        let parsed_lf: RpcRequest = decode_message(&lf).unwrap();
+        let parsed_crlf: RpcRequest = decode_message(&crlf).unwrap();
+
+        assert_eq!(parsed_lf, req);
+        assert_eq!(parsed_crlf, req);
+    }
+}
