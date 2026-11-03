@@ -2,9 +2,11 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod daemon;
 pub mod disk;
 pub mod engine;
 pub mod error;
+pub mod ipc;
 pub mod probe;
 pub mod ranges;
 pub mod retry;

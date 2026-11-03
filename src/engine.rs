@@ -206,6 +206,16 @@ pub async fn resume(
     state_path: &Path,
     url_override: Option<url::Url>,
 ) -> Result<Outcome, Error> {
+    resume_with_options(client, state_path, url_override, None, None).await
+}
+
+pub async fn resume_with_options(
+    client: &reqwest::Client,
+    state_path: &Path,
+    url_override: Option<url::Url>,
+    custom_progress: Option<Arc<Progress>>,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<Outcome, Error> {
     let state = state::load(state_path)?;
 
     let part_p = state::part_path(&state.output);
@@ -239,7 +249,7 @@ pub async fn resume(
     }
     let missing_ranges = range_set.complement(state.total);
 
-    let progress = Arc::new(Progress::new());
+    let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
     progress
         .downloaded
         .store(range_set.covered(), Ordering::SeqCst);
@@ -258,7 +268,7 @@ pub async fn resume(
             DEFAULT_CONNECTIONS,
             Some(state_path),
             Some(&state),
-            None,
+            cancel,
         )
         .await
     } else {
