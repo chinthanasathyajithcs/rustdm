@@ -96,6 +96,14 @@ pub struct RpcError {
     pub data: Option<Value>,
 }
 
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RPC error {}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
 impl RpcError {
     pub fn new(code: i32, message: impl Into<String>, data: Option<Value>) -> Self {
         Self {
