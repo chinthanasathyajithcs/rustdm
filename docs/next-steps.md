@@ -11,7 +11,7 @@ Updated: 2026-11-02
   - Automatically walks directory ancestors if the target folder or file does not exist yet.
   - Integrated into `src/engine.rs::download()` before `.part` creation to prevent wasted bandwidth or sparse-allocation out-of-space crashes.
   - Added `Mode::SimulateSize(u64)` to test server and added integration test verifying no files are created when space is inadequate.
-- **Testing:** 64 automated tests passing across unit, integration, and crash test suites on both Windows and Linux CI.
+- **Testing:** 86 automated tests passing across unit, integration, and crash test suites on both Windows and Linux CI.
 
 ## Milestone 2 Architecture & Status
 
@@ -19,11 +19,12 @@ Updated: 2026-11-02
    - Query drive free space before creating part files or allocating disk blocks.
    - Reject / pause before downloading if `available_bytes < total_bytes + safety_margin`.
 
-2. **[ ] Task 2: Background Daemon & Local IPC (`rdmd`) (Up Next)**
-   - Standalone background service running the download engine independently of any active terminal window.
-   - IPC transport: Windows Named Pipes (`\\.\pipe\rustdm`) and Unix Domain Sockets (`/tmp/rustdm.sock`).
-   - JSON-RPC protocol for commands (`add`, `pause`, `resume`, `cancel`, `list`, `subscribe_telemetry`) and real-time event streaming (`telemetry.tick`).
-   - Auto-spawning daemon: `rdm` CLI launches `rdmd` in the background if not already running.
+2. **[ ] Task 2: Background Daemon & Local IPC (`rdmd`) (In Progress - Core Complete)**
+   - [x] Substep 2.1: Wire Protocol & Serialization (`src/ipc/protocol.rs` - JSON-RPC 2.0 with comprehensive error taxonomy).
+   - [x] Substep 2.2: Cross-Platform IPC Transport Layer (`src/ipc/transport.rs` - Windows Named Pipes & Unix Domain Sockets).
+   - [x] Substep 2.3: In-Memory Daemon Core & Engine Controller (`src/daemon/mod.rs` & `src/daemon/core.rs` - multi-task coordinator, pause/resume, live telemetry broadcast).
+   - [ ] Substep 2.4: Standalone Daemon Executable (`src/bin/rdmd.rs` - background service entrypoint, single-instance lock).
+   - [ ] Substep 2.5: IPC Client & CLI Integration (`rdm` auto-spawning, remote control commands).
 
 3. **[ ] Task 3: Multi-Download Queue Manager**
    - Queue state machine (Active, Queued, Paused, Completed, Failed).
