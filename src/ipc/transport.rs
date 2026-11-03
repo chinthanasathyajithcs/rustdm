@@ -240,8 +240,20 @@ impl IpcConnection {
             ))),
             #[cfg(windows)]
             IpcEndpoint::NamedPipe(pipe_name) => {
-                let client =
-                    tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_name)?;
+                let start = std::time::Instant::now();
+                let client = loop {
+                    match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_name) {
+                        Ok(client) => break client,
+                        Err(e) if e.raw_os_error() == Some(231) => {
+                            // ERROR_PIPE_BUSY (Win32 231): retry while server accepts and creates next instance
+                            if start.elapsed() > std::time::Duration::from_secs(5) {
+                                return Err(IpcTransportError::Io(e));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        Err(e) => return Err(IpcTransportError::Io(e)),
+                    }
+                };
                 Ok(Self::from_stream(InnerStream::NamedPipeClient(client)))
             }
             #[cfg(not(windows))]
