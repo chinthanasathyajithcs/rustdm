@@ -1,30 +1,32 @@
 # rustdm: where we are and what's next
 
-Updated: 2026-11-02
+Updated: 2026-11-04
 
 ## Done
 
 - **Milestone 1 Complete:** Segmented download engine and `rdm` CLI utility fully implemented. PR #4 merged into `main`.
 - **Milestone 2 - Task 1 Complete (Pre-Flight Disk Space Check):**
-  - **Pull Request #5 opened & passing:** `feat: pre-flight disk space check and Milestone 2 roadmap` on branch `feat/pre-flight-disk-check`.
-  - Implemented `src/disk.rs` with `available_space` (cross-platform: native `GetDiskFreeSpaceExW` via `kernel32` on Windows, `statvfs` on Unix) and `ensure_disk_space`.
-  - Automatically walks directory ancestors if the target folder or file does not exist yet.
-  - Integrated into `src/engine.rs::download()` before `.part` creation to prevent wasted bandwidth or sparse-allocation out-of-space crashes.
-  - Added `Mode::SimulateSize(u64)` to test server and added integration test verifying no files are created when space is inadequate.
-- **Testing:** 86 automated tests passing across unit, integration, and crash test suites on both Windows and Linux CI.
+  - **Pull Request #5 merged:** `feat: pre-flight disk space check and Milestone 2 roadmap`.
+  - Cross-platform pre-flight disk space checking (`src/disk.rs` via `GetDiskFreeSpaceExW` on Windows and `statvfs` on Unix) integrated into `src/engine.rs` before preallocation.
+- **Milestone 2 - Task 2 (Background Daemon & Local IPC - Phase 1 Complete):**
+  - **Pull Request #6 merged:** `feat: background daemon core and cross-platform IPC engine`.
+  - **Substep 2.1 (Wire Protocol):** JSON-RPC 2.0 protocol models with comprehensive error taxonomy covering 20+ edge cases (`src/ipc/protocol.rs`).
+  - **Substep 2.2 (Cross-Platform IPC Transport):** Windows Named Pipes (`\\.\pipe\rustdm`) with `ERROR_PIPE_BUSY` (231) retry logic and Unix Domain Sockets (`/tmp/rustdm.sock`) with crash recovery and auto-cleanup (`src/ipc/transport.rs`).
+  - **Substep 2.3 (Daemon Core & Engine Bridge):** In-memory multi-task manager coordinating background downloads, non-blocking pause/resume, and real-time telemetry streaming over IPC (`src/daemon/core.rs`).
+- **Testing:** 86 automated tests passing across unit, integration, and crash test suites on both Windows and Linux CI (100% green).
 
 ## Milestone 2 Architecture & Status
 
-1. **[x] Task 1: Pre-Flight Disk Space Check (PR #5)**
+1. **[x] Task 1: Pre-Flight Disk Space Check (PR #5 Merged)**
    - Query drive free space before creating part files or allocating disk blocks.
    - Reject / pause before downloading if `available_bytes < total_bytes + safety_margin`.
 
-2. **[ ] Task 2: Background Daemon & Local IPC (`rdmd`) (In Progress - Core Complete)**
+2. **[ ] Task 2: Background Daemon & Local IPC (`rdmd`) (Core Merged - CLI Up Next)**
    - [x] Substep 2.1: Wire Protocol & Serialization (`src/ipc/protocol.rs` - JSON-RPC 2.0 with comprehensive error taxonomy).
    - [x] Substep 2.2: Cross-Platform IPC Transport Layer (`src/ipc/transport.rs` - Windows Named Pipes & Unix Domain Sockets).
    - [x] Substep 2.3: In-Memory Daemon Core & Engine Controller (`src/daemon/mod.rs` & `src/daemon/core.rs` - multi-task coordinator, pause/resume, live telemetry broadcast).
-   - [ ] Substep 2.4: Standalone Daemon Executable (`src/bin/rdmd.rs` - background service entrypoint, single-instance lock).
-   - [ ] Substep 2.5: IPC Client & CLI Integration (`rdm` auto-spawning, remote control commands).
+   - [ ] Substep 2.4: Standalone Daemon Executable (`src/bin/rdmd.rs` - background service entrypoint, single-instance lock, graceful signal shutdown).
+   - [ ] Substep 2.5: IPC Client & CLI Integration (`rdm` auto-spawning, remote control commands: `add`, `list`, `pause`, `resume`, `cancel`, `daemon status/stop`).
 
 3. **[ ] Task 3: Multi-Download Queue Manager**
    - Queue state machine (Active, Queued, Paused, Completed, Failed).
