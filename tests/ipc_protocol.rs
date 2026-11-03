@@ -1,7 +1,6 @@
 use rustdm::ipc::protocol::{
     encode_message, parse_rpc_message, AddDownloadParams, DownloadIdParam, DownloadStatus,
-    DownloadSummary, RpcError, RpcId, RpcMessage, RpcRequest, RpcResponse,
-    CODE_DOWNLOAD_NOT_FOUND,
+    DownloadSummary, RpcError, RpcId, RpcMessage, RpcRequest, RpcResponse, CODE_DOWNLOAD_NOT_FOUND,
 };
 use std::path::PathBuf;
 

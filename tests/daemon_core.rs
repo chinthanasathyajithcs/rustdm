@@ -242,7 +242,12 @@ async fn test_daemon_error_scenarios() {
     let pause_req = RpcRequest::new(
         RpcId::Number(30),
         "download.pause",
-        Some(serde_json::to_value(DownloadIdParam { id: "dl_missing".to_string() }).unwrap()),
+        Some(
+            serde_json::to_value(DownloadIdParam {
+                id: "dl_missing".to_string(),
+            })
+            .unwrap(),
+        ),
     );
     client.send(&pause_req).await.unwrap();
     let resp = client.recv().await.unwrap().unwrap();
@@ -263,7 +268,13 @@ async fn test_daemon_error_scenarios() {
 #[tokio::test]
 async fn test_daemon_telemetry_streaming() {
     let mock_bytes = pattern_bytes(2 * 1024 * 1024);
-    let mock = TestServer::start(mock_bytes.clone(), Mode::Throttle { bytes_per_sec: 500 * 1024 }).await;
+    let mock = TestServer::start(
+        mock_bytes.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 500 * 1024,
+        },
+    )
+    .await;
 
     let endpoint = next_test_endpoint();
     let server = DaemonServer::bind(&endpoint).await.expect("bind daemon");
@@ -322,5 +333,8 @@ async fn test_daemon_telemetry_streaming() {
     client.send(&shutdown_req).await.unwrap();
     let _ = server_task.await;
 
-    assert!(got_tick, "expected at least one telemetry.tick notification");
+    assert!(
+        got_tick,
+        "expected at least one telemetry.tick notification"
+    );
 }

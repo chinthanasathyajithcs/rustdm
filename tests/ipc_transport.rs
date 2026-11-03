@@ -18,7 +18,11 @@ async fn test_client_server_ping_pong() {
 
     let server_task = tokio::spawn(async move {
         let mut server_conn = listener.accept().await.expect("accept client");
-        let msg = server_conn.recv().await.expect("recv msg").expect("some msg");
+        let msg = server_conn
+            .recv()
+            .await
+            .expect("recv msg")
+            .expect("some msg");
         match msg {
             RpcMessage::Request(req) => {
                 assert_eq!(req.method, "daemon.ping");
@@ -26,21 +30,24 @@ async fn test_client_server_ping_pong() {
                     version: "0.1.0".to_string(),
                     uptime_secs: 42,
                 };
-                let resp = RpcResponse::success(
-                    req.id,
-                    serde_json::to_value(&result).unwrap(),
-                );
+                let resp = RpcResponse::success(req.id, serde_json::to_value(&result).unwrap());
                 server_conn.send(&resp).await.expect("send response");
             }
             other => panic!("expected Request, got {:?}", other),
         }
     });
 
-    let mut client_conn = IpcConnection::connect(&endpoint).await.expect("client connect");
+    let mut client_conn = IpcConnection::connect(&endpoint)
+        .await
+        .expect("client connect");
     let req = RpcRequest::new(RpcId::Number(1), "daemon.ping", None);
     client_conn.send(&req).await.expect("client send");
 
-    let resp_msg = client_conn.recv().await.expect("client recv").expect("some msg");
+    let resp_msg = client_conn
+        .recv()
+        .await
+        .expect("client recv")
+        .expect("some msg");
     match resp_msg {
         RpcMessage::Response(resp) => {
             assert_eq!(resp.id, RpcId::Number(1));
@@ -72,12 +79,15 @@ async fn test_split_full_duplex_streaming() {
                 active_connections: 2,
                 segments: Vec::new(),
             };
-            let notif = RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));
+            let notif =
+                RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));
             sender.send(&notif).await.expect("send tick");
         }
     });
 
-    let client_conn = IpcConnection::connect(&endpoint).await.expect("client connect");
+    let client_conn = IpcConnection::connect(&endpoint)
+        .await
+        .expect("client connect");
     let (_sender, mut receiver) = client_conn.into_split();
 
     for i in 1..=3 {
@@ -110,7 +120,9 @@ async fn test_clean_client_disconnect_eof() {
         assert!(eof.is_none(), "expected EOF on disconnect");
     });
 
-    let mut client_conn = IpcConnection::connect(&endpoint).await.expect("client connect");
+    let mut client_conn = IpcConnection::connect(&endpoint)
+        .await
+        .expect("client connect");
     let req = RpcRequest::new(RpcId::Number(99), "daemon.ping", None);
     client_conn.send(&req).await.expect("send req");
     drop(client_conn); // client closes socket
@@ -181,7 +193,10 @@ async fn test_stale_socket_cleanup_and_active_detection() {
 
             // Re-binding should detect stale file, remove it, and succeed!
             let new_listener = IpcListener::bind(&endpoint).await;
-            assert!(new_listener.is_ok(), "should cleanly recover from stale socket");
+            assert!(
+                new_listener.is_ok(),
+                "should cleanly recover from stale socket"
+            );
         }
     }
 }

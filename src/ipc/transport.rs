@@ -195,7 +195,9 @@ impl IpcReceiver {
         Ok(Some(line))
     }
 
-    pub async fn recv_typed<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, IpcTransportError> {
+    pub async fn recv_typed<T: serde::de::DeserializeOwned>(
+        &mut self,
+    ) -> Result<Option<T>, IpcTransportError> {
         let mut line = String::new();
         let bytes_read = self.reader.read_line(&mut line).await?;
         if bytes_read == 0 {
@@ -232,24 +234,21 @@ impl IpcConnection {
                 Ok(Self::from_stream(InnerStream::Unix(stream)))
             }
             #[cfg(not(unix))]
-            IpcEndpoint::UnixSocket(_) => {
-                Err(IpcTransportError::Io(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Unix domain sockets are not supported on this platform",
-                )))
-            }
+            IpcEndpoint::UnixSocket(_) => Err(IpcTransportError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Unix domain sockets are not supported on this platform",
+            ))),
             #[cfg(windows)]
             IpcEndpoint::NamedPipe(pipe_name) => {
-                let client = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_name)?;
+                let client =
+                    tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_name)?;
                 Ok(Self::from_stream(InnerStream::NamedPipeClient(client)))
             }
             #[cfg(not(windows))]
-            IpcEndpoint::NamedPipe(_) => {
-                Err(IpcTransportError::Io(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Named pipes are not supported on this platform",
-                )))
-            }
+            IpcEndpoint::NamedPipe(_) => Err(IpcTransportError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Named pipes are not supported on this platform",
+            ))),
         }
     }
 
@@ -274,7 +273,9 @@ impl IpcConnection {
     }
 
     /// Receive directly into a deserializable type.
-    pub async fn recv_typed<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, IpcTransportError> {
+    pub async fn recv_typed<T: serde::de::DeserializeOwned>(
+        &mut self,
+    ) -> Result<Option<T>, IpcTransportError> {
         self.receiver.recv_typed().await
     }
 }
@@ -330,12 +331,10 @@ impl IpcListener {
                 })
             }
             #[cfg(not(unix))]
-            IpcEndpoint::UnixSocket(_) => {
-                Err(IpcTransportError::Io(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Unix domain sockets are not supported on this platform",
-                )))
-            }
+            IpcEndpoint::UnixSocket(_) => Err(IpcTransportError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Unix domain sockets are not supported on this platform",
+            ))),
             #[cfg(windows)]
             IpcEndpoint::NamedPipe(pipe_name) => {
                 let server = tokio::net::windows::named_pipe::ServerOptions::new()
@@ -347,12 +346,10 @@ impl IpcListener {
                 })
             }
             #[cfg(not(windows))]
-            IpcEndpoint::NamedPipe(_) => {
-                Err(IpcTransportError::Io(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Named pipes are not supported on this platform",
-                )))
-            }
+            IpcEndpoint::NamedPipe(_) => Err(IpcTransportError::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Named pipes are not supported on this platform",
+            ))),
         }
     }
 
@@ -372,11 +369,13 @@ impl IpcListener {
             server.connect().await?;
 
             // Instantly create the subsequent server instance for future clients
-            let next_server = tokio::net::windows::named_pipe::ServerOptions::new()
-                .create(&self.pipe_name)?;
+            let next_server =
+                tokio::net::windows::named_pipe::ServerOptions::new().create(&self.pipe_name)?;
             self.server = Some(next_server);
 
-            Ok(IpcConnection::from_stream(InnerStream::NamedPipeServer(server)))
+            Ok(IpcConnection::from_stream(InnerStream::NamedPipeServer(
+                server,
+            )))
         }
     }
 }

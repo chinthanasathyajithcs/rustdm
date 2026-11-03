@@ -120,9 +120,9 @@ impl DaemonCore {
         state.next_id += 1;
         let id = format!("dl_{}", state.next_id);
 
-        let downloads_dir = params.destination.unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        });
+        let downloads_dir = params
+            .destination
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let template = match params.filename {
             Some(ref f) => format!("{{downloads}}/{}", f),
@@ -240,7 +240,10 @@ impl DaemonCore {
             DownloadStatus::Completed => Err(RpcError::already_completed(id)),
             DownloadStatus::Active => Ok(task.to_summary()),
             DownloadStatus::Pausing => Err(RpcError::operation_in_progress(id, "pausing")),
-            DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Queued | DownloadStatus::Retrying => {
+            DownloadStatus::Paused
+            | DownloadStatus::Failed
+            | DownloadStatus::Queued
+            | DownloadStatus::Retrying => {
                 let state_file = match task.state_file.clone() {
                     Some(p) => p,
                     None => {
@@ -316,7 +319,10 @@ impl DaemonCore {
         }
     }
 
-    pub fn cancel_download(&self, params: CancelDownloadParams) -> Result<DownloadSummary, RpcError> {
+    pub fn cancel_download(
+        &self,
+        params: CancelDownloadParams,
+    ) -> Result<DownloadSummary, RpcError> {
         let state = self.state.lock().unwrap();
         let task_lock = state
             .downloads
@@ -440,13 +446,25 @@ impl DaemonCore {
                 let params: AddDownloadParams = match req.params {
                     Some(p) => match serde_json::from_value(p) {
                         Ok(val) => val,
-                        Err(e) => return RpcResponse::error(req.id, RpcError::invalid_params(e.to_string())),
+                        Err(e) => {
+                            return RpcResponse::error(
+                                req.id,
+                                RpcError::invalid_params(e.to_string()),
+                            )
+                        }
                     },
-                    None => return RpcResponse::error(req.id, RpcError::invalid_params("Missing params")),
+                    None => {
+                        return RpcResponse::error(
+                            req.id,
+                            RpcError::invalid_params("Missing params"),
+                        )
+                    }
                 };
 
                 match self.add_download(params) {
-                    Ok(summary) => RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap()),
+                    Ok(summary) => {
+                        RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap())
+                    }
                     Err(e) => RpcResponse::error(req.id, e),
                 }
             }
@@ -454,13 +472,25 @@ impl DaemonCore {
                 let params: DownloadIdParam = match req.params {
                     Some(p) => match serde_json::from_value(p) {
                         Ok(val) => val,
-                        Err(e) => return RpcResponse::error(req.id, RpcError::invalid_params(e.to_string())),
+                        Err(e) => {
+                            return RpcResponse::error(
+                                req.id,
+                                RpcError::invalid_params(e.to_string()),
+                            )
+                        }
                     },
-                    None => return RpcResponse::error(req.id, RpcError::invalid_params("Missing params")),
+                    None => {
+                        return RpcResponse::error(
+                            req.id,
+                            RpcError::invalid_params("Missing params"),
+                        )
+                    }
                 };
 
                 match self.pause_download(&params.id) {
-                    Ok(summary) => RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap()),
+                    Ok(summary) => {
+                        RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap())
+                    }
                     Err(e) => RpcResponse::error(req.id, e),
                 }
             }
@@ -468,13 +498,25 @@ impl DaemonCore {
                 let params: DownloadIdParam = match req.params {
                     Some(p) => match serde_json::from_value(p) {
                         Ok(val) => val,
-                        Err(e) => return RpcResponse::error(req.id, RpcError::invalid_params(e.to_string())),
+                        Err(e) => {
+                            return RpcResponse::error(
+                                req.id,
+                                RpcError::invalid_params(e.to_string()),
+                            )
+                        }
                     },
-                    None => return RpcResponse::error(req.id, RpcError::invalid_params("Missing params")),
+                    None => {
+                        return RpcResponse::error(
+                            req.id,
+                            RpcError::invalid_params("Missing params"),
+                        )
+                    }
                 };
 
                 match self.resume_download(&params.id) {
-                    Ok(summary) => RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap()),
+                    Ok(summary) => {
+                        RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap())
+                    }
                     Err(e) => RpcResponse::error(req.id, e),
                 }
             }
@@ -482,13 +524,25 @@ impl DaemonCore {
                 let params: CancelDownloadParams = match req.params {
                     Some(p) => match serde_json::from_value(p) {
                         Ok(val) => val,
-                        Err(e) => return RpcResponse::error(req.id, RpcError::invalid_params(e.to_string())),
+                        Err(e) => {
+                            return RpcResponse::error(
+                                req.id,
+                                RpcError::invalid_params(e.to_string()),
+                            )
+                        }
                     },
-                    None => return RpcResponse::error(req.id, RpcError::invalid_params("Missing params")),
+                    None => {
+                        return RpcResponse::error(
+                            req.id,
+                            RpcError::invalid_params("Missing params"),
+                        )
+                    }
                 };
 
                 match self.cancel_download(params) {
-                    Ok(summary) => RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap()),
+                    Ok(summary) => {
+                        RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap())
+                    }
                     Err(e) => RpcResponse::error(req.id, e),
                 }
             }
@@ -500,13 +554,25 @@ impl DaemonCore {
                 let params: DownloadIdParam = match req.params {
                     Some(p) => match serde_json::from_value(p) {
                         Ok(val) => val,
-                        Err(e) => return RpcResponse::error(req.id, RpcError::invalid_params(e.to_string())),
+                        Err(e) => {
+                            return RpcResponse::error(
+                                req.id,
+                                RpcError::invalid_params(e.to_string()),
+                            )
+                        }
                     },
-                    None => return RpcResponse::error(req.id, RpcError::invalid_params("Missing params")),
+                    None => {
+                        return RpcResponse::error(
+                            req.id,
+                            RpcError::invalid_params("Missing params"),
+                        )
+                    }
                 };
 
                 match self.get_status(&params.id) {
-                    Ok(summary) => RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap()),
+                    Ok(summary) => {
+                        RpcResponse::success(req.id, serde_json::to_value(&summary).unwrap())
+                    }
                     Err(e) => RpcResponse::error(req.id, e),
                 }
             }

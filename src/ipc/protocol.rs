@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 pub const JSONRPC_VERSION: &str = "2.0";
 
@@ -166,7 +166,10 @@ impl RpcError {
     pub fn cannot_pause_completed(id: &str) -> Self {
         Self::new(
             CODE_CANNOT_PAUSE_COMPLETED,
-            format!("Cannot pause download '{}' because it is already completed", id),
+            format!(
+                "Cannot pause download '{}' because it is already completed",
+                id
+            ),
             Some(serde_json::json!({ "id": id })),
         )
     }
@@ -182,7 +185,10 @@ impl RpcError {
     pub fn operation_in_progress(id: &str, operation: &str) -> Self {
         Self::new(
             CODE_OPERATION_IN_PROGRESS,
-            format!("Operation '{}' already in progress for download '{}'", operation, id),
+            format!(
+                "Operation '{}' already in progress for download '{}'",
+                operation, id
+            ),
             Some(serde_json::json!({ "id": id, "operation": operation })),
         )
     }
@@ -190,7 +196,10 @@ impl RpcError {
     pub fn duplicate_download(url: &str, existing_id: &str) -> Self {
         Self::new(
             CODE_DUPLICATE_DOWNLOAD,
-            format!("URL '{}' is already being downloaded as '{}'", url, existing_id),
+            format!(
+                "URL '{}' is already being downloaded as '{}'",
+                url, existing_id
+            ),
             Some(serde_json::json!({ "url": url, "existing_id": existing_id })),
         )
     }
@@ -212,7 +221,10 @@ impl RpcError {
     pub fn disk_full_mid_flight(id: &str) -> Self {
         Self::new(
             CODE_DISK_FULL_MID_FLIGHT,
-            format!("Disk became full while downloading '{}'. Download paused.", id),
+            format!(
+                "Disk became full while downloading '{}'. Download paused.",
+                id
+            ),
             Some(serde_json::json!({ "id": id })),
         )
     }
@@ -274,7 +286,11 @@ impl RpcError {
         )
     }
 
-    pub fn file_changed_on_server(id: &str, expected_validator: &str, actual_validator: &str) -> Self {
+    pub fn file_changed_on_server(
+        id: &str,
+        expected_validator: &str,
+        actual_validator: &str,
+    ) -> Self {
         Self::new(
             CODE_FILE_CHANGED_ON_SERVER,
             format!("File changed on remote server for download '{}'", id),
@@ -289,7 +305,10 @@ impl RpcError {
     pub fn server_lost_range_support(id: &str) -> Self {
         Self::new(
             CODE_SERVER_LOST_RANGE_SUPPORT,
-            format!("Remote server refused byte-ranges on resume (returned 200 OK) for download '{}'", id),
+            format!(
+                "Remote server refused byte-ranges on resume (returned 200 OK) for download '{}'",
+                id
+            ),
             Some(serde_json::json!({ "id": id })),
         )
     }
@@ -500,12 +519,18 @@ pub fn parse_rpc_message(raw: &str) -> Result<RpcMessage, RpcError> {
 
     let obj = match val.as_object() {
         Some(o) => o,
-        None => return Err(RpcError::invalid_request(Some("Payload is not a JSON object".into()))),
+        None => {
+            return Err(RpcError::invalid_request(Some(
+                "Payload is not a JSON object".into(),
+            )))
+        }
     };
 
     let version = obj.get("jsonrpc").and_then(|v| v.as_str());
     if version != Some(JSONRPC_VERSION) {
-        return Err(RpcError::invalid_request(Some("Missing or invalid 'jsonrpc' field, expected '2.0'".into())));
+        return Err(RpcError::invalid_request(Some(
+            "Missing or invalid 'jsonrpc' field, expected '2.0'".into(),
+        )));
     }
 
     let has_id = obj.contains_key("id");
@@ -529,7 +554,9 @@ pub fn parse_rpc_message(raw: &str) -> Result<RpcMessage, RpcError> {
             .map(RpcMessage::Response)
             .map_err(|e| RpcError::invalid_request(Some(e.to_string())))
     } else {
-        Err(RpcError::invalid_request(Some("Malformed JSON-RPC message structure".into())))
+        Err(RpcError::invalid_request(Some(
+            "Malformed JSON-RPC message structure".into(),
+        )))
     }
 }
 
@@ -540,11 +567,7 @@ mod tests {
 
     #[test]
     fn test_rpc_request_roundtrip_number_id() {
-        let req = RpcRequest::new(
-            RpcId::Number(42),
-            "daemon.ping".to_string(),
-            None,
-        );
+        let req = RpcRequest::new(RpcId::Number(42), "daemon.ping".to_string(), None);
         let encoded = encode_message(&req).unwrap();
         assert!(encoded.ends_with('\n'));
         let parsed: RpcRequest = decode_message(&encoded).unwrap();
@@ -574,7 +597,8 @@ mod tests {
             RpcMessage::Request(r) => {
                 assert_eq!(r.id, RpcId::String("req_01".to_string()));
                 assert_eq!(r.method, "download.add");
-                let parsed_params: AddDownloadParams = serde_json::from_value(r.params.unwrap()).unwrap();
+                let parsed_params: AddDownloadParams =
+                    serde_json::from_value(r.params.unwrap()).unwrap();
                 assert_eq!(parsed_params.url, "https://example.com/file.bin");
                 assert_eq!(parsed_params.connections, Some(8));
             }
@@ -588,10 +612,7 @@ mod tests {
             version: "0.1.0".to_string(),
             uptime_secs: 120,
         };
-        let resp = RpcResponse::success(
-            RpcId::Number(1),
-            serde_json::to_value(&result).unwrap(),
-        );
+        let resp = RpcResponse::success(RpcId::Number(1), serde_json::to_value(&result).unwrap());
 
         let encoded = encode_message(&resp).unwrap();
         let parsed = parse_rpc_message(&encoded).unwrap();
@@ -642,10 +663,8 @@ mod tests {
                 state: "active".to_string(),
             }],
         };
-        let notif = RpcNotification::new(
-            "telemetry.tick",
-            Some(serde_json::to_value(&tick).unwrap()),
-        );
+        let notif =
+            RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));
 
         let encoded = encode_message(&notif).unwrap();
         let parsed = parse_rpc_message(&encoded).unwrap();
@@ -677,23 +696,56 @@ mod tests {
     #[test]
     fn test_all_domain_errors_codes_and_payloads() {
         // Lifecycle
-        assert_eq!(RpcError::download_not_found("x").code, CODE_DOWNLOAD_NOT_FOUND);
-        assert_eq!(RpcError::cannot_pause_completed("x").code, CODE_CANNOT_PAUSE_COMPLETED);
-        assert_eq!(RpcError::already_completed("x").code, CODE_ALREADY_COMPLETED);
-        assert_eq!(RpcError::operation_in_progress("x", "pause").code, CODE_OPERATION_IN_PROGRESS);
-        assert_eq!(RpcError::duplicate_download("http://a", "dl_1").code, CODE_DUPLICATE_DOWNLOAD);
+        assert_eq!(
+            RpcError::download_not_found("x").code,
+            CODE_DOWNLOAD_NOT_FOUND
+        );
+        assert_eq!(
+            RpcError::cannot_pause_completed("x").code,
+            CODE_CANNOT_PAUSE_COMPLETED
+        );
+        assert_eq!(
+            RpcError::already_completed("x").code,
+            CODE_ALREADY_COMPLETED
+        );
+        assert_eq!(
+            RpcError::operation_in_progress("x", "pause").code,
+            CODE_OPERATION_IN_PROGRESS
+        );
+        assert_eq!(
+            RpcError::duplicate_download("http://a", "dl_1").code,
+            CODE_DUPLICATE_DOWNLOAD
+        );
 
         // Storage & FS
         let space_err = RpcError::insufficient_disk_space(2000, 1000);
         assert_eq!(space_err.code, CODE_INSUFFICIENT_DISK_SPACE);
         assert_eq!(space_err.data.unwrap()["required_bytes"], 2000);
 
-        assert_eq!(RpcError::disk_full_mid_flight("x").code, CODE_DISK_FULL_MID_FLIGHT);
-        assert_eq!(RpcError::destination_exists(Path::new("/tmp/foo")).code, CODE_DESTINATION_EXISTS);
-        assert_eq!(RpcError::invalid_path(Path::new("/tmp/foo"), "bad char").code, CODE_INVALID_PATH);
-        assert_eq!(RpcError::permission_denied(Path::new("/tmp/foo")).code, CODE_PERMISSION_DENIED);
-        assert_eq!(RpcError::file_locked(Path::new("/tmp/foo")).code, CODE_FILE_LOCKED);
-        assert_eq!(RpcError::corrupt_state_file(Path::new("/tmp/foo"), "bad crc").code, CODE_CORRUPT_STATE_FILE);
+        assert_eq!(
+            RpcError::disk_full_mid_flight("x").code,
+            CODE_DISK_FULL_MID_FLIGHT
+        );
+        assert_eq!(
+            RpcError::destination_exists(Path::new("/tmp/foo")).code,
+            CODE_DESTINATION_EXISTS
+        );
+        assert_eq!(
+            RpcError::invalid_path(Path::new("/tmp/foo"), "bad char").code,
+            CODE_INVALID_PATH
+        );
+        assert_eq!(
+            RpcError::permission_denied(Path::new("/tmp/foo")).code,
+            CODE_PERMISSION_DENIED
+        );
+        assert_eq!(
+            RpcError::file_locked(Path::new("/tmp/foo")).code,
+            CODE_FILE_LOCKED
+        );
+        assert_eq!(
+            RpcError::corrupt_state_file(Path::new("/tmp/foo"), "bad crc").code,
+            CODE_CORRUPT_STATE_FILE
+        );
 
         // Network
         assert_eq!(RpcError::network_error("timeout").code, CODE_NETWORK_ERROR);
@@ -705,13 +757,25 @@ mod tests {
         assert_eq!(drift_err.code, CODE_FILE_CHANGED_ON_SERVER);
         assert_eq!(drift_err.data.unwrap()["actual"], "etag_2");
 
-        assert_eq!(RpcError::server_lost_range_support("dl_1").code, CODE_SERVER_LOST_RANGE_SUPPORT);
+        assert_eq!(
+            RpcError::server_lost_range_support("dl_1").code,
+            CODE_SERVER_LOST_RANGE_SUPPORT
+        );
         assert_eq!(RpcError::rate_limited(Some(60)).code, CODE_RATE_LIMITED);
-        assert_eq!(RpcError::too_many_redirects("http://loop").code, CODE_TOO_MANY_REDIRECTS);
+        assert_eq!(
+            RpcError::too_many_redirects("http://loop").code,
+            CODE_TOO_MANY_REDIRECTS
+        );
 
         // Daemon
-        assert_eq!(RpcError::daemon_already_running().code, CODE_DAEMON_ALREADY_RUNNING);
-        assert_eq!(RpcError::daemon_shutting_down().code, CODE_DAEMON_SHUTTING_DOWN);
+        assert_eq!(
+            RpcError::daemon_already_running().code,
+            CODE_DAEMON_ALREADY_RUNNING
+        );
+        assert_eq!(
+            RpcError::daemon_shutting_down().code,
+            CODE_DAEMON_SHUTTING_DOWN
+        );
     }
 
     #[test]
