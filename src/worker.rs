@@ -1,5 +1,6 @@
 use crate::engine::Progress;
 use crate::error::Error;
+use crate::limiter::throttle;
 use crate::probe::Validator;
 use crate::ranges::ByteRange;
 use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
@@ -177,6 +178,12 @@ pub async fn fetch_lane(
                     let allowed = (end_limit - current_offset) as usize;
                     let to_write_len = chunk.len().min(allowed);
                     let to_write = chunk.slice(..to_write_len);
+                    throttle(
+                        progress.rate_limiter.as_deref(),
+                        to_write_len as u64,
+                        cancel.as_ref(),
+                    )
+                    .await?;
 
                     let part_clone = Arc::clone(&part);
                     let curr_offset = current_offset;

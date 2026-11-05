@@ -432,6 +432,24 @@ pub struct UpdateUrlParams {
     pub new_url: String,
 }
 
+/// Daemon-wide queue limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonLimits {
+    /// How many downloads may run at once; the rest wait as `queued`.
+    pub max_active: usize,
+    /// Combined speed cap for all downloads in bytes per second; 0 means unlimited.
+    pub max_bytes_per_sec: u64,
+}
+
+/// Fields left out keep their current value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetLimitsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_active: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes_per_sec: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -492,6 +510,13 @@ pub struct DownloadStateChanged {
     pub new_state: DownloadStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Numeric part of a download id such as `dl_12`, for ordering. Other ids sort last.
+pub fn download_id_number(id: &str) -> u64 {
+    id.strip_prefix("dl_")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 // --- Encoding & Decoding Helpers ---

@@ -31,22 +31,27 @@ pub fn part_path(output: &Path) -> PathBuf {
 }
 
 pub fn save_atomic(path: &Path, state: &State) -> Result<(), Error> {
-    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
     let json =
         serde_json::to_vec_pretty(state).map_err(|e| Error::State(format!("json error: {e}")))?;
+    write_atomic(path, &json)?;
+    Ok(())
+}
 
+/// Write `bytes` to a temp file next to `path`, flush it to disk, then rename it
+/// over `path`, so readers see either the old or the new contents.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&tmp_path)?;
 
-    file.write_all(&json)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    std::fs::rename(&tmp_path, path)
 }
 
 pub fn load(path: &Path) -> Result<State, Error> {

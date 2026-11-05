@@ -179,7 +179,7 @@ async fn cancelled_download_stays_cancelled_after_the_engine_stops() {
         .expect("add");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let cancelled = client.cancel(&added.id).await.expect("cancel");
+    let cancelled = client.cancel(&added.id, false).await.expect("cancel");
     assert_eq!(cancelled.status, DownloadStatus::Cancelled);
 
     // The engine task finishes after the cancel signal; it must not overwrite the status.

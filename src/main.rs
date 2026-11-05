@@ -3,7 +3,10 @@ use rustdm::daemon::launch::{daemon_exe_path, spawn_detached};
 use rustdm::daemon::service::{daemon_holds_lock, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::engine::{build_client, download, resume, DownloadRequest, Outcome, Progress};
 use rustdm::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
-use rustdm::ipc::protocol::{AddDownloadParams, DownloadStatus, DownloadSummary};
+use rustdm::ipc::protocol::{
+    download_id_number, AddDownloadParams, DaemonLimits, DownloadStatus, DownloadSummary,
+    SetLimitsParams,
+};
 use rustdm::ipc::transport::IpcEndpoint;
 use std::error::Error;
 use std::io::Write;
@@ -67,10 +70,26 @@ enum Commands {
     },
     /// List the background daemon's downloads
     List,
-    /// Pause a background download
+    /// Pause a background download (a queued one stays out of the queue)
     Pause { id: String },
     /// Stop a background download for good
-    Cancel { id: String },
+    Cancel {
+        id: String,
+        /// Also delete the partial .part and .part.rdm files
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Remove a finished, paused, or cancelled download from the list (files are kept)
+    Remove { id: String },
+    /// Show or change how many downloads run at once and the total speed cap
+    Limits {
+        /// Downloads that run at the same time; the rest wait in the queue
+        #[arg(long)]
+        max_active: Option<usize>,
+        /// Combined speed cap such as 500K, 2M or 1.5MiB (K = 1024 bytes); 0 or "off" removes it
+        #[arg(long, value_parser = parse_speed)]
+        max_speed: Option<u64>,
+    },
     /// Start, stop, or check the background daemon
     Daemon {
         #[command(subcommand)]
@@ -146,11 +165,23 @@ async fn run(cli: Cli) -> CliResult {
             print_status(&summary);
             Ok(())
         }
-        Commands::Cancel { id } => {
-            let summary = DaemonClient::connect(&endpoint).await?.cancel(&id).await?;
+        Commands::Cancel { id, delete } => {
+            let summary = DaemonClient::connect(&endpoint)
+                .await?
+                .cancel(&id, delete)
+                .await?;
             print_status(&summary);
             Ok(())
         }
+        Commands::Remove { id } => {
+            let summary = DaemonClient::connect(&endpoint).await?.remove(&id).await?;
+            println!("Removed {} ({})", summary.id, summary.filename);
+            Ok(())
+        }
+        Commands::Limits {
+            max_active,
+            max_speed,
+        } => limits(&endpoint, max_active, max_speed).await,
         Commands::Daemon { action } => match action {
             DaemonAction::Start => daemon_start(&endpoint).await,
             DaemonAction::Status => daemon_status(&endpoint).await,
@@ -279,7 +310,32 @@ async fn add(
             connections: Some(connections),
         })
         .await?;
-    println!("Added {} (saving to {})", summary.id, dir.display());
+    println!(
+        "Added {} ({}, saving to {})",
+        summary.id,
+        status_label(summary.status),
+        dir.display()
+    );
+    Ok(())
+}
+
+async fn limits(
+    endpoint: &IpcEndpoint,
+    max_active: Option<usize>,
+    max_speed: Option<u64>,
+) -> CliResult {
+    let mut client = DaemonClient::connect(endpoint).await?;
+    let limits = if max_active.is_none() && max_speed.is_none() {
+        client.get_limits().await?
+    } else {
+        client
+            .set_limits(SetLimitsParams {
+                max_active,
+                max_bytes_per_sec: max_speed,
+            })
+            .await?
+    };
+    println!("{}", format_limits(&limits));
     Ok(())
 }
 
@@ -298,7 +354,7 @@ async fn list(endpoint: &IpcEndpoint) -> CliResult {
         return Ok(());
     }
 
-    downloads.sort_by_key(|d| id_number(&d.id));
+    downloads.sort_by_key(|d| download_id_number(&d.id));
     println!(
         "{:<8} {:<10} {:<28} {:>12}  NAME",
         "ID", "STATUS", "PROGRESS", "SPEED"
@@ -368,10 +424,42 @@ fn is_daemon_id(target: &str) -> bool {
         .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn id_number(id: &str) -> u64 {
-    id.strip_prefix("dl_")
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(u64::MAX)
+fn format_limits(limits: &DaemonLimits) -> String {
+    let speed = if limits.max_bytes_per_sec == 0 {
+        "unlimited".to_string()
+    } else {
+        format!("{}/s", format_bytes(limits.max_bytes_per_sec))
+    };
+    format!(
+        "Downloads at once: {}\nSpeed cap: {}",
+        limits.max_active, speed
+    )
+}
+
+/// Parse a speed such as `500K`, `2M`, `1.5MiB/s` or `0`/`off` (unlimited).
+/// Units are binary: K = 1024 bytes.
+fn parse_speed(raw: &str) -> Result<u64, String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if matches!(lower.as_str(), "0" | "off" | "unlimited") {
+        return Ok(0);
+    }
+
+    let text = lower.strip_suffix("/s").unwrap_or(&lower);
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("invalid speed '{raw}'; try 500K or 2M"))?;
+    let multiplier: u64 = match unit.trim() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        other => return Err(format!("unknown speed unit '{other}'; use K, M or G")),
+    };
+    Ok((value * multiplier as f64) as u64)
 }
 
 fn status_label(status: DownloadStatus) -> &'static str {
@@ -493,7 +581,30 @@ mod tests {
     #[test]
     fn ids_sort_numerically() {
         let mut ids = vec!["dl_10", "dl_2", "dl_1"];
-        ids.sort_by_key(|id| id_number(id));
+        ids.sort_by_key(|id| download_id_number(id));
         assert_eq!(ids, vec!["dl_1", "dl_2", "dl_10"]);
+    }
+
+    #[test]
+    fn speeds_accept_binary_units_and_off() {
+        assert_eq!(parse_speed("500K"), Ok(500 * 1024));
+        assert_eq!(parse_speed("2M"), Ok(2 * 1024 * 1024));
+        assert_eq!(parse_speed("1.5MiB/s"), Ok(1536 * 1024));
+        assert_eq!(parse_speed("4096"), Ok(4096));
+        assert_eq!(parse_speed("off"), Ok(0));
+        assert!(parse_speed("fast").is_err());
+        assert!(parse_speed("10X").is_err());
+    }
+
+    #[test]
+    fn limits_show_unlimited_speed_in_words() {
+        let limits = DaemonLimits {
+            max_active: 3,
+            max_bytes_per_sec: 0,
+        };
+        assert_eq!(
+            format_limits(&limits),
+            "Downloads at once: 3\nSpeed cap: unlimited"
+        );
     }
 }

@@ -1,6 +1,8 @@
 use clap::Parser;
+use rustdm::daemon::queue_store::{default_data_dir, DATA_DIR_ENV};
 use rustdm::daemon::service::{run_daemon, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::ipc::transport::IpcEndpoint;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser)]
@@ -13,6 +15,10 @@ struct Args {
     /// IPC endpoint: a socket path on Unix, a pipe name on Windows
     #[arg(long)]
     endpoint: Option<String>,
+    /// Folder for the saved download queue (default: $RUSTDM_DATA_DIR, then
+    /// %LOCALAPPDATA%\rustdm on Windows or ~/.local/state/rustdm elsewhere)
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -31,8 +37,19 @@ async fn main() -> ExitCode {
         .as_deref()
         .map(IpcEndpoint::from_arg)
         .unwrap_or_else(IpcEndpoint::default_endpoint);
+    let data_dir = args
+        .data_dir
+        .or_else(|| std::env::var_os(DATA_DIR_ENV).map(PathBuf::from))
+        .unwrap_or_else(default_data_dir);
 
-    match run_daemon(&endpoint, shutdown_signal(), DEFAULT_SETTLE_TIMEOUT).await {
+    match run_daemon(
+        &endpoint,
+        Some(&data_dir),
+        shutdown_signal(),
+        DEFAULT_SETTLE_TIMEOUT,
+    )
+    .await
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("rdmd: {e}");

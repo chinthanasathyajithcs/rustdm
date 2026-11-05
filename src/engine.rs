@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::limiter::{throttle, RateLimiter};
 use crate::probe::{self, Probe};
 use crate::ranges::{ByteRange, RangeSet};
 use crate::state::{self, part_path, State, STATE_VERSION};
@@ -16,6 +17,10 @@ pub struct Progress {
     /// Total size in bytes once the probe has run; 0 while unknown.
     pub total: AtomicU64,
     pub completed: Mutex<RangeSet>,
+    /// Final file path once the engine has chosen it.
+    pub output: Mutex<Option<PathBuf>>,
+    /// Optional cap shared with other downloads on their combined speed.
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl Progress {
@@ -24,6 +29,15 @@ impl Progress {
             downloaded: AtomicU64::new(0),
             total: AtomicU64::new(0),
             completed: Mutex::new(RangeSet::new()),
+            output: Mutex::new(None),
+            rate_limiter: None,
+        }
+    }
+
+    pub fn with_rate_limiter(limiter: Arc<RateLimiter>) -> Self {
+        Self {
+            rate_limiter: Some(limiter),
+            ..Self::new()
         }
     }
 }
@@ -113,6 +127,7 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
     let probe_result = probe::probe(client, &req.url).await?;
     let final_path = resolve_output(&req, &probe_result);
+    *req.progress.output.lock().unwrap() = Some(final_path.clone());
     let part_p = part_path(&final_path);
     let state_p = state::state_path(&final_path);
 
@@ -255,6 +270,7 @@ pub async fn resume_with_options(
 
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
     progress.total.store(state.total, Ordering::SeqCst);
+    *progress.output.lock().unwrap() = Some(state.output.clone());
     progress
         .downloaded
         .store(range_set.covered(), Ordering::SeqCst);
@@ -510,23 +526,29 @@ async fn download_single(
 
     let mut offset = 0u64;
     while let Some(chunk) = res.chunk().await? {
-        if let Some(ref rx) = req.cancel {
-            if *rx.borrow() {
-                if let (Some(sp), Some(st)) = (state_file_path, state_template) {
-                    let completed_snapshot: Vec<ByteRange> = {
-                        let guard = req.progress.completed.lock().unwrap();
-                        guard.ranges().to_vec()
-                    };
-                    let _ = part.sync();
-                    let mut s = st.clone();
-                    s.completed = completed_snapshot;
-                    let _ = state::save_atomic(sp, &s);
-                }
-                return Err(Error::Cancelled);
+        let chunk_len = chunk.len() as u64;
+        let cancelled = req.cancel.as_ref().is_some_and(|rx| *rx.borrow())
+            || throttle(
+                req.progress.rate_limiter.as_deref(),
+                chunk_len,
+                req.cancel.as_ref(),
+            )
+            .await
+            .is_err();
+        if cancelled {
+            if let (Some(sp), Some(st)) = (state_file_path, state_template) {
+                let completed_snapshot: Vec<ByteRange> = {
+                    let guard = req.progress.completed.lock().unwrap();
+                    guard.ranges().to_vec()
+                };
+                let _ = part.sync();
+                let mut s = st.clone();
+                s.completed = completed_snapshot;
+                let _ = state::save_atomic(sp, &s);
             }
+            return Err(Error::Cancelled);
         }
 
-        let chunk_len = chunk.len() as u64;
         let part_clone = Arc::clone(&part);
         let curr_offset = offset;
         tokio::task::spawn_blocking(move || part_clone.write_at(curr_offset, &chunk))

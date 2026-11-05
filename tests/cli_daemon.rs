@@ -1,6 +1,7 @@
+use rustdm::daemon::queue_store::DATA_DIR_ENV;
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -11,8 +12,10 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Runs `rdm` against one endpoint and stops the daemon it started when dropped.
+/// The daemon keeps its queue file in the test's own folder.
 struct Rdm {
     endpoint: String,
+    data_dir: PathBuf,
 }
 
 impl Rdm {
@@ -25,13 +28,17 @@ impl Rdm {
         };
         Self {
             endpoint: endpoint.to_string(),
+            data_dir: dir.join("data"),
         }
     }
 
     /// Run `rdm`, failing the test if it does not finish within `COMMAND_TIMEOUT`.
     fn run(&self, args: &[&str]) -> Output {
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_rdm"));
-        cmd.arg("--endpoint").arg(&self.endpoint).args(args);
+        cmd.env(DATA_DIR_ENV, &self.data_dir)
+            .arg("--endpoint")
+            .arg(&self.endpoint)
+            .args(args);
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -144,5 +151,49 @@ async fn rdm_pauses_resumes_and_cancels_background_downloads() {
         assert!(rdm.ok(&["cancel", "dl_1"]).contains("cancelled"));
         std::thread::sleep(Duration::from_millis(500));
         assert!(rdm.ok(&["list"]).contains("cancelled"));
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_limits_queue_extra_downloads_and_survive_a_restart() {
+    let mock = TestServer::start(
+        pattern_bytes(4 * 1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 256 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+    let url_a = mock.url().join("a.bin").unwrap().to_string();
+    let url_b = mock.url().join("b.bin").unwrap().to_string();
+    let dest = downloads.path().to_string_lossy().into_owned();
+
+    tokio::task::block_in_place(|| {
+        rdm.ok(&["daemon", "start"]);
+        let limits = rdm.ok(&["limits", "--max-active", "1", "--max-speed", "1M"]);
+        assert!(limits.contains("Downloads at once: 1"), "{limits}");
+        assert!(limits.contains("1.0 MiB/s"), "{limits}");
+
+        assert!(rdm.ok(&["add", &url_a, "--dir", &dest]).contains("active"));
+        assert!(rdm.ok(&["add", &url_b, "--dir", &dest]).contains("queued"));
+
+        assert!(rdm.ok(&["daemon", "stop"]).contains("stopped"));
+        rdm.ok(&["daemon", "start"]);
+
+        let listing = rdm.wait_for_list("active");
+        assert!(
+            listing.contains("dl_1") && listing.contains("dl_2"),
+            "{listing}"
+        );
+        assert!(listing.contains("queued"), "{listing}");
+        assert!(rdm.ok(&["limits"]).contains("Downloads at once: 1"));
+
+        assert!(rdm
+            .ok(&["cancel", "dl_2", "--delete"])
+            .contains("cancelled"));
+        assert!(rdm.ok(&["remove", "dl_2"]).contains("Removed dl_2"));
+        assert!(!rdm.ok(&["list"]).contains("dl_2"));
     });
 }
