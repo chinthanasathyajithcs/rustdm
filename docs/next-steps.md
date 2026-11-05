@@ -1,6 +1,6 @@
 # rustdm: where we are and what's next
 
-Updated: 2026-11-04
+Updated: 2026-11-05
 
 ## Done
 
@@ -13,7 +13,11 @@ Updated: 2026-11-04
   - **Substep 2.1 (Wire Protocol):** JSON-RPC 2.0 protocol models with comprehensive error taxonomy covering 20+ edge cases (`src/ipc/protocol.rs`).
   - **Substep 2.2 (Cross-Platform IPC Transport):** Windows Named Pipes (`\\.\pipe\rustdm`) with `ERROR_PIPE_BUSY` (231) retry logic and Unix Domain Sockets (`/tmp/rustdm.sock`) with crash recovery and auto-cleanup (`src/ipc/transport.rs`).
   - **Substep 2.3 (Daemon Core & Engine Bridge):** In-memory multi-task manager coordinating background downloads, non-blocking pause/resume, and real-time telemetry streaming over IPC (`src/daemon/core.rs`).
-- **Testing:** 86 automated tests passing across unit, integration, and crash test suites on both Windows and Linux CI (100% green).
+- **Milestone 2 - Task 2 Complete (Daemon Binary & CLI Client, branch `feat/daemon-cli`):**
+  - **Substep 2.4 (`rdmd`):** `src/bin/rdmd.rs` with the service loop in `src/daemon/service.rs`. An exclusive OS file lock (`<endpoint>.lock`) keeps a second daemon off the endpoint. Ctrl+C, SIGTERM, Ctrl+Break, console close, or `daemon.shutdown` pause every active download and give it up to 10 s to save its `.part.rdm` state. SIGHUP is ignored so the daemon outlives its terminal.
+  - **Substep 2.5 (IPC client & CLI):** `src/ipc/client.rs` (`DaemonClient`, `connect_or_spawn`) and `src/daemon/launch.rs` (detached spawn of `rdmd` from the same folder as `rdm`). New `rdm` commands: `add`, `list`, `pause`, `cancel`, `resume <dl_N>`, `daemon start|status|stop`, plus a global `--endpoint`. `rdm resume` still accepts a `.part.rdm` file for foreground resumes.
+  - **Daemon core fixes:** a cancelled download no longer turns into "paused" when its engine stops; a shutdown arriving between accept-loop iterations is no longer missed; `list` shows total size, percent, and ETA (the engine now publishes `Progress::total`).
+- **Testing:** 109 automated tests passing on Linux (unit, integration, crash, daemon process, and CLI end-to-end suites). Windows-only code is type-checked; Windows CI runs on the next push.
 
 ## Milestone 2 Architecture & Status
 
@@ -21,12 +25,13 @@ Updated: 2026-11-04
    - Query drive free space before creating part files or allocating disk blocks.
    - Reject / pause before downloading if `available_bytes < total_bytes + safety_margin`.
 
-2. **[ ] Task 2: Background Daemon & Local IPC (`rdmd`) (Core Merged - CLI Up Next)**
+2. **[x] Task 2: Background Daemon & Local IPC (`rdmd`)**
    - [x] Substep 2.1: Wire Protocol & Serialization (`src/ipc/protocol.rs` - JSON-RPC 2.0 with comprehensive error taxonomy).
    - [x] Substep 2.2: Cross-Platform IPC Transport Layer (`src/ipc/transport.rs` - Windows Named Pipes & Unix Domain Sockets).
    - [x] Substep 2.3: In-Memory Daemon Core & Engine Controller (`src/daemon/mod.rs` & `src/daemon/core.rs` - multi-task coordinator, pause/resume, live telemetry broadcast).
-   - [ ] Substep 2.4: Standalone Daemon Executable (`src/bin/rdmd.rs` - background service entrypoint, single-instance lock, graceful signal shutdown).
-   - [ ] Substep 2.5: IPC Client & CLI Integration (`rdm` auto-spawning, remote control commands: `add`, `list`, `pause`, `resume`, `cancel`, `daemon status/stop`).
+   - [x] Substep 2.4: Standalone Daemon Executable (`src/bin/rdmd.rs` - background service entrypoint, single-instance lock, graceful signal shutdown).
+   - [x] Substep 2.5: IPC Client & CLI Integration (`rdm` auto-spawning, remote control commands: `add`, `list`, `pause`, `resume`, `cancel`, `daemon start/status/stop`).
+   - Known gaps for Task 3: downloads live only in daemon memory (lost on daemon restart; their `.part.rdm` files remain and resume with `rdm resume <file>`); `download.cancel` with `delete_partial` targets the wrong path, so `rdm cancel` keeps partial files; a download added without `--name` shows as `download` in `rdm list` until it completes.
 
 3. **[ ] Task 3: Multi-Download Queue Manager**
    - Queue state machine (Active, Queued, Paused, Completed, Failed).
