@@ -74,6 +74,50 @@ impl IpcEndpoint {
         }
     }
 
+    /// Parse a user-supplied endpoint: a socket path on Unix, a pipe name on Windows.
+    /// A bare Windows pipe name such as `rustdm` becomes `\\.\pipe\rustdm`.
+    pub fn from_arg(raw: &str) -> Self {
+        #[cfg(unix)]
+        {
+            Self::UnixSocket(PathBuf::from(raw))
+        }
+        #[cfg(windows)]
+        {
+            if raw.starts_with(r"\\") {
+                Self::NamedPipe(raw.to_string())
+            } else {
+                Self::NamedPipe(format!(r"\\.\pipe\{}", raw))
+            }
+        }
+    }
+
+    /// Path of the lock file that keeps a second daemon off this endpoint.
+    pub fn lock_path(&self) -> PathBuf {
+        match self {
+            Self::UnixSocket(path) => {
+                let mut lock = path.clone().into_os_string();
+                lock.push(".lock");
+                PathBuf::from(lock)
+            }
+            Self::NamedPipe(name) => {
+                let leaf: String = name
+                    .rsplit('\\')
+                    .next()
+                    .unwrap_or(name)
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                std::env::temp_dir().join(format!("{}.lock", leaf))
+            }
+        }
+    }
+
     pub fn as_path(&self) -> Option<&Path> {
         match self {
             Self::UnixSocket(p) => Some(p),
@@ -85,6 +129,15 @@ impl IpcEndpoint {
         match self {
             Self::UnixSocket(_) => None,
             Self::NamedPipe(s) => Some(s),
+        }
+    }
+}
+
+impl std::fmt::Display for IpcEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnixSocket(path) => write!(f, "{}", path.display()),
+            Self::NamedPipe(name) => write!(f, "{}", name),
         }
     }
 }
@@ -398,5 +451,35 @@ impl Drop for IpcListener {
         if let Some(ref path) = self.socket_path {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_round_trips_through_its_argument_form() {
+        let endpoint = IpcEndpoint::default_endpoint();
+        assert_eq!(IpcEndpoint::from_arg(&endpoint.to_string()), endpoint);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_lock_file_sits_next_to_the_socket() {
+        let endpoint = IpcEndpoint::UnixSocket(PathBuf::from("/run/user/1000/rustdm.sock"));
+        assert_eq!(
+            endpoint.lock_path(),
+            PathBuf::from("/run/user/1000/rustdm.sock.lock")
+        );
+    }
+
+    #[test]
+    fn pipe_lock_file_uses_a_sanitized_pipe_name() {
+        let endpoint = IpcEndpoint::NamedPipe(r"\\.\pipe\rustdm:test".to_string());
+        assert_eq!(
+            endpoint.lock_path(),
+            std::env::temp_dir().join("rustdm_test.lock")
+        );
     }
 }

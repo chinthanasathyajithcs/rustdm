@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "rdm"
 path = "src/main.rs"
 
+[[bin]]
+name = "rdmd"
+path = "src/bin/rdmd.rs"
+
 [features]
 testing = []
 
