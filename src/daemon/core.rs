@@ -46,6 +46,42 @@ impl TaskRecord {
     }
 }
 
+/// Record how an engine run ended. A cancelled task stays cancelled: the engine
+/// reports a cancel as a pause, but the user asked for the download to stop.
+fn apply_outcome(rec: &mut TaskRecord, outcome: Result<Outcome, crate::error::Error>) {
+    rec.downloaded_bytes = rec.progress.downloaded.load(Ordering::Relaxed);
+    rec.speed_bps = 0;
+    rec.eta_secs = None;
+    rec.cancel_tx = None;
+
+    match outcome {
+        Ok(Outcome::Completed { path, steals: _ }) => {
+            rec.status = DownloadStatus::Completed;
+            if let Some(name) = path.file_name() {
+                rec.filename = name.to_string_lossy().to_string();
+            }
+            rec.destination = path;
+            rec.total_bytes = Some(rec.downloaded_bytes);
+            rec.eta_secs = Some(0);
+        }
+        Ok(Outcome::Paused { reason: _, state }) => {
+            if rec.status != DownloadStatus::Cancelled {
+                rec.status = DownloadStatus::Paused;
+            }
+            rec.state_file = Some(state);
+        }
+        Err(e) => {
+            if rec.status != DownloadStatus::Cancelled {
+                rec.status = DownloadStatus::Failed;
+            }
+            rec.error_message = Some(e.to_string());
+        }
+    }
+}
+
+/// How often `wait_until_settled` re-checks task states.
+const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 pub struct DaemonState {
     pub downloads: HashMap<String, Arc<Mutex<TaskRecord>>>,
     pub next_id: u64,
@@ -96,6 +132,35 @@ impl DaemonCore {
             }
         }
         self.shutdown_notify.notify_waiters();
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.state.lock().unwrap().is_shutting_down
+    }
+
+    /// Wait until no download is still running or saving its state.
+    /// Returns false if some were still busy when `timeout` ran out.
+    pub async fn wait_until_settled(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !self.has_running_tasks() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(SETTLE_POLL_INTERVAL).await;
+        }
+    }
+
+    fn has_running_tasks(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state.downloads.values().any(|t| {
+            matches!(
+                t.lock().unwrap().status,
+                DownloadStatus::Active | DownloadStatus::Pausing | DownloadStatus::Retrying
+            )
+        })
     }
 
     pub fn add_download(&self, params: AddDownloadParams) -> Result<DownloadSummary, RpcError> {
@@ -169,36 +234,7 @@ impl DaemonCore {
 
         tokio::spawn(async move {
             let outcome = engine::download(&client, req).await;
-            let mut rec = record_clone.lock().unwrap();
-            match outcome {
-                Ok(Outcome::Completed { path, steals: _ }) => {
-                    rec.status = DownloadStatus::Completed;
-                    rec.destination = path.clone();
-                    if let Some(name) = path.file_name() {
-                        rec.filename = name.to_string_lossy().to_string();
-                    }
-                    let total = rec.progress.downloaded.load(Ordering::Relaxed);
-                    rec.downloaded_bytes = total;
-                    rec.total_bytes = Some(total);
-                    rec.speed_bps = 0;
-                    rec.eta_secs = Some(0);
-                    rec.cancel_tx = None;
-                }
-                Ok(Outcome::Paused { reason: _, state }) => {
-                    rec.status = DownloadStatus::Paused;
-                    rec.state_file = Some(state);
-                    rec.speed_bps = 0;
-                    rec.eta_secs = None;
-                    rec.cancel_tx = None;
-                }
-                Err(e) => {
-                    rec.status = DownloadStatus::Failed;
-                    rec.error_message = Some(e.to_string());
-                    rec.speed_bps = 0;
-                    rec.eta_secs = None;
-                    rec.cancel_tx = None;
-                }
-            }
+            apply_outcome(&mut record_clone.lock().unwrap(), outcome);
         });
 
         let rec = task_record.lock().unwrap();
@@ -278,37 +314,7 @@ impl DaemonCore {
                         Some(cancel_rx),
                     )
                     .await;
-
-                    let mut rec = record_clone.lock().unwrap();
-                    match outcome {
-                        Ok(Outcome::Completed { path, steals: _ }) => {
-                            rec.status = DownloadStatus::Completed;
-                            rec.destination = path.clone();
-                            if let Some(name) = path.file_name() {
-                                rec.filename = name.to_string_lossy().to_string();
-                            }
-                            let total = rec.progress.downloaded.load(Ordering::Relaxed);
-                            rec.downloaded_bytes = total;
-                            rec.total_bytes = Some(total);
-                            rec.speed_bps = 0;
-                            rec.eta_secs = Some(0);
-                            rec.cancel_tx = None;
-                        }
-                        Ok(Outcome::Paused { reason: _, state }) => {
-                            rec.status = DownloadStatus::Paused;
-                            rec.state_file = Some(state);
-                            rec.speed_bps = 0;
-                            rec.eta_secs = None;
-                            rec.cancel_tx = None;
-                        }
-                        Err(e) => {
-                            rec.status = DownloadStatus::Failed;
-                            rec.error_message = Some(e.to_string());
-                            rec.speed_bps = 0;
-                            rec.eta_secs = None;
-                            rec.cancel_tx = None;
-                        }
-                    }
+                    apply_outcome(&mut record_clone.lock().unwrap(), outcome);
                 });
 
                 Ok(task.to_summary())
@@ -386,6 +392,13 @@ impl DaemonCore {
                 task.downloaded_bytes = current_bytes;
                 task.last_tick_bytes = current_bytes;
                 task.last_tick_time = now;
+
+                if task.total_bytes.is_none() {
+                    let total = task.progress.total.load(Ordering::Relaxed);
+                    if total > 0 {
+                        task.total_bytes = Some(total);
+                    }
+                }
 
                 if let Some(total) = task.total_bytes {
                     if speed > 0 && total > current_bytes {
@@ -607,20 +620,33 @@ impl DaemonServer {
         let ticker_core = core.clone();
         let ticker_notify = Arc::clone(&shutdown_notify);
         let ticker_handle = tokio::spawn(async move {
+            // Register for the notification before checking the flag, so a shutdown
+            // that lands between loop iterations (or before this task starts) is not lost.
+            let shutdown = ticker_notify.notified();
+            tokio::pin!(shutdown);
+            shutdown.as_mut().enable();
+            if ticker_core.is_shutting_down() {
+                return;
+            }
+
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         ticker_core.tick_telemetry();
                     }
-                    _ = ticker_notify.notified() => {
+                    _ = &mut shutdown => {
                         break;
                     }
                 }
             }
         });
 
-        loop {
+        let shutdown = shutdown_notify.notified();
+        tokio::pin!(shutdown);
+        shutdown.as_mut().enable();
+
+        while !core.is_shutting_down() {
             tokio::select! {
                 accept_res = self.listener.accept() => {
                     let conn = match accept_res {
@@ -677,7 +703,7 @@ impl DaemonServer {
                         }
                     });
                 }
-                _ = shutdown_notify.notified() => {
+                _ = &mut shutdown => {
                     break;
                 }
             }

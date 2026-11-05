@@ -13,6 +13,8 @@ pub const DEFAULT_CONNECTIONS: u32 = 8;
 
 pub struct Progress {
     pub downloaded: AtomicU64,
+    /// Total size in bytes once the probe has run; 0 while unknown.
+    pub total: AtomicU64,
     pub completed: Mutex<RangeSet>,
 }
 
@@ -20,6 +22,7 @@ impl Progress {
     pub fn new() -> Self {
         Self {
             downloaded: AtomicU64::new(0),
+            total: AtomicU64::new(0),
             completed: Mutex::new(RangeSet::new()),
         }
     }
@@ -115,6 +118,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
 
     if let Some(total) = probe_result.total {
         crate::disk::ensure_disk_space(&part_p, total, crate::disk::SAFETY_MARGIN_BYTES)?;
+        req.progress.total.store(total, Ordering::SeqCst);
     }
 
     let part_file = PartFile::create(&part_p, probe_result.total)?;
@@ -250,6 +254,7 @@ pub async fn resume_with_options(
     let missing_ranges = range_set.complement(state.total);
 
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
+    progress.total.store(state.total, Ordering::SeqCst);
     progress
         .downloaded
         .store(range_set.covered(), Ordering::SeqCst);
