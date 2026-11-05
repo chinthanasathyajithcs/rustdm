@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Longest one `rdm` command may take; a hang fails the test instead of stalling CI.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Runs `rdm` against one endpoint and stops the daemon it started when dropped.
 struct Rdm {
@@ -26,12 +28,17 @@ impl Rdm {
         }
     }
 
+    /// Run `rdm`, failing the test if it does not finish within `COMMAND_TIMEOUT`.
     fn run(&self, args: &[&str]) -> Output {
-        std::process::Command::new(env!("CARGO_BIN_EXE_rdm"))
-            .arg("--endpoint")
-            .arg(&self.endpoint)
-            .args(args)
-            .output()
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_rdm"));
+        cmd.arg("--endpoint").arg(&self.endpoint).args(args);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(cmd.output());
+        });
+        rx.recv_timeout(COMMAND_TIMEOUT)
+            .unwrap_or_else(|_| panic!("rdm {args:?} did not finish within {COMMAND_TIMEOUT:?}"))
             .expect("run rdm")
     }
 
