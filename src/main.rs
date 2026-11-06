@@ -293,6 +293,7 @@ async fn download_foreground(url: &str, out: String, connections: u32) -> CliRes
         connections,
         progress,
         cancel: Some(cancel_rx),
+        file_name: None,
     };
 
     let result = download(&build_client(), req).await;

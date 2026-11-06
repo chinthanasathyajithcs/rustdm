@@ -73,6 +73,8 @@ rdm daemon status                             # also: daemon start, daemon stop
 
 Downloads cope with bad networks on their own: a connection that goes silent for 30 s is dropped and reopened, a connection that keeps dropping carries on as long as data still arrives, and a download that fails on network or server trouble goes to `retrying` and tries again by itself (after 3 s, 6 s, 12 s, ... up to 5 times in a row without progress). Missing download folders are created. A paused download from a server that cannot send part of a file starts over instead of failing.
 
+Only you can talk to your daemon: it listens on a per-user pipe (`\\.\pipe\rustdm-<user>`) or socket (`$XDG_RUNTIME_DIR/rustdm.sock`, or `/tmp/rustdm-<uid>.sock`), and `rdm` refuses to connect to one owned by another user. A cancelled download can be resumed with `rdm resume <id>` (it starts over if `--delete` removed its files); in the dashboard, `c` asks before cancelling. `rdmd` writes its log to `rdmd.log` in its data folder.
+
 `rdm daemon stop` pauses every active download and saves its state before the daemon exits. Use `--endpoint <socket path or pipe name>` to talk to a daemon other than the default one.
 
 Downloads wait in a queue: by default 3 run at once, in list order. Lowering `--max-active` sends the downloads furthest down the list back to the queue; they resume where they stopped once a slot frees up. A resumed download uses the same number of connections it started with. The queue and limits are saved to `queue.json` (in `%LOCALAPPDATA%\rustdm`, `~/.local/state/rustdm`, or `$RUSTDM_DATA_DIR`), so after a restart the daemon picks up where it left off.

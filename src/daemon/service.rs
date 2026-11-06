@@ -7,6 +7,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Lock file in the data folder, held while a daemon uses that folder.
+pub const DATA_LOCK_FILE_NAME: &str = "rdmd.lock";
+
 /// How long shutdown waits for downloads to pause and save their state.
 pub const DEFAULT_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -73,6 +76,11 @@ where
     S: Future<Output = ()> + Send + 'static,
 {
     let _lock = InstanceLock::acquire(&endpoint.lock_path())?;
+    // Two daemons sharing a queue file would run the same downloads twice, even
+    // on different endpoints (for example across an upgrade that renamed one).
+    let _data_lock = data_dir
+        .map(|dir| InstanceLock::acquire(&dir.join(DATA_LOCK_FILE_NAME)))
+        .transpose()?;
     let core = match data_dir {
         Some(dir) => {
             let store = QueueStore::in_dir(dir);

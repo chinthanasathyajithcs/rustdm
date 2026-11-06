@@ -190,6 +190,13 @@ impl DaemonCore {
             .map_err(|e| RpcError::invalid_params(format!("Invalid URL: {}", e)))?;
         let max_bytes_per_sec = params.max_bytes_per_sec.unwrap_or(0);
         validate_speed(max_bytes_per_sec)?;
+        if let Some(name) = &params.filename {
+            if crate::template::sanitize_component(name).is_empty() {
+                return Err(RpcError::invalid_params(format!(
+                    "{name:?} is not a usable file name"
+                )));
+            }
+        }
 
         let task = {
             let mut state = self.state.lock().unwrap();
@@ -269,23 +276,27 @@ impl DaemonCore {
         Ok(summary)
     }
 
-    /// Put a paused or failed download back in the queue; it starts when a slot is free.
+    /// Put a paused, failed, or cancelled download back in the queue; it starts
+    /// when a slot is free.
     pub fn resume_download(&self, id: &str) -> Result<DownloadSummary, RpcError> {
         let task_lock = self.get_task(id)?;
         {
             let mut task = task_lock.lock().unwrap();
             match task.status {
                 DownloadStatus::Completed => return Err(RpcError::already_completed(id)),
-                DownloadStatus::Cancelled => {
-                    return Err(RpcError::invalid_request(Some(
-                        "Cannot resume cancelled download".into(),
-                    )))
+                DownloadStatus::Cancelled if task.running => {
+                    return Err(RpcError::operation_in_progress(id, "cancelling"))
                 }
                 DownloadStatus::Pausing => {
                     return Err(RpcError::operation_in_progress(id, "pausing"))
                 }
                 DownloadStatus::Active | DownloadStatus::Queued => {}
-                DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Retrying => {
+                // A stopped cancel continues from its partial file, or starts
+                // over if `--delete` removed it.
+                DownloadStatus::Paused
+                | DownloadStatus::Failed
+                | DownloadStatus::Retrying
+                | DownloadStatus::Cancelled => {
                     task.status = DownloadStatus::Queued;
                     task.error_message = None;
                     task.resume_after_restart = false;
@@ -522,10 +533,10 @@ impl DaemonCore {
         task.progress = Arc::clone(&progress);
         task.begin_run();
 
-        let template = match task.requested_name {
-            Some(ref name) => format!("{{downloads}}/{}", name),
-            None => "{downloads}/{name}".to_string(),
-        };
+        // The requested name is a value for {name}, never part of the template,
+        // so it is sanitized and cannot reach outside the folder.
+        let template = "{downloads}/{name}".to_string();
+        let file_name = task.requested_name.clone();
         let url = task.url.clone();
         let directory = task.directory.clone();
         let connections = task.connections;
@@ -549,6 +560,7 @@ impl DaemonCore {
                         let req = DownloadRequest {
                             url,
                             template,
+                            file_name,
                             downloads_dir: directory,
                             connections,
                             progress,
