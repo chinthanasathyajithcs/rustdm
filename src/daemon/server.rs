@@ -129,6 +129,7 @@ impl DaemonServer {
                 tokio::select! {
                     _ = interval.tick() => {
                         ticker_core.tick_telemetry();
+                        ticker_core.retry_due_downloads();
                     }
                     _ = &mut shutdown => {
                         break;

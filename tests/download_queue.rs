@@ -578,3 +578,61 @@ async fn queue_order_and_speed_caps_survive_a_daemon_restart() {
     assert_eq!(ids(&restored), vec!["dl_3", "dl_1", "dl_2"]);
     assert_eq!(restored[2].max_bytes_per_sec, 48 * 1024);
 }
+
+#[tokio::test]
+async fn a_download_that_hits_server_trouble_retries_by_itself() {
+    let body = pattern_bytes(64 * 1024);
+    // The first request (the size probe) gets a 500.
+    let mock = TestServer::start(
+        body.clone(),
+        Mode::FailThenOk {
+            status: 500,
+            times: 1,
+            retry_after: None,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    let added = client
+        .add(add_params(&mock, "retry.bin", dir.path()))
+        .await
+        .unwrap();
+
+    let list = wait_for(&mut client, "never went to retrying", |list| {
+        status_of(list, &added.id) == DownloadStatus::Retrying
+    })
+    .await;
+    let message = list[0].error_message.clone().unwrap_or_default();
+    assert!(message.contains("retry 1 of 5"), "{message}");
+
+    wait_for(&mut client, "the retry never completed", |list| {
+        status_of(list, &added.id) == DownloadStatus::Completed
+    })
+    .await;
+    assert_eq!(std::fs::read(dir.path().join("retry.bin")).unwrap(), body);
+}
+
+#[tokio::test]
+async fn pausing_a_download_that_waits_to_retry_stops_the_retry() {
+    let mock = TestServer::start(pattern_bytes(1024), Mode::Status(500)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    let added = client
+        .add(add_params(&mock, "never.bin", dir.path()))
+        .await
+        .unwrap();
+    wait_for(&mut client, "never went to retrying", |list| {
+        status_of(list, &added.id) == DownloadStatus::Retrying
+    })
+    .await;
+
+    let paused = client.pause(&added.id).await.unwrap();
+    assert_eq!(paused.status, DownloadStatus::Paused);
+    // Past the first retry delay it is still paused.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert_eq!(
+        client.status(&added.id).await.unwrap().status,
+        DownloadStatus::Paused
+    );
+}
