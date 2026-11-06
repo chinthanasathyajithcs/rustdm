@@ -60,6 +60,9 @@ pub struct TestServer {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+/// The `Range` header of the engine's size probe.
+const PROBE_RANGE: &str = "bytes=0-0";
+
 /// Counts a request as in flight until dropped, and records the highest count seen.
 struct InFlight {
     current: Arc<AtomicUsize>,
@@ -184,7 +187,11 @@ impl TestServer {
                             };
 
                             reqs_lock.lock().unwrap().push(log_entry);
-                            let _in_flight = InFlight::enter(&in_flight, &peak);
+                            // The engine's one-byte probe is not a data connection; its
+                            // client stops waiting after the headers, so leave it out.
+                            let is_probe = range_hdr.as_deref() == Some(PROBE_RANGE);
+                            let _in_flight =
+                                (!is_probe).then(|| InFlight::enter(&in_flight, &peak));
 
                             let current_etag = etag_lock.read().unwrap().clone();
                             let last_modified = "Sun, 06 Nov 1994 08:49:37 GMT";
@@ -482,7 +489,8 @@ impl TestServer {
         self.requests.lock().unwrap().clone()
     }
 
-    /// The most requests this server has been answering at the same time.
+    /// The most data requests this server has been answering at the same time.
+    /// The engine's `bytes=0-0` size probe is not counted.
     pub fn peak_concurrent_requests(&self) -> usize {
         self.peak_in_flight.load(Ordering::SeqCst)
     }
