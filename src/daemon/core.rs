@@ -1,3 +1,4 @@
+use crate::daemon::queue_order;
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::task::TaskRecord;
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
@@ -26,10 +27,29 @@ const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub struct DaemonState {
     pub downloads: HashMap<String, Arc<Mutex<TaskRecord>>>,
+    /// Every download id in queue order. Queued downloads start in this order.
+    pub order: Vec<String>,
     pub next_id: u64,
     pub start_time: Instant,
     pub is_shutting_down: bool,
     pub limits: DaemonLimits,
+}
+
+impl DaemonState {
+    /// Every download's record, in queue order.
+    pub fn in_order(&self) -> impl Iterator<Item = &Arc<Mutex<TaskRecord>>> {
+        self.order.iter().filter_map(|id| self.downloads.get(id))
+    }
+}
+
+/// A speed cap must be 0 (none) or at least `MIN_BYTES_PER_SEC`.
+fn validate_speed(bytes_per_sec: u64) -> Result<(), RpcError> {
+    if bytes_per_sec != 0 && bytes_per_sec < MIN_BYTES_PER_SEC {
+        return Err(RpcError::invalid_params(format!(
+            "max_bytes_per_sec must be 0 (unlimited) or at least {MIN_BYTES_PER_SEC}"
+        )));
+    }
+    Ok(())
 }
 
 /// Owns every download and the queue rules. Lock order: `state`, then a task.
@@ -80,12 +100,15 @@ impl DaemonCore {
         let rate_limiter = Arc::new(RateLimiter::new(limits.max_bytes_per_sec));
 
         let mut downloads = HashMap::new();
+        let mut order = Vec::new();
         let mut next_id = 0;
         if let Some(snapshot) = snapshot {
             next_id = snapshot.next_id;
+            // Saved in queue order.
             for saved in snapshot.downloads {
                 next_id = next_id.max(download_id_number(&saved.id));
                 let rec = TaskRecord::from_saved(saved, &rate_limiter);
+                order.push(rec.id.clone());
                 downloads.insert(rec.id.clone(), Arc::new(Mutex::new(rec)));
             }
         }
@@ -94,6 +117,7 @@ impl DaemonCore {
         Self {
             state: Arc::new(Mutex::new(DaemonState {
                 downloads,
+                order,
                 next_id,
                 start_time: Instant::now(),
                 is_shutting_down: false,
@@ -165,6 +189,8 @@ impl DaemonCore {
     pub fn add_download(&self, params: AddDownloadParams) -> Result<DownloadSummary, RpcError> {
         Url::parse(&params.url)
             .map_err(|e| RpcError::invalid_params(format!("Invalid URL: {}", e)))?;
+        let max_bytes_per_sec = params.max_bytes_per_sec.unwrap_or(0);
+        validate_speed(max_bytes_per_sec)?;
 
         let task = {
             let mut state = self.state.lock().unwrap();
@@ -201,6 +227,11 @@ impl DaemonCore {
                 connections,
                 &self.rate_limiter,
             )));
+            task.lock()
+                .unwrap()
+                .speed_limiter
+                .set_bytes_per_sec(max_bytes_per_sec);
+            state.order.push(id.clone());
             state.downloads.insert(id, Arc::clone(&task));
             task
         };
@@ -313,19 +344,57 @@ impl DaemonCore {
                 task.to_summary()
             };
             state.downloads.remove(id);
+            state.order.retain(|x| x != id);
             summary
         };
         self.persist();
         Ok(summary)
     }
 
+    /// Every download, in queue order.
     pub fn list_downloads(&self) -> Vec<DownloadSummary> {
         let state = self.state.lock().unwrap();
         state
-            .downloads
-            .values()
+            .in_order()
             .map(|t| t.lock().unwrap().to_summary())
             .collect()
+    }
+
+    /// Move a download within the queue. Running downloads keep running; the new
+    /// order decides which queued download starts next.
+    pub fn move_download(&self, params: MoveDownloadParams) -> Result<DownloadSummary, RpcError> {
+        let task_lock = {
+            let mut state = self.state.lock().unwrap();
+            let order = queue_order::moved(&state.order, &params.id, params.position)
+                .ok_or_else(|| RpcError::download_not_found(&params.id))?;
+            state.order = order;
+            state
+                .downloads
+                .get(&params.id)
+                .cloned()
+                .ok_or_else(|| RpcError::download_not_found(&params.id))?
+        };
+        self.persist();
+        let summary = task_lock.lock().unwrap().to_summary();
+        Ok(summary)
+    }
+
+    /// Cap one download's speed, or remove its cap with 0. Takes effect at once,
+    /// including for a download that is running.
+    pub fn set_download_speed(
+        &self,
+        params: SetDownloadSpeedParams,
+    ) -> Result<DownloadSummary, RpcError> {
+        validate_speed(params.max_bytes_per_sec)?;
+        let task_lock = self.get_task(&params.id)?;
+        let summary = {
+            let task = task_lock.lock().unwrap();
+            task.speed_limiter
+                .set_bytes_per_sec(params.max_bytes_per_sec);
+            task.to_summary()
+        };
+        self.persist();
+        Ok(summary)
     }
 
     pub fn get_status(&self, id: &str) -> Result<DownloadSummary, RpcError> {
@@ -337,8 +406,9 @@ impl DaemonCore {
         self.state.lock().unwrap().limits.clone()
     }
 
-    /// Change the queue limits. A lower `max_active` lets running downloads finish
-    /// rather than pausing them.
+    /// Change the queue limits. When `max_active` drops below the number running,
+    /// the downloads furthest down the queue are stopped and queued again; they
+    /// resume from their state files once a slot is free.
     pub fn set_limits(&self, params: SetLimitsParams) -> Result<DaemonLimits, RpcError> {
         if let Some(n) = params.max_active {
             if !(1..=MAX_ACTIVE_LIMIT).contains(&n) {
@@ -348,11 +418,7 @@ impl DaemonCore {
             }
         }
         if let Some(bps) = params.max_bytes_per_sec {
-            if bps != 0 && bps < MIN_BYTES_PER_SEC {
-                return Err(RpcError::invalid_params(format!(
-                    "max_bytes_per_sec must be 0 (unlimited) or at least {MIN_BYTES_PER_SEC}"
-                )));
-            }
+            validate_speed(bps)?;
         }
 
         let limits = {
@@ -368,12 +434,40 @@ impl DaemonCore {
         self.rate_limiter
             .set_bytes_per_sec(limits.max_bytes_per_sec);
 
+        self.requeue_extra_downloads();
         self.persist();
         self.schedule();
         Ok(limits)
     }
 
-    /// Start queued downloads, oldest first, until `max_active` are running.
+    /// Stop the downloads beyond `max_active`, furthest down the queue first, and
+    /// put them back in the queue. Their engines save state as they stop.
+    fn requeue_extra_downloads(&self) {
+        let state = self.state.lock().unwrap();
+        let mut downloading = 0;
+        for task_lock in state.in_order() {
+            let mut task = task_lock.lock().unwrap();
+            let downloading_now = task.running
+                && matches!(
+                    task.status,
+                    DownloadStatus::Active | DownloadStatus::Retrying
+                );
+            if !downloading_now {
+                continue;
+            }
+            downloading += 1;
+            if downloading <= state.limits.max_active {
+                continue;
+            }
+            task.status = DownloadStatus::Queued;
+            if let Some(ref tx) = task.cancel_tx {
+                let _ = tx.send(true);
+            }
+        }
+    }
+
+    /// Start queued downloads in queue order until `max_active` are running.
+    /// Downloads still stopping count as running, since they hold connections.
     pub fn schedule(&self) {
         let state = self.state.lock().unwrap();
         if state.is_shutting_down {
@@ -382,18 +476,17 @@ impl DaemonCore {
 
         let mut running = 0;
         let mut queued = Vec::new();
-        for (id, task_lock) in &state.downloads {
+        for task_lock in state.in_order() {
             let task = task_lock.lock().unwrap();
             if task.running {
                 running += 1;
             } else if task.status == DownloadStatus::Queued {
-                queued.push((download_id_number(id), Arc::clone(task_lock)));
+                queued.push(Arc::clone(task_lock));
             }
         }
-        queued.sort_by_key(|(n, _)| *n);
 
         let free = state.limits.max_active.saturating_sub(running);
-        for (_, task_lock) in queued.into_iter().take(free) {
+        for task_lock in queued.into_iter().take(free) {
             self.start_task(&task_lock);
         }
     }
@@ -407,7 +500,10 @@ impl DaemonCore {
         }
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let progress = Arc::new(Progress::with_rate_limiter(Arc::clone(&self.rate_limiter)));
+        let progress = Arc::new(Progress::with_rate_limiters(
+            Arc::clone(&self.rate_limiter),
+            Arc::clone(&task.speed_limiter),
+        ));
         let resume_from = task.state_file().filter(|p| p.exists());
         if resume_from.is_none() {
             task.output = None;
@@ -544,12 +640,10 @@ impl DaemonCore {
 
     fn snapshot(&self) -> QueueSnapshot {
         let state = self.state.lock().unwrap();
-        let mut downloads: Vec<_> = state
-            .downloads
-            .values()
+        let downloads = state
+            .in_order()
             .map(|t| t.lock().unwrap().to_saved())
             .collect();
-        downloads.sort_by_key(|d| download_id_number(&d.id));
         QueueSnapshot {
             version: QUEUE_VERSION,
             next_id: state.next_id,

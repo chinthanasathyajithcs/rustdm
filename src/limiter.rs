@@ -67,18 +67,19 @@ impl RateLimiter {
     }
 }
 
-/// Wait until `bytes` may be written under `limiter`. Returns `Error::Cancelled`
-/// if `cancel` fires while waiting.
-pub async fn throttle(
-    limiter: Option<&RateLimiter>,
+/// Wait until `bytes` may be written under every one of `limiters`: the bytes
+/// are taken from each bucket and the caller waits for the slowest. Returns
+/// `Error::Cancelled` if `cancel` fires while waiting.
+pub async fn throttle_all<'a>(
+    limiters: impl IntoIterator<Item = &'a RateLimiter>,
     bytes: u64,
     cancel: Option<&watch::Receiver<bool>>,
 ) -> Result<(), Error> {
-    let Some(limiter) = limiter else {
-        return Ok(());
-    };
-
-    let mut remaining = limiter.reserve(bytes);
+    let mut remaining = limiters
+        .into_iter()
+        .map(|limiter| limiter.reserve(bytes))
+        .max()
+        .unwrap_or(Duration::ZERO);
     while !remaining.is_zero() {
         if cancel.is_some_and(|rx| *rx.borrow()) {
             return Err(Error::Cancelled);
@@ -131,13 +132,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn throttle_all_waits_for_the_slowest_limiter() {
+        let shared = RateLimiter::new(0);
+        let own = RateLimiter::new(100_000);
+        own.reserve(100_000);
+
+        let start = std::time::Instant::now();
+        throttle_all([&shared, &own], 20_000, None).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(190));
+        // The unlimited bucket never holds anyone back.
+        assert_eq!(shared.reserve(u64::MAX / 2), Duration::ZERO);
+    }
+
+    #[tokio::test]
     async fn throttle_stops_waiting_when_cancelled() {
         let limiter = RateLimiter::new(1000);
         let (tx, rx) = watch::channel(false);
         tx.send(true).unwrap();
 
         let start = std::time::Instant::now();
-        let result = throttle(Some(&limiter), 60_000, Some(&rx)).await;
+        let result = throttle_all([&limiter], 60_000, Some(&rx)).await;
         assert!(matches!(result, Err(Error::Cancelled)));
         assert!(start.elapsed() < Duration::from_secs(1));
     }

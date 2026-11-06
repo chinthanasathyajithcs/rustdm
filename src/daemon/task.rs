@@ -31,6 +31,8 @@ pub struct TaskRecord {
     pub last_tick_bytes: u64,
     pub last_tick_time: Instant,
     pub connections: u32,
+    /// This download's own speed cap; a rate of 0 means none.
+    pub speed_limiter: Arc<RateLimiter>,
     /// An engine task is running for this download.
     pub running: bool,
     /// Paused by daemon shutdown rather than by the user, so it is queued again on restart.
@@ -51,6 +53,7 @@ impl TaskRecord {
         let filename = requested_name
             .clone()
             .unwrap_or_else(|| placeholder_name(&url));
+        let speed_limiter = Arc::new(RateLimiter::new(0));
         Self {
             id,
             url,
@@ -63,12 +66,16 @@ impl TaskRecord {
             downloaded_bytes: 0,
             speed_bps: 0,
             eta_secs: None,
-            progress: Arc::new(Progress::with_rate_limiter(Arc::clone(limiter))),
+            progress: Arc::new(Progress::with_rate_limiters(
+                Arc::clone(limiter),
+                Arc::clone(&speed_limiter),
+            )),
             cancel_tx: None,
             error_message: None,
             last_tick_bytes: 0,
             last_tick_time: Instant::now(),
             connections,
+            speed_limiter,
             running: false,
             resume_after_restart: false,
             delete_on_stop: false,
@@ -89,6 +96,7 @@ impl TaskRecord {
         rec.total_bytes = saved.total_bytes;
         rec.downloaded_bytes = saved.downloaded_bytes;
         rec.error_message = saved.error_message;
+        rec.speed_limiter.set_bytes_per_sec(saved.max_bytes_per_sec);
         // Nothing runs right after a restart; anything that was running waits in the queue.
         rec.status = match saved.status {
             DownloadStatus::Active | DownloadStatus::Retrying | DownloadStatus::Pausing => {
@@ -112,7 +120,13 @@ impl TaskRecord {
             total_bytes: self.total_bytes,
             downloaded_bytes: self.downloaded_bytes,
             error_message: self.error_message.clone(),
+            max_bytes_per_sec: self.max_bytes_per_sec(),
         }
+    }
+
+    /// This download's own speed cap; 0 means none.
+    pub fn max_bytes_per_sec(&self) -> u64 {
+        self.speed_limiter.bytes_per_sec()
     }
 
     /// The status a restarted daemon should give this download.
@@ -142,6 +156,7 @@ impl TaskRecord {
             speed_bps: self.speed_bps,
             eta_secs: self.eta_secs,
             error_message: self.error_message.clone(),
+            max_bytes_per_sec: self.max_bytes_per_sec(),
         }
     }
 
@@ -181,8 +196,9 @@ impl TaskRecord {
         }
     }
 
-    /// Record how an engine run ended. A cancelled task stays cancelled: the engine
-    /// reports a cancel as a pause, but the user asked for the download to stop.
+    /// Record how an engine run ended. The engine reports every stop it was asked
+    /// for as a pause, so a stopped download keeps the status it was given when it
+    /// was stopped: cancelled, paused, or queued (sent back to the queue to free a slot).
     pub fn apply_outcome(&mut self, outcome: Result<Outcome, Error>) {
         self.sync_from_progress();
         self.downloaded_bytes = self.progress.downloaded.load(Ordering::Relaxed);
@@ -191,6 +207,10 @@ impl TaskRecord {
         self.cancel_tx = None;
         self.running = false;
         let cancelled = self.status == DownloadStatus::Cancelled;
+        let stopped_by_request = matches!(
+            self.status,
+            DownloadStatus::Cancelled | DownloadStatus::Queued | DownloadStatus::Paused
+        );
 
         match outcome {
             Ok(Outcome::Completed { path, steals: _ }) => {
@@ -204,7 +224,8 @@ impl TaskRecord {
                 self.error_message = None;
             }
             Ok(Outcome::Paused { reason, state: _ }) => {
-                if !cancelled {
+                let link_expired = matches!(reason, PauseReason::LinkExpired { .. });
+                if link_expired || !stopped_by_request {
                     self.status = DownloadStatus::Paused;
                 }
                 if let PauseReason::LinkExpired { status } = reason {
@@ -273,6 +294,28 @@ mod tests {
         let mut shutdown_paused = record(DownloadStatus::Paused);
         shutdown_paused.resume_after_restart = true;
         assert_eq!(shutdown_paused.to_saved().status, DownloadStatus::Queued);
+    }
+
+    #[test]
+    fn a_download_sent_back_to_the_queue_stays_queued_when_its_engine_stops() {
+        let mut rec = record(DownloadStatus::Queued);
+        rec.running = true;
+        rec.apply_outcome(Ok(Outcome::Paused {
+            reason: PauseReason::Cancelled,
+            state: PathBuf::from("/downloads/ubuntu.iso.part.rdm"),
+        }));
+        assert_eq!(rec.status, DownloadStatus::Queued);
+        assert!(!rec.running);
+    }
+
+    #[test]
+    fn the_speed_cap_is_saved_and_restored() {
+        let rec = record(DownloadStatus::Paused);
+        rec.speed_limiter.set_bytes_per_sec(48 * 1024);
+        let saved = rec.to_saved();
+        assert_eq!(saved.max_bytes_per_sec, 48 * 1024);
+        let restored = TaskRecord::from_saved(saved, &Arc::new(RateLimiter::new(0)));
+        assert_eq!(restored.to_summary().max_bytes_per_sec, 48 * 1024);
     }
 
     #[test]

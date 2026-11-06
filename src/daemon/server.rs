@@ -66,6 +66,13 @@ impl DaemonCore {
                 id,
                 parse_params::<DownloadIdParam>(params).and_then(|p| self.remove_download(&p.id)),
             ),
+            "download.move" => {
+                respond(id, parse_params(params).and_then(|p| self.move_download(p)))
+            }
+            "download.set_speed" => respond(
+                id,
+                parse_params(params).and_then(|p| self.set_download_speed(p)),
+            ),
             "download.list" => respond(id, Ok(self.list_downloads())),
             "download.status" => respond(
                 id,

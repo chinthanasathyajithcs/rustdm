@@ -144,6 +144,34 @@ impl DaemonClient {
         self.call("download.remove", Some(id_param(id)?)).await
     }
 
+    /// Move a download within the queue.
+    pub async fn move_download(
+        &mut self,
+        id: &str,
+        position: QueuePosition,
+    ) -> Result<DownloadSummary, ClientError> {
+        let params = MoveDownloadParams {
+            id: id.to_string(),
+            position,
+        };
+        self.call("download.move", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    /// Cap one download's speed in bytes per second; 0 removes the cap.
+    pub async fn set_download_speed(
+        &mut self,
+        id: &str,
+        max_bytes_per_sec: u64,
+    ) -> Result<DownloadSummary, ClientError> {
+        let params = SetDownloadSpeedParams {
+            id: id.to_string(),
+            max_bytes_per_sec,
+        };
+        self.call("download.set_speed", Some(serde_json::to_value(params)?))
+            .await
+    }
+
     pub async fn get_limits(&mut self) -> Result<DaemonLimits, ClientError> {
         self.call("daemon.get_limits", None).await
     }

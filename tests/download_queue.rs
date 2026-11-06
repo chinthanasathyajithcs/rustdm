@@ -2,8 +2,8 @@ use rustdm::daemon::queue_store::QueueStore;
 use rustdm::daemon::{DaemonCore, DaemonServer};
 use rustdm::ipc::client::{ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
-    AddDownloadParams, DownloadStatus, DownloadSummary, SetLimitsParams, CODE_DOWNLOAD_NOT_FOUND,
-    CODE_INVALID_PARAMS, CODE_OPERATION_IN_PROGRESS,
+    AddDownloadParams, DownloadStatus, DownloadSummary, QueuePosition, SetLimitsParams,
+    CODE_DOWNLOAD_NOT_FOUND, CODE_INVALID_PARAMS, CODE_OPERATION_IN_PROGRESS,
 };
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
@@ -37,6 +37,7 @@ fn add_params(mock: &TestServer, name: &str, dir: &Path) -> AddDownloadParams {
         destination: Some(dir.to_path_buf()),
         filename: Some(name.to_string()),
         connections: Some(1),
+        max_bytes_per_sec: None,
     }
 }
 
@@ -326,4 +327,254 @@ async fn queue_and_limits_survive_a_daemon_restart() {
         .await
         .unwrap();
     assert_eq!(d.id, "dl_4");
+}
+
+fn ids(list: &[DownloadSummary]) -> Vec<&str> {
+    list.iter().map(|d| d.id.as_str()).collect()
+}
+
+async fn wait_for<F>(client: &mut DaemonClient, what: &str, mut done: F) -> Vec<DownloadSummary>
+where
+    F: FnMut(&[DownloadSummary]) -> bool,
+{
+    let start = Instant::now();
+    loop {
+        let list = client.list().await.expect("list");
+        if done(&list) {
+            return list;
+        }
+        assert!(start.elapsed() < WAIT_TIMEOUT, "{what}: {list:?}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn status_of(list: &[DownloadSummary], id: &str) -> DownloadStatus {
+    list.iter().find(|d| d.id == id).expect("listed").status
+}
+
+#[tokio::test]
+async fn lowering_max_active_sends_the_last_running_downloads_back_to_the_queue() {
+    let body = pattern_bytes(512 * 1024);
+    let mock = TestServer::start(
+        body.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 256 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        client
+            .add(add_params(&mock, name, dir.path()))
+            .await
+            .unwrap();
+    }
+    wait_for(&mut client, "all three never started", |list| {
+        list.iter().all(|d| d.downloaded_bytes > 0)
+    })
+    .await;
+
+    client.set_limits(limits(Some(1), None)).await.unwrap();
+    let list = wait_for(&mut client, "extras were not requeued", |list| {
+        status_of(list, "dl_2") == DownloadStatus::Queued
+            && status_of(list, "dl_3") == DownloadStatus::Queued
+    })
+    .await;
+    assert_eq!(status_of(&list, "dl_1"), DownloadStatus::Active);
+
+    // They pick up where they stopped once a slot frees up.
+    wait_until_all_completed(&mut client).await;
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        assert_eq!(std::fs::read(dir.path().join(name)).unwrap(), body);
+    }
+}
+
+#[tokio::test]
+async fn moved_downloads_are_listed_and_started_in_their_new_order() {
+    let mock = TestServer::start(
+        pattern_bytes(256 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 512 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    client.set_limits(limits(Some(1), None)).await.unwrap();
+    for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+        client
+            .add(add_params(&mock, name, dir.path()))
+            .await
+            .unwrap();
+    }
+
+    client
+        .move_download("dl_4", QueuePosition::Top)
+        .await
+        .unwrap();
+    client
+        .move_download("dl_2", QueuePosition::Down)
+        .await
+        .unwrap();
+    client
+        .move_download("dl_1", QueuePosition::Bottom)
+        .await
+        .unwrap();
+    client
+        .move_download("dl_3", QueuePosition::Up)
+        .await
+        .unwrap();
+    let list = client.list().await.unwrap();
+    assert_eq!(ids(&list), vec!["dl_3", "dl_4", "dl_2", "dl_1"]);
+
+    expect_rpc_code(
+        client.move_download("dl_9", QueuePosition::Up).await,
+        CODE_DOWNLOAD_NOT_FOUND,
+    );
+
+    // dl_1 was already running; after it the queue follows the new order.
+    let mut started = Vec::new();
+    let start = Instant::now();
+    while started.len() < 4 {
+        for d in client.list().await.unwrap() {
+            let begun = d.status != DownloadStatus::Queued;
+            if begun && !started.contains(&d.id) {
+                started.push(d.id.clone());
+            }
+        }
+        assert!(
+            start.elapsed() < WAIT_TIMEOUT,
+            "queue stalled at {started:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(started, vec!["dl_1", "dl_3", "dl_4", "dl_2"]);
+}
+
+#[tokio::test]
+async fn a_per_download_speed_cap_slows_only_that_download() {
+    let body = pattern_bytes(160 * 1024);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+
+    let slow = client
+        .add(AddDownloadParams {
+            max_bytes_per_sec: Some(64 * 1024),
+            ..add_params(&mock, "slow.bin", dir.path())
+        })
+        .await
+        .unwrap();
+    assert_eq!(slow.max_bytes_per_sec, 64 * 1024);
+    let start = Instant::now();
+    let fast = client
+        .add(add_params(&mock, "fast.bin", dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(fast.max_bytes_per_sec, 0);
+
+    wait_for(&mut client, "uncapped download never finished", |list| {
+        status_of(list, &fast.id) == DownloadStatus::Completed
+    })
+    .await;
+    assert_ne!(
+        client.status(&slow.id).await.unwrap().status,
+        DownloadStatus::Completed,
+        "the capped download should still be running"
+    );
+    wait_until_all_completed(&mut client).await;
+
+    // 160 KiB at 64 KiB/s with a one-second burst needs at least 1.5 s.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(1400),
+        "finished in {elapsed:?}"
+    );
+    assert_eq!(std::fs::read(dir.path().join("slow.bin")).unwrap(), body);
+}
+
+#[tokio::test]
+async fn speed_caps_can_be_changed_and_are_validated() {
+    let mock = TestServer::start(
+        pattern_bytes(1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 128 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    let added = client
+        .add(add_params(&mock, "cap.bin", dir.path()))
+        .await
+        .unwrap();
+
+    let capped = client
+        .set_download_speed(&added.id, 32 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(capped.max_bytes_per_sec, 32 * 1024);
+    assert_eq!(
+        client.status(&added.id).await.unwrap().max_bytes_per_sec,
+        32 * 1024
+    );
+    let uncapped = client.set_download_speed(&added.id, 0).await.unwrap();
+    assert_eq!(uncapped.max_bytes_per_sec, 0);
+
+    expect_rpc_code(
+        client.set_download_speed(&added.id, 1).await,
+        CODE_INVALID_PARAMS,
+    );
+    expect_rpc_code(
+        client.set_download_speed("dl_9", 0).await,
+        CODE_DOWNLOAD_NOT_FOUND,
+    );
+    expect_rpc_code(
+        client
+            .add(AddDownloadParams {
+                max_bytes_per_sec: Some(1),
+                ..add_params(&mock, "bad.bin", dir.path())
+            })
+            .await,
+        CODE_INVALID_PARAMS,
+    );
+}
+
+#[tokio::test]
+async fn queue_order_and_speed_caps_survive_a_daemon_restart() {
+    let mock = TestServer::start(
+        pattern_bytes(1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 64 * 1024,
+        },
+    )
+    .await;
+    let data = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+    let (mut client, server) = serve(core.clone()).await;
+    client.set_limits(limits(Some(1), None)).await.unwrap();
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        let added = client
+            .add(add_params(&mock, name, dir.path()))
+            .await
+            .unwrap();
+        client.pause(&added.id).await.unwrap();
+    }
+    client
+        .move_download("dl_3", QueuePosition::Top)
+        .await
+        .unwrap();
+    client.set_download_speed("dl_2", 48 * 1024).await.unwrap();
+    client.shutdown().await.unwrap();
+    server.await.unwrap();
+    assert!(core.wait_until_settled(Duration::from_secs(10)).await);
+
+    let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+    let restored = core.list_downloads();
+    assert_eq!(ids(&restored), vec!["dl_3", "dl_1", "dl_2"]);
+    assert_eq!(restored[2].max_bytes_per_sec, 48 * 1024);
 }

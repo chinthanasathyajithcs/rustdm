@@ -12,6 +12,7 @@ fn test_integration_full_rpc_cycle() {
         destination: Some(PathBuf::from("/downloads")),
         filename: Some("100MB.bin".to_string()),
         connections: Some(16),
+        max_bytes_per_sec: None,
     };
     let client_req = RpcRequest::new(
         RpcId::Number(1001),
@@ -41,6 +42,7 @@ fn test_integration_full_rpc_cycle() {
         speed_bps: 0,
         eta_secs: None,
         error_message: None,
+        max_bytes_per_sec: 0,
     };
     let server_resp = RpcResponse::success(server_req.id, serde_json::to_value(&summary).unwrap());
     let wire_resp = encode_message(&server_resp).expect("should encode response");

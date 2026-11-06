@@ -73,11 +73,14 @@ rdm daemon status                             # also: daemon start, daemon stop
 
 `rdm daemon stop` pauses every active download and saves its state before the daemon exits. Use `--endpoint <socket path or pipe name>` to talk to a daemon other than the default one.
 
-Downloads wait in a queue: by default 3 run at once, oldest first. The queue and limits are saved to `queue.json` (in `%LOCALAPPDATA%\rustdm`, `~/.local/state/rustdm`, or `$RUSTDM_DATA_DIR`), so after a restart the daemon picks up where it left off.
+Downloads wait in a queue: by default 3 run at once, in list order. Lowering `--max-active` sends the downloads furthest down the list back to the queue; they resume where they stopped once a slot frees up. A resumed download uses the same number of connections it started with. The queue and limits are saved to `queue.json` (in `%LOCALAPPDATA%\rustdm`, `~/.local/state/rustdm`, or `$RUSTDM_DATA_DIR`), so after a restart the daemon picks up where it left off.
 
 ```bash
 rdm limits                                    # show the current limits
 rdm limits --max-active 2 --max-speed 2M      # 2 at once, 2 MiB/s combined; --max-speed off removes the cap
+rdm add https://example.com/a.iso --max-speed 500K   # cap one download
+rdm speed dl_2 1M                             # change one download's cap; 0 or off removes it
+rdm move dl_5 top                             # reorder the queue: top, up, down, bottom
 rdm cancel dl_4 --delete                      # also delete the partial files
 rdm remove dl_4                               # drop a finished or cancelled download from the list
 ```
@@ -88,7 +91,7 @@ rdm remove dl_4                               # drop a finished or cancelled dow
 - **Milestone 2 (In Progress):**
   - **Pre-flight disk space check:** Verifies available drive space before allocating or writing.
   - **Background Daemon (`rdmd`) (Done):** Runs downloads in the background over local IPC (Windows Named Pipes / Unix sockets), surviving terminal closure, controlled with `rdm add/list/pause/resume/cancel/daemon`.
-  - **Multi-Download Queue (Done):** At most N downloads at once, a global speed cap, and a queue that survives daemon restarts.
+  - **Multi-Download Queue (Done):** At most N downloads at once, global and per-download speed caps, queue reordering, and a queue that survives daemon restarts.
   - **Interactive Terminal UI (TUI):** Mouse-clickable buttons (`[Pause]`, `[Resume]`, `[Add]`), browsable downloads table, and live IDM-style segment map using Ratatui.
 - **Milestone 3+ (Planned):**
   - Native Desktop GUI (Slint/Tauri) connecting to the daemon.

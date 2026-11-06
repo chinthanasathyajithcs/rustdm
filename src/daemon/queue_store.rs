@@ -34,6 +34,9 @@ pub struct SavedDownload {
     pub total_bytes: Option<u64>,
     pub downloaded_bytes: u64,
     pub error_message: Option<String>,
+    /// This download's own speed cap; 0 means none. Missing from older queue files.
+    #[serde(default)]
+    pub max_bytes_per_sec: u64,
 }
 
 /// Reads and writes the queue file. Saves are serialized and atomic.
@@ -146,6 +149,7 @@ mod tests {
                 total_bytes: Some(1000),
                 downloaded_bytes: 400,
                 error_message: None,
+                max_bytes_per_sec: 0,
             }],
         }
     }

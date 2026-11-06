@@ -20,6 +20,10 @@ pub struct State {
     pub validator: Validator,
     pub completed: Vec<ByteRange>,
     pub output: PathBuf,
+    /// Connections the download was started with, so a resume uses the same
+    /// number. Missing from state files written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
 }
 
 pub fn state_path(output: &Path) -> PathBuf {
@@ -93,7 +97,16 @@ mod tests {
                 end: 5 * 1024 * 1024,
             }],
             output,
+            connections: Some(4),
         }
+    }
+
+    #[test]
+    fn older_state_files_without_a_connection_count_still_load() {
+        let mut json = serde_json::to_value(sample_state(PathBuf::from("/tmp/f.bin"))).unwrap();
+        json.as_object_mut().unwrap().remove("connections");
+        let state: State = serde_json::from_value(json).unwrap();
+        assert_eq!(state.connections, None);
     }
 
     #[test]

@@ -1,10 +1,10 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rustdm::daemon::launch::{daemon_exe_path, spawn_detached};
 use rustdm::daemon::service::{daemon_holds_lock, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::engine::{build_client, download, resume, DownloadRequest, Outcome, Progress};
 use rustdm::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
-    download_id_number, AddDownloadParams, DaemonLimits, DownloadStatus, DownloadSummary,
+    AddDownloadParams, DaemonLimits, DownloadStatus, DownloadSummary, QueuePosition,
     SetLimitsParams,
 };
 use rustdm::ipc::transport::IpcEndpoint;
@@ -67,8 +67,11 @@ enum Commands {
         name: Option<String>,
         #[arg(long, default_value_t = 8)]
         connections: usize,
+        /// Speed cap for this download alone, such as 500K or 2M
+        #[arg(long, value_parser = parse_speed)]
+        max_speed: Option<u64>,
     },
-    /// List the background daemon's downloads
+    /// List the background daemon's downloads in queue order
     List,
     /// Pause a background download (a queued one stays out of the queue)
     Pause { id: String },
@@ -81,6 +84,18 @@ enum Commands {
     },
     /// Remove a finished, paused, or cancelled download from the list (files are kept)
     Remove { id: String },
+    /// Move a download in the queue; queued downloads start in list order
+    Move {
+        id: String,
+        #[arg(value_enum)]
+        position: MoveTo,
+    },
+    /// Cap one download's speed, such as 500K or 2M; 0 or "off" removes the cap
+    Speed {
+        id: String,
+        #[arg(value_parser = parse_speed)]
+        max_speed: u64,
+    },
     /// Show or change how many downloads run at once and the total speed cap
     Limits {
         /// Downloads that run at the same time; the rest wait in the queue
@@ -95,6 +110,25 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum MoveTo {
+    Top,
+    Up,
+    Down,
+    Bottom,
+}
+
+impl From<MoveTo> for QueuePosition {
+    fn from(to: MoveTo) -> Self {
+        match to {
+            MoveTo::Top => QueuePosition::Top,
+            MoveTo::Up => QueuePosition::Up,
+            MoveTo::Down => QueuePosition::Down,
+            MoveTo::Bottom => QueuePosition::Bottom,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -158,7 +192,17 @@ async fn run(cli: Cli) -> CliResult {
             dir,
             name,
             connections,
-        } => add(&endpoint, url, dir, name, connections).await,
+            max_speed,
+        } => {
+            let params = AddDownloadParams {
+                url,
+                destination: dir,
+                filename: name,
+                connections: Some(connections),
+                max_bytes_per_sec: max_speed,
+            };
+            add(&endpoint, params).await
+        }
         Commands::List => list(&endpoint).await,
         Commands::Pause { id } => {
             let summary = DaemonClient::connect(&endpoint).await?.pause(&id).await?;
@@ -176,6 +220,21 @@ async fn run(cli: Cli) -> CliResult {
         Commands::Remove { id } => {
             let summary = DaemonClient::connect(&endpoint).await?.remove(&id).await?;
             println!("Removed {} ({})", summary.id, summary.filename);
+            Ok(())
+        }
+        Commands::Move { id, position } => {
+            DaemonClient::connect(&endpoint)
+                .await?
+                .move_download(&id, position.into())
+                .await?;
+            list(&endpoint).await
+        }
+        Commands::Speed { id, max_speed } => {
+            let summary = DaemonClient::connect(&endpoint)
+                .await?
+                .set_download_speed(&id, max_speed)
+                .await?;
+            println!("{}: speed cap {}", summary.id, format_speed_cap(max_speed));
             Ok(())
         }
         Commands::Limits {
@@ -290,24 +349,21 @@ async fn start_daemon(endpoint: &IpcEndpoint) -> Result<DaemonClient, ClientErro
     .await
 }
 
-async fn add(
-    endpoint: &IpcEndpoint,
-    url: String,
-    dir: Option<PathBuf>,
-    name: Option<String>,
-    connections: usize,
-) -> CliResult {
-    url::Url::parse(&url)?;
+async fn add(endpoint: &IpcEndpoint, params: AddDownloadParams) -> CliResult {
+    url::Url::parse(&params.url)?;
     // The daemon runs in another directory, so send it an absolute path.
-    let dir = std::path::absolute(dir.unwrap_or_else(default_downloads_dir))?;
+    let dir = std::path::absolute(
+        params
+            .destination
+            .clone()
+            .unwrap_or_else(default_downloads_dir),
+    )?;
 
     let summary = start_daemon(endpoint)
         .await?
         .add(AddDownloadParams {
-            url,
             destination: Some(dir.clone()),
-            filename: name,
-            connections: Some(connections),
+            ..params
         })
         .await?;
     println!(
@@ -348,13 +404,12 @@ async fn list(endpoint: &IpcEndpoint) -> CliResult {
         other => other?,
     };
 
-    let mut downloads = client.list().await?;
+    let downloads = client.list().await?;
     if downloads.is_empty() {
         println!("No downloads.");
         return Ok(());
     }
 
-    downloads.sort_by_key(|d| download_id_number(&d.id));
     println!(
         "{:<8} {:<10} {:<28} {:>12}  NAME",
         "ID", "STATUS", "PROGRESS", "SPEED"
@@ -425,15 +480,19 @@ fn is_daemon_id(target: &str) -> bool {
 }
 
 fn format_limits(limits: &DaemonLimits) -> String {
-    let speed = if limits.max_bytes_per_sec == 0 {
-        "unlimited".to_string()
-    } else {
-        format!("{}/s", format_bytes(limits.max_bytes_per_sec))
-    };
     format!(
         "Downloads at once: {}\nSpeed cap: {}",
-        limits.max_active, speed
+        limits.max_active,
+        format_speed_cap(limits.max_bytes_per_sec)
     )
+}
+
+fn format_speed_cap(bytes_per_sec: u64) -> String {
+    if bytes_per_sec == 0 {
+        "unlimited".to_string()
+    } else {
+        format!("{}/s", format_bytes(bytes_per_sec))
+    }
 }
 
 /// Parse a speed such as `500K`, `2M`, `1.5MiB/s` or `0`/`off` (unlimited).
@@ -499,6 +558,12 @@ fn format_row(d: &DownloadSummary) -> String {
         speed,
         d.filename
     );
+    if d.max_bytes_per_sec > 0 {
+        row.push_str(&format!(
+            "  [cap {}]",
+            format_speed_cap(d.max_bytes_per_sec)
+        ));
+    }
     if let Some(err) = &d.error_message {
         row.push_str(&format!("  ({err})"));
     }
@@ -571,18 +636,18 @@ mod tests {
             speed_bps: 2 * 1024 * 1024,
             eta_secs: Some(37),
             error_message: None,
+            max_bytes_per_sec: 0,
         };
         let row = format_row(&summary);
         assert!(row.contains("25.0 MiB / 100.0 MiB (25%)"), "{row}");
         assert!(row.contains("2.0 MiB/s"), "{row}");
         assert!(row.ends_with("a.iso"), "{row}");
-    }
 
-    #[test]
-    fn ids_sort_numerically() {
-        let mut ids = vec!["dl_10", "dl_2", "dl_1"];
-        ids.sort_by_key(|id| download_id_number(id));
-        assert_eq!(ids, vec!["dl_1", "dl_2", "dl_10"]);
+        let capped = DownloadSummary {
+            max_bytes_per_sec: 512 * 1024,
+            ..summary
+        };
+        assert!(format_row(&capped).ends_with("a.iso  [cap 512.0 KiB/s]"));
     }
 
     #[test]

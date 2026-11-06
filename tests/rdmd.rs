@@ -110,6 +110,7 @@ async fn rdmd_shutdown_pauses_downloads_so_they_can_resume() {
             destination: Some(downloads.path().to_path_buf()),
             filename: Some("interrupted.bin".to_string()),
             connections: Some(2),
+            max_bytes_per_sec: None,
         })
         .await
         .expect("add");
@@ -155,6 +156,7 @@ async fn rdmd_finishes_an_interrupted_download_after_a_restart() {
             destination: Some(downloads.path().to_path_buf()),
             filename: Some("restart.bin".to_string()),
             connections: Some(2),
+            max_bytes_per_sec: None,
         })
         .await
         .expect("add");

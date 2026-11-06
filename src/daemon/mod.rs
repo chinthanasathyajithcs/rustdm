@@ -1,5 +1,6 @@
 pub mod core;
 pub mod launch;
+pub mod queue_order;
 pub mod queue_store;
 pub mod server;
 pub mod service;

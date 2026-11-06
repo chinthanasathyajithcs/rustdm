@@ -127,6 +127,25 @@ pub fn initial_segments(total: u64, connections: u32) -> Vec<ByteRange> {
     segments
 }
 
+/// Lanes for resuming the `missing` ranges with up to `connections` connections:
+/// the largest gaps are halved until there is one lane per connection or no gap
+/// is big enough to split. There may be more lanes than connections when the
+/// file has many gaps; the engine then works through them a few at a time.
+pub fn resume_lanes(missing: &[ByteRange], connections: u32) -> Vec<ByteRange> {
+    let mut lanes = missing.to_vec();
+    while lanes.len() < connections as usize {
+        let Some((largest, _)) = lanes.iter().enumerate().max_by_key(|(_, r)| r.len()) else {
+            break;
+        };
+        let Some((lower, upper)) = split_upper_half(lanes[largest]) else {
+            break;
+        };
+        lanes[largest] = lower;
+        lanes.insert(largest + 1, upper);
+    }
+    lanes
+}
+
 pub fn split_upper_half(r: ByteRange) -> Option<(ByteRange, ByteRange)> {
     if r.len() < 2 * MIN_SEGMENT {
         return None;
@@ -150,6 +169,30 @@ mod tests {
 
     fn r(start: u64, end: u64) -> ByteRange {
         ByteRange { start, end }
+    }
+
+    #[test]
+    fn resume_lanes_split_the_largest_gaps_up_to_the_connection_count() {
+        let m = MIN_SEGMENT;
+        let lanes = resume_lanes(&[r(0, 2 * m), r(4 * m, 12 * m)], 4);
+        assert_eq!(
+            lanes,
+            vec![
+                r(0, 2 * m),
+                r(4 * m, 8 * m),
+                r(8 * m, 10 * m),
+                r(10 * m, 12 * m)
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_lanes_keep_small_gaps_and_extra_gaps_whole() {
+        let m = MIN_SEGMENT;
+        assert_eq!(resume_lanes(&[r(0, m)], 8), vec![r(0, m)]);
+        let gaps = vec![r(0, m), r(2 * m, 3 * m), r(4 * m, 5 * m)];
+        assert_eq!(resume_lanes(&gaps, 2), gaps);
+        assert!(resume_lanes(&[], 4).is_empty());
     }
 
     #[test]
