@@ -59,6 +59,23 @@ impl Rdm {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// Wait until the rows of `rdm list` (without its header) satisfy `done`.
+    fn wait_for_rows(&self, done: impl Fn(&[&str]) -> bool) -> String {
+        let start = Instant::now();
+        loop {
+            let listing = self.ok(&["list"]);
+            let rows: Vec<&str> = listing.lines().skip(1).collect();
+            if !rows.is_empty() && done(&rows) {
+                return listing;
+            }
+            assert!(
+                start.elapsed() < WAIT_TIMEOUT,
+                "`rdm list` never got there; last output:\n{listing}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn wait_for_list(&self, needle: &str) -> String {
         let start = Instant::now();
         loop {
@@ -196,4 +213,55 @@ async fn rdm_limits_queue_extra_downloads_and_survive_a_restart() {
         assert!(rdm.ok(&["remove", "dl_2"]).contains("Removed dl_2"));
         assert!(!rdm.ok(&["list"]).contains("dl_2"));
     });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_moves_and_caps_downloads_and_falls_back_to_plain_output() {
+    let mock = TestServer::start(
+        pattern_bytes(256 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 256 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+    let dest = downloads.path().to_string_lossy().into_owned();
+
+    // Plain `rdm` with its output piped prints rows instead of taking over the screen.
+    assert!(rdm.ok(&[]).contains("not running"));
+
+    tokio::task::block_in_place(|| {
+        for (i, name) in ["one.bin", "two.bin"].iter().enumerate() {
+            let url = mock.url().join(name).unwrap().to_string();
+            rdm.ok(&["add", &url, "--dir", &dest, "--max-speed", "1M"]);
+            rdm.ok(&["pause", &format!("dl_{}", i + 1)]);
+        }
+        rdm.ok(&["limits", "--max-active", "1"]);
+    });
+    let listing = rdm.wait_for_rows(|rows| rows.iter().all(|r| r.contains("paused")));
+    assert!(listing.contains("[cap 1.0 MiB/s]"), "{listing}");
+
+    let moved = rdm.ok(&["move", "dl_2", "top"]);
+    let first_row = moved.lines().nth(1).unwrap_or_default();
+    assert!(first_row.starts_with("dl_2"), "move output:\n{moved}");
+
+    let capped = rdm.ok(&["speed", "dl_2", "off"]);
+    assert!(capped.contains("dl_2: speed cap unlimited"), "{capped}");
+    let bad = rdm.run(&["speed", "dl_2", "1K"]);
+    assert!(!bad.status.success());
+
+    rdm.ok(&["resume", "dl_1"]);
+    rdm.ok(&["resume", "dl_2"]);
+    let plain = tokio::task::block_in_place(|| rdm.ok(&["tui", "--plain"]));
+    // Plain mode prints a row each time it changes and exits once both are done.
+    for id in ["dl_1", "dl_2"] {
+        assert!(
+            plain
+                .lines()
+                .any(|row| row.starts_with(id) && row.contains("completed")),
+            "plain output:\n{plain}"
+        );
+    }
 }

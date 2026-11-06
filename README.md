@@ -85,14 +85,25 @@ rdm cancel dl_4 --delete                      # also delete the partial files
 rdm remove dl_4                               # drop a finished or cancelled download from the list
 ```
 
+## Dashboard
+
+Run `rdm` with no command (or `rdm tui`) for a live dashboard of the daemon's downloads. It starts the daemon if needed.
+
+- **Top pane:** every download in queue order, with status tabs (All, Downloading, Queued, Completed, Stopped) and counts.
+- **Bottom pane:** the selected download's details, a segment map of what is on disk, one bar per connection, and a speed graph.
+- **Mouse:** click the toolbar buttons (`[ + Add ]`, `[ || Pause ]`, `[ > Resume ]`, `[ x Cancel ]`, `[ - Remove ]`), tabs, and rows; the wheel scrolls.
+- **Keys:** `a` add (or paste a URL), `p` pause, `r` resume, `c` cancel, `x` remove, `Shift+↑/↓` or `K`/`J` reorder the queue, `←/→` or `1`-`5` tabs, `↑/↓` select, `q` quit.
+
+When output is not a terminal, or with `rdm tui --plain`, it prints a plain row each time a download changes and exits once nothing is running or queued, so scripts can use it.
+
 ## Milestone Roadmap
 
 - **Milestone 1 (Complete):** Core multi-connection segmented download engine, dynamic work-stealing, direct-to-disk positional writes, atomic crash recovery, and `rdm` CLI utility.
-- **Milestone 2 (In Progress):**
+- **Milestone 2 (Complete):**
   - **Pre-flight disk space check:** Verifies available drive space before allocating or writing.
   - **Background Daemon (`rdmd`) (Done):** Runs downloads in the background over local IPC (Windows Named Pipes / Unix sockets), surviving terminal closure, controlled with `rdm add/list/pause/resume/cancel/daemon`.
   - **Multi-Download Queue (Done):** At most N downloads at once, global and per-download speed caps, queue reordering, and a queue that survives daemon restarts.
-  - **Interactive Terminal UI (TUI):** Mouse-clickable buttons (`[Pause]`, `[Resume]`, `[Add]`), browsable downloads table, and live IDM-style segment map using Ratatui.
+  - **Interactive Terminal UI (TUI) (Done):** Mouse-clickable buttons and tabs, browsable downloads table, live segment map, connection lanes, and speed graph using Ratatui, with a plain-text fallback for scripts.
 - **Milestone 3+ (Planned):**
   - Native Desktop GUI (Slint/Tauri) connecting to the daemon.
   - Browser extension integration & native messaging host.
