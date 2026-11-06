@@ -25,6 +25,19 @@ pub struct Progress {
     pub rate_limiter: Option<Arc<RateLimiter>>,
     /// Optional cap on this download's own speed.
     pub download_limiter: Option<Arc<RateLimiter>>,
+    /// The connection lanes of a multi-connection download, once it has started.
+    pub lanes: Mutex<Option<SharedLanes>>,
+}
+
+type SharedLanes = Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>>;
+
+/// One connection's share of the file at a moment in time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaneSnapshot {
+    pub start: u64,
+    /// Next byte this connection will write.
+    pub cursor: u64,
+    pub end: u64,
 }
 
 impl Progress {
@@ -36,6 +49,7 @@ impl Progress {
             output: Mutex::new(None),
             rate_limiter: None,
             download_limiter: None,
+            lanes: Mutex::new(None),
         }
     }
 
@@ -63,6 +77,26 @@ impl Progress {
     ) -> Result<(), Error> {
         let limiters = [&self.rate_limiter, &self.download_limiter];
         throttle_all(limiters.into_iter().flatten().map(|l| &**l), bytes, cancel).await
+    }
+
+    /// Current position of every connection lane; empty for single-connection downloads.
+    pub fn lane_snapshots(&self) -> Vec<LaneSnapshot> {
+        let Some(lanes) = self.lanes.lock().unwrap().clone() else {
+            return Vec::new();
+        };
+        let lanes = lanes.read().unwrap();
+        lanes
+            .iter()
+            .map(|lane| {
+                let cursor = lane.cursor.load(Ordering::SeqCst);
+                let done = lane.bytes_done.load(Ordering::SeqCst);
+                LaneSnapshot {
+                    start: cursor.saturating_sub(done),
+                    cursor,
+                    end: lane.end.load(Ordering::SeqCst),
+                }
+            })
+            .collect()
     }
 }
 
@@ -364,11 +398,11 @@ async fn download_ranges(
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<u32, Error> {
     // Lanes are added as workers start them, so stealing only splits work in progress.
-    let lanes: Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>> =
-        Arc::new(std::sync::RwLock::new(Vec::with_capacity(segments.len())));
+    let lanes: SharedLanes = Arc::new(std::sync::RwLock::new(Vec::with_capacity(segments.len())));
     let pending: Arc<Mutex<std::collections::VecDeque<ByteRange>>> =
         Arc::new(Mutex::new(segments.iter().copied().collect()));
     let workers = segments.len().min(conns.max(1) as usize);
+    *progress.lanes.lock().unwrap() = Some(Arc::clone(&lanes));
 
     let steals_count = Arc::new(AtomicU64::new(0));
     let mut set = tokio::task::JoinSet::new();

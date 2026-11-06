@@ -16,5 +16,6 @@ pub mod state;
 pub mod template;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod tui;
 pub mod worker;
 pub mod writer;

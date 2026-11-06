@@ -188,6 +188,22 @@ impl DaemonClient {
         self.call::<Value>("subscribe.telemetry", None).await?;
         Ok(())
     }
+
+    /// Wait for the next telemetry tick after `subscribe_telemetry`. Returns
+    /// `Ok(None)` when the daemon closes the connection. Use a connection that
+    /// makes no other calls, because `call` skips ticks while it waits.
+    pub async fn next_tick(&mut self) -> Result<Option<TelemetryTick>, ClientError> {
+        loop {
+            match self.conn.recv().await? {
+                None => return Ok(None),
+                Some(RpcMessage::Notification(n)) if n.method == "telemetry.tick" => {
+                    let params = n.params.unwrap_or(Value::Null);
+                    return Ok(Some(serde_json::from_value(params)?));
+                }
+                Some(_) => continue,
+            }
+        }
+    }
 }
 
 fn id_param(id: &str) -> Result<Value, serde_json::Error> {

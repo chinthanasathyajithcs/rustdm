@@ -23,7 +23,12 @@ Updated: 2026-11-06
   - **Persistence:** `src/daemon/queue_store.rs` saves the queue and limits atomically to `queue.json` in `--data-dir` / `$RUSTDM_DATA_DIR` / `%LOCALAPPDATA%\rustdm` / `~/.local/state/rustdm` on every change. After a restart, downloads that were running or queued are queued again and resume from their `.part.rdm` files; user-paused ones stay paused. A corrupt queue file is renamed to `queue.json.corrupt` instead of being overwritten.
   - **New RPCs and commands:** `daemon.get_limits` / `daemon.set_limits` (`rdm limits --max-active N --max-speed 2M`), `download.remove` (`rdm remove <id>`), and `rdm cancel --delete`, which now deletes the right `.part` / `.part.rdm` files once the engine has stopped. The engine publishes the chosen output path early, so `rdm list` shows the real file name while downloading.
   - **Follow-ups:** lowering `max_active` requeues the extras, `rdm move` reorders the queue, `rdm speed` / `rdm add --max-speed` cap one download, and resumes keep the original connection count.
-- **Testing:** 148 automated tests passing on Linux (unit, integration, crash, daemon process, queue, and CLI end-to-end suites). Windows-only code is type-checked; Windows CI runs on the next push.
+- **Milestone 2 - Task 4 Complete (Terminal Dashboard, branch `feat/tui`, stacked on `feat/download-queue`):**
+  - `rdm` with no command, or `rdm tui`, opens a ratatui dashboard (`src/tui/`): `app.rs` holds the state and turns keys and clicks into actions, `ui.rs` draws it and records click targets, `format.rs` holds the text helpers shared with `rdm list`, and `mod.rs` runs the event loop against the daemon.
+  - Top pane: downloads in queue order with status tabs; bottom pane: details, segment map, one bar per connection, and a speed graph. Toolbar buttons, tabs, and rows are clickable; the wheel scrolls; pasting a URL adds it; `Shift+↑/↓` reorders the queue.
+  - Telemetry ticks now carry one entry per connection lane (`Progress::lane_snapshots`), on a dedicated connection that reconnects if the daemon restarts. The dashboard also survives a daemon restart.
+  - Not a terminal, or `--plain`: prints a row whenever a download changes and exits once nothing is running or queued.
+- **Testing:** 171 automated tests passing on Linux (unit, integration, crash, daemon process, queue, and CLI end-to-end suites). Windows-only code is type-checked; Windows CI runs on the next push.
 
 ## Milestone 2 Architecture & Status
 
@@ -46,7 +51,7 @@ Updated: 2026-11-06
    - [x] Per-download speed caps (`download.set_speed`, `rdm speed`, `rdm add --max-speed`), applied on top of the global cap and saved with the queue.
    - [x] A resume uses the connection count the download started with (saved in `.part.rdm`; older state files fall back to 8), splitting the largest gaps so every connection has work.
 
-4. **[ ] Task 4: Interactive Terminal UI (TUI) Dashboard (`rdm` / `rdm tui`)**
+4. **[x] Task 4: Interactive Terminal UI (TUI) Dashboard (`rdm` / `rdm tui`)**
    - Built with `ratatui` + `crossterm`.
    - **Full Mouse Support:** Clickable action buttons (`[ ⏸ Pause ]`, `[ ▶ Resume ]`, `[ ➕ Add ]`, `[ ⏹ Cancel ]`), clickable category tabs, clickable download rows, and mouse-wheel scrolling.
    - **Two-Pane Layout:**

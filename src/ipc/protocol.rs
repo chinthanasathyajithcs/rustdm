@@ -533,7 +533,12 @@ pub struct TelemetryTick {
     pub total_bytes: Option<u64>,
     pub speed_bps: u64,
     pub active_connections: usize,
+    /// Byte ranges already on disk, with state "completed".
     pub segments: Vec<SegmentProgress>,
+    /// One entry per connection: `downloaded_bytes` is how far it has got from
+    /// `start`, and `state` is "active" or "done".
+    #[serde(default)]
+    pub lanes: Vec<SegmentProgress>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -721,6 +726,7 @@ mod tests {
                 downloaded_bytes: 1048576,
                 state: "active".to_string(),
             }],
+            lanes: Vec::new(),
         };
         let notif =
             RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));

@@ -621,13 +621,36 @@ impl DaemonCore {
                     })
                     .collect();
 
+                let lanes: Vec<SegmentProgress> = task
+                    .progress
+                    .lane_snapshots()
+                    .into_iter()
+                    .map(|lane| SegmentProgress {
+                        start: lane.start,
+                        end: lane.end,
+                        downloaded_bytes: lane.cursor.saturating_sub(lane.start),
+                        state: if lane.cursor < lane.end {
+                            "active"
+                        } else {
+                            "done"
+                        }
+                        .to_string(),
+                    })
+                    .collect();
+                let active_connections = if lanes.is_empty() {
+                    task.connections as usize
+                } else {
+                    lanes.iter().filter(|l| l.state == "active").count()
+                };
+
                 let tick = TelemetryTick {
                     id: task.id.clone(),
                     downloaded_bytes: current_bytes,
                     total_bytes: task.total_bytes,
                     speed_bps: speed,
-                    active_connections: task.connections as usize,
+                    active_connections,
                     segments,
+                    lanes,
                 };
                 let _ = self.telemetry_tx.send(tick);
             }
