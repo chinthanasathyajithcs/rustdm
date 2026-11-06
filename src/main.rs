@@ -4,12 +4,13 @@ use rustdm::daemon::service::{daemon_holds_lock, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::engine::{build_client, download, resume, DownloadRequest, Outcome, Progress};
 use rustdm::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
-    AddDownloadParams, DaemonLimits, DownloadStatus, DownloadSummary, QueuePosition,
-    SetLimitsParams,
+    AddDownloadParams, DaemonLimits, DownloadSummary, QueuePosition, SetLimitsParams,
 };
 use rustdm::ipc::transport::IpcEndpoint;
+use rustdm::tui::format::{format_row, format_speed_cap, status_label};
+use rustdm::tui::{default_downloads_dir, run_interactive, run_plain, PLAIN_INTERVAL};
 use std::error::Error;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
@@ -23,7 +24,7 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Time `rdm daemon stop` allows on top of the daemon's own settle timeout.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
-type CliResult = Result<(), Box<dyn Error>>;
+type CliResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 #[derive(Parser)]
 #[command(
@@ -35,8 +36,9 @@ struct Cli {
     /// Daemon endpoint: a socket path on Unix, a pipe name on Windows
     #[arg(long, global = true)]
     endpoint: Option<String>,
+    /// With no command, rdm opens the dashboard
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -105,6 +107,12 @@ enum Commands {
         #[arg(long, value_parser = parse_speed)]
         max_speed: Option<u64>,
     },
+    /// Open the interactive dashboard (what plain `rdm` does)
+    Tui {
+        /// Print changing rows as plain text instead (automatic when output is not a terminal)
+        #[arg(long)]
+        plain: bool,
+    },
     /// Start, stop, or check the background daemon
     Daemon {
         #[command(subcommand)]
@@ -166,7 +174,7 @@ async fn run(cli: Cli) -> CliResult {
         .map(IpcEndpoint::from_arg)
         .unwrap_or_else(IpcEndpoint::default_endpoint);
 
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Tui { plain: false }) {
         Commands::Download {
             url,
             out,
@@ -241,6 +249,7 @@ async fn run(cli: Cli) -> CliResult {
             max_active,
             max_speed,
         } => limits(&endpoint, max_active, max_speed).await,
+        Commands::Tui { plain } => tui(&endpoint, plain).await,
         Commands::Daemon { action } => match action {
             DaemonAction::Start => daemon_start(&endpoint).await,
             DaemonAction::Status => daemon_status(&endpoint).await,
@@ -249,14 +258,20 @@ async fn run(cli: Cli) -> CliResult {
     }
 }
 
-fn default_downloads_dir() -> PathBuf {
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        PathBuf::from(userprofile).join("Downloads")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join("Downloads")
-    } else {
-        PathBuf::from("Downloads")
+async fn tui(endpoint: &IpcEndpoint, plain: bool) -> CliResult {
+    if plain || !std::io::stdout().is_terminal() {
+        let mut client = match DaemonClient::connect(endpoint).await {
+            Err(ClientError::NotRunning) => {
+                println!("rdmd is not running, so there are no background downloads.");
+                return Ok(());
+            }
+            other => other?,
+        };
+        return run_plain(&mut client, &mut std::io::stdout(), PLAIN_INTERVAL).await;
     }
+    // Start the daemon before taking over the screen, so startup errors print normally.
+    start_daemon(endpoint).await?;
+    run_interactive(endpoint, &default_downloads_dir()).await
 }
 
 async fn download_foreground(url: &str, out: String, connections: u32) -> CliResult {
@@ -487,14 +502,6 @@ fn format_limits(limits: &DaemonLimits) -> String {
     )
 }
 
-fn format_speed_cap(bytes_per_sec: u64) -> String {
-    if bytes_per_sec == 0 {
-        "unlimited".to_string()
-    } else {
-        format!("{}/s", format_bytes(bytes_per_sec))
-    }
-}
-
 /// Parse a speed such as `500K`, `2M`, `1.5MiB/s` or `0`/`off` (unlimited).
 /// Units are binary: K = 1024 bytes.
 fn parse_speed(raw: &str) -> Result<u64, String> {
@@ -519,70 +526,6 @@ fn parse_speed(raw: &str) -> Result<u64, String> {
         other => return Err(format!("unknown speed unit '{other}'; use K, M or G")),
     };
     Ok((value * multiplier as f64) as u64)
-}
-
-fn status_label(status: DownloadStatus) -> &'static str {
-    match status {
-        DownloadStatus::Queued => "queued",
-        DownloadStatus::Active => "active",
-        DownloadStatus::Pausing => "pausing",
-        DownloadStatus::Paused => "paused",
-        DownloadStatus::Retrying => "retrying",
-        DownloadStatus::Completed => "completed",
-        DownloadStatus::Failed => "failed",
-        DownloadStatus::Cancelled => "cancelled",
-    }
-}
-
-fn format_row(d: &DownloadSummary) -> String {
-    let progress = match d.total_bytes {
-        Some(total) if total > 0 => format!(
-            "{} / {} ({:.0}%)",
-            format_bytes(d.downloaded_bytes),
-            format_bytes(total),
-            d.downloaded_bytes as f64 * 100.0 / total as f64
-        ),
-        _ => format_bytes(d.downloaded_bytes),
-    };
-    let speed = if d.speed_bps > 0 {
-        format!("{}/s", format_bytes(d.speed_bps))
-    } else {
-        "-".to_string()
-    };
-
-    let mut row = format!(
-        "{:<8} {:<10} {:<28} {:>12}  {}",
-        d.id,
-        status_label(d.status),
-        progress,
-        speed,
-        d.filename
-    );
-    if d.max_bytes_per_sec > 0 {
-        row.push_str(&format!(
-            "  [cap {}]",
-            format_speed_cap(d.max_bytes_per_sec)
-        ));
-    }
-    if let Some(err) = &d.error_message {
-        row.push_str(&format!("  ({err})"));
-    }
-    row
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 fn format_uptime(secs: u64) -> String {
@@ -610,44 +553,10 @@ mod tests {
     }
 
     #[test]
-    fn bytes_use_binary_units() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1536), "1.5 KiB");
-        assert_eq!(format_bytes(64 * 1024 * 1024), "64.0 MiB");
-    }
-
-    #[test]
     fn uptime_drops_empty_leading_units() {
         assert_eq!(format_uptime(9), "9s");
         assert_eq!(format_uptime(125), "2m 05s");
         assert_eq!(format_uptime(3723), "1h 02m 03s");
-    }
-
-    #[test]
-    fn list_rows_show_percent_once_the_size_is_known() {
-        let summary = DownloadSummary {
-            id: "dl_3".to_string(),
-            url: "http://example.com/a.iso".to_string(),
-            destination: PathBuf::from("/downloads"),
-            filename: "a.iso".to_string(),
-            status: DownloadStatus::Active,
-            downloaded_bytes: 25 * 1024 * 1024,
-            total_bytes: Some(100 * 1024 * 1024),
-            speed_bps: 2 * 1024 * 1024,
-            eta_secs: Some(37),
-            error_message: None,
-            max_bytes_per_sec: 0,
-        };
-        let row = format_row(&summary);
-        assert!(row.contains("25.0 MiB / 100.0 MiB (25%)"), "{row}");
-        assert!(row.contains("2.0 MiB/s"), "{row}");
-        assert!(row.ends_with("a.iso"), "{row}");
-
-        let capped = DownloadSummary {
-            max_bytes_per_sec: 512 * 1024,
-            ..summary
-        };
-        assert!(format_row(&capped).ends_with("a.iso  [cap 512.0 KiB/s]"));
     }
 
     #[test]
