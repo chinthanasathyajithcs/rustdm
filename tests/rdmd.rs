@@ -23,10 +23,13 @@ fn test_endpoint(dir: &Path) -> IpcEndpoint {
     }
 }
 
-fn spawn_rdmd(endpoint: &IpcEndpoint) -> Child {
+/// Start rdmd on `endpoint`, keeping its queue file under `dir`.
+fn spawn_rdmd(endpoint: &IpcEndpoint, dir: &Path) -> Child {
     Command::new(env!("CARGO_BIN_EXE_rdmd"))
         .arg("--endpoint")
         .arg(endpoint.to_string())
+        .arg("--data-dir")
+        .arg(dir.join("data"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -67,10 +70,10 @@ fn find_state_file(dir: &Path) -> Option<PathBuf> {
 async fn rdmd_refuses_to_start_a_second_instance() {
     let dir = tempfile::tempdir().unwrap();
     let endpoint = test_endpoint(dir.path());
-    let mut first = spawn_rdmd(&endpoint);
+    let mut first = spawn_rdmd(&endpoint, dir.path());
     let mut client = wait_for_daemon(&endpoint).await;
 
-    let second = spawn_rdmd(&endpoint);
+    let second = spawn_rdmd(&endpoint, dir.path());
     let output = tokio::time::timeout(EXIT_TIMEOUT, second.wait_with_output())
         .await
         .expect("second rdmd exits")
@@ -98,7 +101,7 @@ async fn rdmd_shutdown_pauses_downloads_so_they_can_resume() {
     let dir = tempfile::tempdir().unwrap();
     let downloads = tempfile::tempdir().unwrap();
     let endpoint = test_endpoint(dir.path());
-    let mut daemon = spawn_rdmd(&endpoint);
+    let mut daemon = spawn_rdmd(&endpoint, dir.path());
     let mut client = wait_for_daemon(&endpoint).await;
 
     let added = client
@@ -107,6 +110,7 @@ async fn rdmd_shutdown_pauses_downloads_so_they_can_resume() {
             destination: Some(downloads.path().to_path_buf()),
             filename: Some("interrupted.bin".to_string()),
             connections: Some(2),
+            max_bytes_per_sec: None,
         })
         .await
         .expect("add");
@@ -130,12 +134,66 @@ async fn rdmd_shutdown_pauses_downloads_so_they_can_resume() {
     }
 }
 
+#[tokio::test]
+async fn rdmd_finishes_an_interrupted_download_after_a_restart() {
+    let body = pattern_bytes(2 * 1024 * 1024);
+    let mock = TestServer::start(
+        body.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 512 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let endpoint = test_endpoint(dir.path());
+
+    let mut daemon = spawn_rdmd(&endpoint, dir.path());
+    let mut client = wait_for_daemon(&endpoint).await;
+    let added = client
+        .add(AddDownloadParams {
+            url: mock.url().to_string(),
+            destination: Some(downloads.path().to_path_buf()),
+            filename: Some("restart.bin".to_string()),
+            connections: Some(2),
+            max_bytes_per_sec: None,
+        })
+        .await
+        .expect("add");
+    let start = Instant::now();
+    while client.status(&added.id).await.unwrap().downloaded_bytes == 0 {
+        assert!(start.elapsed() < STARTUP_TIMEOUT, "download never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    client.shutdown().await.expect("shutdown");
+    assert!(wait_for_exit(&mut daemon).await.success());
+
+    let mut daemon = spawn_rdmd(&endpoint, dir.path());
+    let mut client = wait_for_daemon(&endpoint).await;
+    let start = Instant::now();
+    loop {
+        let status = client.status(&added.id).await.expect("restored download");
+        if status.status == rustdm::ipc::protocol::DownloadStatus::Completed {
+            break;
+        }
+        assert!(start.elapsed() < EXIT_TIMEOUT, "restored download stalled");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        std::fs::read(downloads.path().join("restart.bin")).unwrap(),
+        body
+    );
+
+    client.shutdown().await.expect("shutdown");
+    assert!(wait_for_exit(&mut daemon).await.success());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn rdmd_exits_cleanly_on_sigterm() {
     let dir = tempfile::tempdir().unwrap();
     let endpoint = test_endpoint(dir.path());
-    let mut daemon = spawn_rdmd(&endpoint);
+    let mut daemon = spawn_rdmd(&endpoint, dir.path());
     let _client = wait_for_daemon(&endpoint).await;
 
     let pid = daemon.id().expect("rdmd pid") as libc::pid_t;

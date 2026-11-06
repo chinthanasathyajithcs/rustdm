@@ -73,6 +73,7 @@ async fn client_skips_telemetry_between_responses() {
             destination: Some(tmp_dir.path().to_path_buf()),
             filename: Some("ticks.bin".to_string()),
             connections: Some(2),
+            max_bytes_per_sec: None,
         })
         .await
         .expect("add");
@@ -174,12 +175,13 @@ async fn cancelled_download_stays_cancelled_after_the_engine_stops() {
             destination: Some(tmp_dir.path().to_path_buf()),
             filename: Some("cancel_me.bin".to_string()),
             connections: Some(2),
+            max_bytes_per_sec: None,
         })
         .await
         .expect("add");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let cancelled = client.cancel(&added.id).await.expect("cancel");
+    let cancelled = client.cancel(&added.id, false).await.expect("cancel");
     assert_eq!(cancelled.status, DownloadStatus::Cancelled);
 
     // The engine task finishes after the cancel signal; it must not overwrite the status.

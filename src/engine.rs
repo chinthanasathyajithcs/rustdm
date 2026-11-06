@@ -1,4 +1,5 @@
 use crate::error::Error;
+use crate::limiter::{throttle_all, RateLimiter};
 use crate::probe::{self, Probe};
 use crate::ranges::{ByteRange, RangeSet};
 use crate::state::{self, part_path, State, STATE_VERSION};
@@ -10,12 +11,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_CONNECTIONS: u32 = 8;
+/// Most connections one download may open.
+pub const MAX_CONNECTIONS: u32 = 16;
 
 pub struct Progress {
     pub downloaded: AtomicU64,
     /// Total size in bytes once the probe has run; 0 while unknown.
     pub total: AtomicU64,
     pub completed: Mutex<RangeSet>,
+    /// Final file path once the engine has chosen it.
+    pub output: Mutex<Option<PathBuf>>,
+    /// Optional cap shared with other downloads on their combined speed.
+    pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Optional cap on this download's own speed.
+    pub download_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl Progress {
@@ -24,7 +33,36 @@ impl Progress {
             downloaded: AtomicU64::new(0),
             total: AtomicU64::new(0),
             completed: Mutex::new(RangeSet::new()),
+            output: Mutex::new(None),
+            rate_limiter: None,
+            download_limiter: None,
         }
+    }
+
+    pub fn with_rate_limiter(limiter: Arc<RateLimiter>) -> Self {
+        Self {
+            rate_limiter: Some(limiter),
+            ..Self::new()
+        }
+    }
+
+    /// Progress for a download held to both a shared cap and its own cap.
+    pub fn with_rate_limiters(shared: Arc<RateLimiter>, own: Arc<RateLimiter>) -> Self {
+        Self {
+            rate_limiter: Some(shared),
+            download_limiter: Some(own),
+            ..Self::new()
+        }
+    }
+
+    /// Wait until `bytes` may be written under this download's speed caps.
+    pub async fn throttle(
+        &self,
+        bytes: u64,
+        cancel: Option<&tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<(), Error> {
+        let limiters = [&self.rate_limiter, &self.download_limiter];
+        throttle_all(limiters.into_iter().flatten().map(|l| &**l), bytes, cancel).await
     }
 }
 
@@ -113,6 +151,7 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
     let probe_result = probe::probe(client, &req.url).await?;
     let final_path = resolve_output(&req, &probe_result);
+    *req.progress.output.lock().unwrap() = Some(final_path.clone());
     let part_p = part_path(&final_path);
     let state_p = state::state_path(&final_path);
 
@@ -127,7 +166,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
     let conns = if req.connections == 0 {
         DEFAULT_CONNECTIONS
     } else {
-        req.connections.clamp(1, 16)
+        req.connections.clamp(1, MAX_CONNECTIONS)
     };
 
     let initial_state = State {
@@ -138,6 +177,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
         validator: probe_result.validator.clone(),
         completed: vec![],
         output: final_path.clone(),
+        connections: Some(conns),
     };
     state::save_atomic(&state_p, &initial_state)?;
 
@@ -252,9 +292,14 @@ pub async fn resume_with_options(
         range_set.insert(*r);
     }
     let missing_ranges = range_set.complement(state.total);
+    let conns = state
+        .connections
+        .unwrap_or(DEFAULT_CONNECTIONS)
+        .clamp(1, MAX_CONNECTIONS);
 
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
     progress.total.store(state.total, Ordering::SeqCst);
+    *progress.output.lock().unwrap() = Some(state.output.clone());
     progress
         .downloaded
         .store(range_set.covered(), Ordering::SeqCst);
@@ -267,10 +312,10 @@ pub async fn resume_with_options(
             client,
             &probe_result.final_url,
             &probe_result.validator,
-            &missing_ranges,
+            &crate::ranges::resume_lanes(&missing_ranges, conns),
             Arc::clone(&part_arc),
             Arc::clone(&progress),
-            DEFAULT_CONNECTIONS,
+            conns,
             Some(state_path),
             Some(&state),
             cancel,
@@ -313,19 +358,17 @@ async fn download_ranges(
     segments: &[ByteRange],
     part: Arc<PartFile>,
     progress: Arc<Progress>,
-    _conns: u32,
+    conns: u32,
     state_file_path: Option<&Path>,
     state_template: Option<&State>,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<u32, Error> {
-    let now = Instant::now();
+    // Lanes are added as workers start them, so stealing only splits work in progress.
     let lanes: Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>> =
-        Arc::new(std::sync::RwLock::new(
-            segments
-                .iter()
-                .map(|s| crate::scheduler::Lane::new(s.start, s.end, now))
-                .collect(),
-        ));
+        Arc::new(std::sync::RwLock::new(Vec::with_capacity(segments.len())));
+    let pending: Arc<Mutex<std::collections::VecDeque<ByteRange>>> =
+        Arc::new(Mutex::new(segments.iter().copied().collect()));
+    let workers = segments.len().min(conns.max(1) as usize);
 
     let steals_count = Arc::new(AtomicU64::new(0));
     let mut set = tokio::task::JoinSet::new();
@@ -372,7 +415,7 @@ async fn download_ranges(
         None
     };
 
-    for i in 0..segments.len() {
+    for _ in 0..workers {
         let client_clone = client.clone();
         let url_clone = final_url.clone();
         let validator_clone = validator.clone();
@@ -381,23 +424,28 @@ async fn download_ranges(
         let lanes_clone = Arc::clone(&lanes);
         let steals_clone = Arc::clone(&steals_count);
         let cancel_clone = cancel.clone();
+        let pending_clone = Arc::clone(&pending);
 
         set.spawn(async move {
-            let initial_lane = {
-                let guard = lanes_clone.read().unwrap();
-                guard[i].clone()
-            };
+            loop {
+                let next = pending_clone.lock().unwrap().pop_front();
+                let Some(range) = next else {
+                    break;
+                };
+                let lane = crate::scheduler::Lane::new(range.start, range.end, Instant::now());
+                lanes_clone.write().unwrap().push(lane.clone());
 
-            crate::worker::fetch_lane(
-                &client_clone,
-                &url_clone,
-                &validator_clone,
-                Arc::new(initial_lane),
-                Arc::clone(&part_clone),
-                Arc::clone(&prog_clone),
-                cancel_clone.clone(),
-            )
-            .await?;
+                crate::worker::fetch_lane(
+                    &client_clone,
+                    &url_clone,
+                    &validator_clone,
+                    Arc::new(lane),
+                    Arc::clone(&part_clone),
+                    Arc::clone(&prog_clone),
+                    cancel_clone.clone(),
+                )
+                .await?;
+            }
 
             loop {
                 let stolen_range = {
@@ -510,23 +558,27 @@ async fn download_single(
 
     let mut offset = 0u64;
     while let Some(chunk) = res.chunk().await? {
-        if let Some(ref rx) = req.cancel {
-            if *rx.borrow() {
-                if let (Some(sp), Some(st)) = (state_file_path, state_template) {
-                    let completed_snapshot: Vec<ByteRange> = {
-                        let guard = req.progress.completed.lock().unwrap();
-                        guard.ranges().to_vec()
-                    };
-                    let _ = part.sync();
-                    let mut s = st.clone();
-                    s.completed = completed_snapshot;
-                    let _ = state::save_atomic(sp, &s);
-                }
-                return Err(Error::Cancelled);
+        let chunk_len = chunk.len() as u64;
+        let cancelled = req.cancel.as_ref().is_some_and(|rx| *rx.borrow())
+            || req
+                .progress
+                .throttle(chunk_len, req.cancel.as_ref())
+                .await
+                .is_err();
+        if cancelled {
+            if let (Some(sp), Some(st)) = (state_file_path, state_template) {
+                let completed_snapshot: Vec<ByteRange> = {
+                    let guard = req.progress.completed.lock().unwrap();
+                    guard.ranges().to_vec()
+                };
+                let _ = part.sync();
+                let mut s = st.clone();
+                s.completed = completed_snapshot;
+                let _ = state::save_atomic(sp, &s);
             }
+            return Err(Error::Cancelled);
         }
 
-        let chunk_len = chunk.len() as u64;
         let part_clone = Arc::clone(&part);
         let curr_offset = offset;
         tokio::task::spawn_blocking(move || part_clone.write_at(curr_offset, &chunk))

@@ -125,12 +125,62 @@ impl DaemonClient {
         self.call("download.resume", Some(id_param(id)?)).await
     }
 
-    pub async fn cancel(&mut self, id: &str) -> Result<DownloadSummary, ClientError> {
+    /// Stop a download for good. With `delete_partial`, its partial files are removed too.
+    pub async fn cancel(
+        &mut self,
+        id: &str,
+        delete_partial: bool,
+    ) -> Result<DownloadSummary, ClientError> {
         let params = CancelDownloadParams {
             id: id.to_string(),
-            delete_partial: false,
+            delete_partial,
         };
         self.call("download.cancel", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    /// Forget a download that is not running. Its files are left alone.
+    pub async fn remove(&mut self, id: &str) -> Result<DownloadSummary, ClientError> {
+        self.call("download.remove", Some(id_param(id)?)).await
+    }
+
+    /// Move a download within the queue.
+    pub async fn move_download(
+        &mut self,
+        id: &str,
+        position: QueuePosition,
+    ) -> Result<DownloadSummary, ClientError> {
+        let params = MoveDownloadParams {
+            id: id.to_string(),
+            position,
+        };
+        self.call("download.move", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    /// Cap one download's speed in bytes per second; 0 removes the cap.
+    pub async fn set_download_speed(
+        &mut self,
+        id: &str,
+        max_bytes_per_sec: u64,
+    ) -> Result<DownloadSummary, ClientError> {
+        let params = SetDownloadSpeedParams {
+            id: id.to_string(),
+            max_bytes_per_sec,
+        };
+        self.call("download.set_speed", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    pub async fn get_limits(&mut self) -> Result<DaemonLimits, ClientError> {
+        self.call("daemon.get_limits", None).await
+    }
+
+    pub async fn set_limits(
+        &mut self,
+        params: SetLimitsParams,
+    ) -> Result<DaemonLimits, ClientError> {
+        self.call("daemon.set_limits", Some(serde_json::to_value(params)?))
             .await
     }
 

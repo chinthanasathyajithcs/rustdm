@@ -39,6 +39,7 @@ async fn resume_completes_partial_download() {
             end: half,
         }],
         output: output.clone(),
+        connections: None,
     };
     save_atomic(&state_p, &state).unwrap();
 
@@ -104,6 +105,7 @@ async fn resume_refuses_when_file_changed() {
             end: 1000,
         }],
         output: output.clone(),
+        connections: None,
     };
     save_atomic(&state_p, &state).unwrap();
 
@@ -134,6 +136,7 @@ async fn resume_errors_when_part_file_missing() {
         validator: Validator::default(),
         completed: vec![],
         output,
+        connections: None,
     };
     save_atomic(&state_p, &state).unwrap();
 
@@ -143,4 +146,88 @@ async fn resume_errors_when_part_file_missing() {
         Error::Io(_) => {}
         other => panic!("expected Io error, got {other:?}"),
     }
+}
+
+/// Write a partial download of `body` with `completed` already on disk.
+fn partial_download(
+    srv: &TestServer,
+    dir: &std::path::Path,
+    body: &[u8],
+    completed: Vec<ByteRange>,
+    connections: Option<u32>,
+) -> std::path::PathBuf {
+    let output = dir.join("lanes.bin");
+    let part = PartFile::create(&part_path(&output), Some(body.len() as u64)).unwrap();
+    for r in &completed {
+        part.write_at(r.start, &body[r.start as usize..r.end as usize])
+            .unwrap();
+    }
+    part.sync().unwrap();
+    let url = srv.url().join("lanes.bin").unwrap().to_string();
+    let state = State {
+        version: STATE_VERSION,
+        url: url.clone(),
+        final_url: url,
+        total: body.len() as u64,
+        validator: Validator {
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+        },
+        completed,
+        output: output.clone(),
+        connections,
+    };
+    let state_p = state_path(&output);
+    save_atomic(&state_p, &state).unwrap();
+    state_p
+}
+
+#[tokio::test]
+async fn resume_spreads_one_gap_over_the_saved_connection_count() {
+    const MIB: u64 = 1024 * 1024;
+    let body = pattern_bytes(16 * MIB);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 16 * MIB,
+        },
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let state_p = partial_download(
+        &srv,
+        dir.path(),
+        &body,
+        vec![ByteRange::new(0, 8 * MIB)],
+        Some(4),
+    );
+
+    let outcome = resume(&build_client(), &state_p, None).await.unwrap();
+    assert!(matches!(outcome, Outcome::Completed { .. }), "{outcome:?}");
+    assert_eq!(fs::read(dir.path().join("lanes.bin")).unwrap(), body);
+    assert_eq!(srv.peak_concurrent_requests(), 4);
+}
+
+#[tokio::test]
+async fn resume_never_opens_more_connections_than_saved_even_with_many_gaps() {
+    const MIB: u64 = 1024 * 1024;
+    let body = pattern_bytes(12 * MIB);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 16 * MIB,
+        },
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    // Six separate gaps: every other MiB is already on disk.
+    let completed = (0..6)
+        .map(|i| ByteRange::new(2 * i * MIB, (2 * i + 1) * MIB))
+        .collect();
+    let state_p = partial_download(&srv, dir.path(), &body, completed, Some(2));
+
+    let outcome = resume(&build_client(), &state_p, None).await.unwrap();
+    assert!(matches!(outcome, Outcome::Completed { .. }), "{outcome:?}");
+    assert_eq!(fs::read(dir.path().join("lanes.bin")).unwrap(), body);
+    assert_eq!(srv.peak_concurrent_requests(), 2);
 }

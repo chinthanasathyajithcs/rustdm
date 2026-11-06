@@ -1,6 +1,6 @@
 # rustdm: where we are and what's next
 
-Updated: 2026-11-05
+Updated: 2026-11-06
 
 ## Done
 
@@ -17,7 +17,13 @@ Updated: 2026-11-05
   - **Substep 2.4 (`rdmd`):** `src/bin/rdmd.rs` with the service loop in `src/daemon/service.rs`. An exclusive OS file lock (`<endpoint>.lock`) keeps a second daemon off the endpoint. Ctrl+C, SIGTERM, Ctrl+Break, console close, or `daemon.shutdown` pause every active download and give it up to 10 s to save its `.part.rdm` state. SIGHUP is ignored so the daemon outlives its terminal.
   - **Substep 2.5 (IPC client & CLI):** `src/ipc/client.rs` (`DaemonClient`, `connect_or_spawn`) and `src/daemon/launch.rs` (detached spawn of `rdmd` from the same folder as `rdm`). New `rdm` commands: `add`, `list`, `pause`, `cancel`, `resume <dl_N>`, `daemon start|status|stop`, plus a global `--endpoint`. `rdm resume` still accepts a `.part.rdm` file for foreground resumes.
   - **Daemon core fixes:** a cancelled download no longer turns into "paused" when its engine stops; a shutdown arriving between accept-loop iterations is no longer missed; `list` shows total size, percent, and ETA (the engine now publishes `Progress::total`).
-- **Testing:** 109 automated tests passing on Linux (unit, integration, crash, daemon process, and CLI end-to-end suites). Windows-only code is type-checked; Windows CI runs on the next push.
+- **Milestone 2 - Task 3 Complete (Multi-Download Queue, branch `feat/download-queue`, stacked on `feat/daemon-cli`):**
+  - **Queue:** `rdm add` queues downloads; at most `max_active` (default 3) run at once, oldest first. Pausing a queued download takes it out of the queue; `rdm resume` puts it back. The core is split into `src/daemon/core.rs` (queue rules and scheduler), `src/daemon/task.rs` (one download's record), and `src/daemon/server.rs` (RPC dispatch and accept loop).
+  - **Global bandwidth cap:** `src/limiter.rs` is a token bucket shared by every connection of every download (one-second burst). Throttle waits check the cancel flag every 100 ms, and the lowest accepted cap is 16 KiB/s, so pause and cancel stay responsive.
+  - **Persistence:** `src/daemon/queue_store.rs` saves the queue and limits atomically to `queue.json` in `--data-dir` / `$RUSTDM_DATA_DIR` / `%LOCALAPPDATA%\rustdm` / `~/.local/state/rustdm` on every change. After a restart, downloads that were running or queued are queued again and resume from their `.part.rdm` files; user-paused ones stay paused. A corrupt queue file is renamed to `queue.json.corrupt` instead of being overwritten.
+  - **New RPCs and commands:** `daemon.get_limits` / `daemon.set_limits` (`rdm limits --max-active N --max-speed 2M`), `download.remove` (`rdm remove <id>`), and `rdm cancel --delete`, which now deletes the right `.part` / `.part.rdm` files once the engine has stopped. The engine publishes the chosen output path early, so `rdm list` shows the real file name while downloading.
+  - **Follow-ups:** lowering `max_active` requeues the extras, `rdm move` reorders the queue, `rdm speed` / `rdm add --max-speed` cap one download, and resumes keep the original connection count.
+- **Testing:** 148 automated tests passing on Linux (unit, integration, crash, daemon process, queue, and CLI end-to-end suites). Windows-only code is type-checked; Windows CI runs on the next push.
 
 ## Milestone 2 Architecture & Status
 
@@ -31,12 +37,14 @@ Updated: 2026-11-05
    - [x] Substep 2.3: In-Memory Daemon Core & Engine Controller (`src/daemon/mod.rs` & `src/daemon/core.rs` - multi-task coordinator, pause/resume, live telemetry broadcast).
    - [x] Substep 2.4: Standalone Daemon Executable (`src/bin/rdmd.rs` - background service entrypoint, single-instance lock, graceful signal shutdown).
    - [x] Substep 2.5: IPC Client & CLI Integration (`rdm` auto-spawning, remote control commands: `add`, `list`, `pause`, `resume`, `cancel`, `daemon start/status/stop`).
-   - Known gaps for Task 3: downloads live only in daemon memory (lost on daemon restart; their `.part.rdm` files remain and resume with `rdm resume <file>`); `download.cancel` with `delete_partial` targets the wrong path, so `rdm cancel` keeps partial files; a download added without `--name` shows as `download` in `rdm list` until it completes.
-
-3. **[ ] Task 3: Multi-Download Queue Manager**
-   - Queue state machine (Active, Queued, Paused, Completed, Failed).
-   - Global bandwidth / concurrent download scheduler.
-   - Persistence of the queue across daemon restarts.
+3. **[x] Task 3: Multi-Download Queue Manager**
+   - [x] Queue state machine (Active, Queued, Paused, Completed, Failed, plus Pausing and Cancelled).
+   - [x] Global bandwidth / concurrent download scheduler.
+   - [x] Persistence of the queue across daemon restarts.
+   - [x] Lowering `max_active` stops the downloads furthest down the queue and queues them again; they resume from their state files when a slot frees up.
+   - [x] Queue reordering (`download.move`, `rdm move <id> top|up|down|bottom`); the order is saved with the queue.
+   - [x] Per-download speed caps (`download.set_speed`, `rdm speed`, `rdm add --max-speed`), applied on top of the global cap and saved with the queue.
+   - [x] A resume uses the connection count the download started with (saved in `.part.rdm`; older state files fall back to 8), splitting the largest gaps so every connection has work.
 
 4. **[ ] Task 4: Interactive Terminal UI (TUI) Dashboard (`rdm` / `rdm tui`)**
    - Built with `ratatui` + `crossterm`.

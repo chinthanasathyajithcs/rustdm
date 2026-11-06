@@ -77,6 +77,7 @@ async fn test_daemon_add_download_and_complete() {
         destination: Some(tmp_dir.path().to_path_buf()),
         filename: Some("downloaded.bin".to_string()),
         connections: Some(4),
+        max_bytes_per_sec: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(10),
@@ -144,6 +145,7 @@ async fn test_daemon_pause_and_resume() {
         destination: Some(tmp_dir.path().to_path_buf()),
         filename: Some("pause_resume.bin".to_string()),
         connections: Some(2),
+        max_bytes_per_sec: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(20),
@@ -299,6 +301,7 @@ async fn test_daemon_telemetry_streaming() {
         destination: Some(tmp_dir.path().to_path_buf()),
         filename: Some("telemetry_file.bin".to_string()),
         connections: Some(2),
+        max_bytes_per_sec: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(41),

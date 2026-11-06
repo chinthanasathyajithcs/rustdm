@@ -1,4 +1,5 @@
-use crate::daemon::DaemonServer;
+use crate::daemon::queue_store::QueueStore;
+use crate::daemon::{DaemonCore, DaemonServer};
 use crate::ipc::transport::{IpcEndpoint, IpcTransportError};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
@@ -15,6 +16,8 @@ pub enum ServiceError {
     AlreadyRunning(PathBuf),
     #[error("cannot use lock file {}: {source}", .path.display())]
     Lock { path: PathBuf, source: io::Error },
+    #[error("cannot read download queue {}: {source}", .path.display())]
+    Queue { path: PathBuf, source: io::Error },
     #[error(transparent)]
     Transport(#[from] IpcTransportError),
 }
@@ -59,8 +62,10 @@ pub fn daemon_holds_lock(endpoint: &IpcEndpoint) -> bool {
 
 /// Run the daemon on `endpoint` until a `daemon.shutdown` request or `shutdown_signal`
 /// resolves. Active downloads are paused and get up to `settle_timeout` to save state.
+/// With a `data_dir`, the queue is restored from and saved to `<data_dir>/queue.json`.
 pub async fn run_daemon<S>(
     endpoint: &IpcEndpoint,
+    data_dir: Option<&Path>,
     shutdown_signal: S,
     settle_timeout: Duration,
 ) -> Result<(), ServiceError>
@@ -68,10 +73,22 @@ where
     S: Future<Output = ()> + Send + 'static,
 {
     let _lock = InstanceLock::acquire(&endpoint.lock_path())?;
-    let server = DaemonServer::bind(endpoint).await.map_err(|e| match e {
-        IpcTransportError::AddressInUse(_) => ServiceError::AlreadyRunning(endpoint.lock_path()),
-        other => other.into(),
-    })?;
+    let core = match data_dir {
+        Some(dir) => {
+            let store = QueueStore::in_dir(dir);
+            let path = store.path().to_path_buf();
+            DaemonCore::with_store(store).map_err(|source| ServiceError::Queue { path, source })?
+        }
+        None => DaemonCore::new(),
+    };
+    let server = DaemonServer::bind_with_core(endpoint, core)
+        .await
+        .map_err(|e| match e {
+            IpcTransportError::AddressInUse(_) => {
+                ServiceError::AlreadyRunning(endpoint.lock_path())
+            }
+            other => other.into(),
+        })?;
     tracing::info!("rdmd {} listening on {}", crate::VERSION, endpoint);
 
     let core = server.core.clone();

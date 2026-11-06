@@ -177,6 +177,9 @@ pub async fn fetch_lane(
                     let allowed = (end_limit - current_offset) as usize;
                     let to_write_len = chunk.len().min(allowed);
                     let to_write = chunk.slice(..to_write_len);
+                    progress
+                        .throttle(to_write_len as u64, cancel.as_ref())
+                        .await?;
 
                     let part_clone = Arc::clone(&part);
                     let curr_offset = current_offset;

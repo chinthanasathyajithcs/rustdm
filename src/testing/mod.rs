@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -55,7 +56,32 @@ pub struct TestServer {
     url: url::Url,
     etag: Arc<RwLock<String>>,
     requests: Arc<Mutex<Vec<RequestLog>>>,
+    peak_in_flight: Arc<AtomicUsize>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// The `Range` header of the engine's size probe.
+const PROBE_RANGE: &str = "bytes=0-0";
+
+/// Counts a request as in flight until dropped, and records the highest count seen.
+struct InFlight {
+    current: Arc<AtomicUsize>,
+}
+
+impl InFlight {
+    fn enter(current: &Arc<AtomicUsize>, peak: &AtomicUsize) -> Self {
+        let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        Self {
+            current: Arc::clone(current),
+        }
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.current.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl TestServer {
@@ -70,6 +96,9 @@ impl TestServer {
 
         let etag = Arc::new(RwLock::new("\"v1\"".to_string()));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak_in_flight = Arc::new(AtomicUsize::new(0));
+        let server_peak = Arc::clone(&peak_in_flight);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
         let server_etag = Arc::clone(&etag);
@@ -93,6 +122,8 @@ impl TestServer {
                         let body_ref = Arc::clone(&server_body);
                         let mode_clone = mode.clone();
                         let counter = Arc::clone(&mode_counter);
+                        let in_flight = Arc::clone(&in_flight);
+                        let peak = Arc::clone(&server_peak);
 
                         tokio::spawn(async move {
                             let mut buf = Vec::new();
@@ -156,6 +187,11 @@ impl TestServer {
                             };
 
                             reqs_lock.lock().unwrap().push(log_entry);
+                            // The engine's one-byte probe is not a data connection; its
+                            // client stops waiting after the headers, so leave it out.
+                            let is_probe = range_hdr.as_deref() == Some(PROBE_RANGE);
+                            let _in_flight =
+                                (!is_probe).then(|| InFlight::enter(&in_flight, &peak));
 
                             let current_etag = etag_lock.read().unwrap().clone();
                             let last_modified = "Sun, 06 Nov 1994 08:49:37 GMT";
@@ -357,11 +393,13 @@ impl TestServer {
                                     let slice = &body_ref[start..=end];
                                     let chunk_size = (*bytes_per_sec as usize / 10).max(512).min(slice.len());
                                     let delay_ms = (chunk_size as u64 * 1000) / bytes_per_sec.max(&1);
+                                    // Wait before each chunk, not after, so a finished
+                                    // response stops counting as in flight right away.
                                     for chunk in slice.chunks(chunk_size) {
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                                         if socket.write_all(chunk).await.is_err() {
                                             break;
                                         }
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                                     }
                                     let _ = socket.shutdown().await;
                                     return;
@@ -434,6 +472,7 @@ impl TestServer {
             url,
             etag,
             requests,
+            peak_in_flight,
             shutdown_tx: Some(shutdown_tx),
         })
     }
@@ -448,6 +487,12 @@ impl TestServer {
 
     pub fn requests(&self) -> Vec<RequestLog> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// The most data requests this server has been answering at the same time.
+    /// The engine's `bytes=0-0` size probe is not counted.
+    pub fn peak_concurrent_requests(&self) -> usize {
+        self.peak_in_flight.load(Ordering::SeqCst)
     }
 }
 

@@ -581,3 +581,39 @@ async fn pre_flight_disk_space_check_aborts_before_creating_part_file() {
         "state file must NOT be created when disk space is insufficient"
     );
 }
+
+#[tokio::test]
+async fn paused_download_remembers_its_connection_count() {
+    let body = pattern_bytes(8 * 1024 * 1024);
+    let srv = TestServer::start(
+        body,
+        Mode::Throttle {
+            bytes_per_sec: 1024 * 1024,
+        },
+    )
+    .await;
+    let dir = tempdir().unwrap();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let progress = Arc::new(Progress::new());
+    let req = DownloadRequest {
+        url: srv.url().join("three.bin").unwrap(),
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 3,
+        progress: Arc::clone(&progress),
+        cancel: Some(cancel_rx),
+    };
+
+    let handle = tokio::spawn(async move { download(&build_client(), req).await });
+    while progress.downloaded.load(Ordering::Relaxed) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    cancel_tx.send(true).unwrap();
+
+    let state_file = match handle.await.unwrap().unwrap() {
+        Outcome::Paused { state, .. } => state,
+        other => panic!("expected a pause, got {other:?}"),
+    };
+    let saved = rustdm::state::load(&state_file).unwrap();
+    assert_eq!(saved.connections, Some(3));
+}

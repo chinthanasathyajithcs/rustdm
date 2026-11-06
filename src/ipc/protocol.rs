@@ -413,6 +413,9 @@ pub struct AddDownloadParams {
     pub filename: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connections: Option<usize>,
+    /// Speed cap for this download alone in bytes per second; 0 or missing means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,10 +429,55 @@ pub struct CancelDownloadParams {
     pub delete_partial: bool,
 }
 
+/// Where `download.move` puts a download in the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueuePosition {
+    /// First in the queue.
+    Top,
+    /// One place earlier.
+    Up,
+    /// One place later.
+    Down,
+    /// Last in the queue.
+    Bottom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveDownloadParams {
+    pub id: String,
+    pub position: QueuePosition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetDownloadSpeedParams {
+    pub id: String,
+    /// Speed cap for this download in bytes per second; 0 removes it.
+    pub max_bytes_per_sec: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateUrlParams {
     pub id: String,
     pub new_url: String,
+}
+
+/// Daemon-wide queue limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonLimits {
+    /// How many downloads may run at once; the rest wait as `queued`.
+    pub max_active: usize,
+    /// Combined speed cap for all downloads in bytes per second; 0 means unlimited.
+    pub max_bytes_per_sec: u64,
+}
+
+/// Fields left out keep their current value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetLimitsParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_active: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +513,9 @@ pub struct DownloadSummary {
     pub eta_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+    /// Speed cap for this download alone; 0 means none.
+    #[serde(default)]
+    pub max_bytes_per_sec: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,6 +543,13 @@ pub struct DownloadStateChanged {
     pub new_state: DownloadStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Numeric part of a download id such as `dl_12`, for ordering. Other ids sort last.
+pub fn download_id_number(id: &str) -> u64 {
+    id.strip_prefix("dl_")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX)
 }
 
 // --- Encoding & Decoding Helpers ---
@@ -584,6 +642,7 @@ mod tests {
             destination: Some(PathBuf::from("/downloads")),
             filename: Some("file.bin".to_string()),
             connections: Some(8),
+            max_bytes_per_sec: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),

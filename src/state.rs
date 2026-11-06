@@ -20,6 +20,10 @@ pub struct State {
     pub validator: Validator,
     pub completed: Vec<ByteRange>,
     pub output: PathBuf,
+    /// Connections the download was started with, so a resume uses the same
+    /// number. Missing from state files written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
 }
 
 pub fn state_path(output: &Path) -> PathBuf {
@@ -31,22 +35,27 @@ pub fn part_path(output: &Path) -> PathBuf {
 }
 
 pub fn save_atomic(path: &Path, state: &State) -> Result<(), Error> {
-    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
     let json =
         serde_json::to_vec_pretty(state).map_err(|e| Error::State(format!("json error: {e}")))?;
+    write_atomic(path, &json)?;
+    Ok(())
+}
 
+/// Write `bytes` to a temp file next to `path`, flush it to disk, then rename it
+/// over `path`, so readers see either the old or the new contents.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&tmp_path)?;
 
-    file.write_all(&json)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    std::fs::rename(&tmp_path, path)
 }
 
 pub fn load(path: &Path) -> Result<State, Error> {
@@ -88,7 +97,16 @@ mod tests {
                 end: 5 * 1024 * 1024,
             }],
             output,
+            connections: Some(4),
         }
+    }
+
+    #[test]
+    fn older_state_files_without_a_connection_count_still_load() {
+        let mut json = serde_json::to_value(sample_state(PathBuf::from("/tmp/f.bin"))).unwrap();
+        json.as_object_mut().unwrap().remove("connections");
+        let state: State = serde_json::from_value(json).unwrap();
+        assert_eq!(state.connections, None);
     }
 
     #[test]
