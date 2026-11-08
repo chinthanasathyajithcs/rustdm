@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const KIB: u64 = 1024;
+const MIB: u64 = 1024 * KIB;
 
 /// A client that gives up on a silent connection after 300 ms.
 fn impatient_client() -> reqwest::Client {
@@ -103,6 +104,124 @@ async fn a_connection_that_keeps_dropping_still_finishes_while_it_makes_progress
     .await
     .unwrap();
     assert_eq!(std::fs::read(completed_path(outcome)).unwrap(), body);
+}
+
+#[tokio::test]
+async fn a_dropped_connection_that_was_making_progress_reconnects_at_once() {
+    let body = pattern_bytes(1024 * KIB);
+    // Seven drops; waiting a backoff after each would take several seconds.
+    let srv = TestServer::start(body.clone(), Mode::DropEvery { bytes: 128 * KIB }).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let started = Instant::now();
+    let outcome = download(
+        &build_client(),
+        request(&srv, "flaky.bin", "{downloads}/{name}", dir.path()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(completed_path(outcome)).unwrap(), body);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "reconnecting took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_refuses_extra_connections_is_downloaded_with_the_ones_it_allows() {
+    let body = pattern_bytes(8 * MIB);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::ConnectionLimit {
+            limit: 2,
+            bytes_per_sec: 4 * MIB,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let req = DownloadRequest {
+        connections: 8,
+        ..request(&srv, "limited.bin", "{downloads}/{name}", dir.path())
+    };
+
+    // Two connections at 4 MiB/s each need about a second.
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(30), download(&build_client(), req))
+        .await
+        .expect("the download hung")
+        .expect("the download failed although two connections were allowed");
+    assert_eq!(std::fs::read(completed_path(outcome)).unwrap(), body);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn one_crawling_connection_does_not_hold_up_the_end_of_the_download() {
+    let body = pattern_bytes(4 * MIB);
+    // Four 1 MiB lanes; the fourth crawls at 128 KiB/s, which alone takes 8 s.
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::SlowEvery {
+            every: 4,
+            bytes_per_sec: 128 * KIB,
+            fast_bytes_per_sec: None,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let req = DownloadRequest {
+        connections: 4,
+        ..request(&srv, "crawl.bin", "{downloads}/{name}", dir.path())
+    };
+
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(30), download(&build_client(), req))
+        .await
+        .expect("the download hung")
+        .unwrap();
+    assert_eq!(std::fs::read(completed_path(outcome)).unwrap(), body);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the crawling connection was left to finish alone: {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn connections_that_turn_out_slow_one_after_another_are_overtaken_quickly() {
+    let body = pattern_bytes(32 * MIB);
+    // Every third connection crawls, the split-off pieces' connections included. All
+    // fast, eight connections would need one second.
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::SlowEvery {
+            every: 3,
+            bytes_per_sec: 128 * KIB,
+            fast_bytes_per_sec: Some(4 * MIB),
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let req = DownloadRequest {
+        connections: 8,
+        ..request(&srv, "crawlers.bin", "{downloads}/{name}", dir.path())
+    };
+
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(Duration::from_secs(60), download(&build_client(), req))
+        .await
+        .expect("the download hung")
+        .unwrap();
+    assert_eq!(std::fs::read(completed_path(outcome)).unwrap(), body);
+    assert!(
+        started.elapsed() < Duration::from_millis(2800),
+        "took {:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]

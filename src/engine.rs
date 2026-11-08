@@ -1,10 +1,12 @@
-use crate::cancel::or_cancel;
+use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::error::Error;
 use crate::limiter::{throttle_all, RateLimiter};
 use crate::probe::{self, Probe};
 use crate::ranges::{ByteRange, RangeSet};
+use crate::scheduler::{pick_victim, steal, Crew, Lane};
 use crate::state::{self, part_path, State, STATE_VERSION};
 use crate::template::{self, Tokens};
+use crate::worker::LaneEnd;
 use crate::writer::PartFile;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -472,6 +474,59 @@ async fn restart(
     conclude(result, part, state.output, state_path.to_path_buf())
 }
 
+/// How often an idle connection looks again for work near the end of a download,
+/// when no lane has ended meanwhile.
+const IDLE_POLL: Duration = Duration::from_millis(100);
+
+type Pending = Arc<Mutex<std::collections::VecDeque<ByteRange>>>;
+
+/// What an idle connection does next.
+enum Work {
+    /// A lane nobody had started, already registered.
+    Range(Arc<Lane>),
+    /// Half of what another connection had left, already registered.
+    Stolen(Arc<Lane>),
+    /// Nothing to take yet, but other connections are still at work.
+    Wait,
+    /// Every byte is written or being written by someone else for good: leave.
+    AllDone,
+}
+
+/// The next job for an idle connection. Both locks are held while it picks work,
+/// registers the lane and decides to leave, so no range in hand is ever unseen:
+/// neither one just taken from the queue nor one handed back ([`hand_back`]).
+fn next_work(pending: &Pending, lanes: &SharedLanes, crew: &Crew) -> Work {
+    let mut queue = pending.lock().unwrap();
+    let mut lanes = lanes.write().unwrap();
+    let now = Instant::now();
+    let register = |lanes: &mut Vec<Lane>, range: ByteRange| {
+        let lane = Lane::new(range.start, range.end, now);
+        lanes.push(lane.clone());
+        Arc::new(lane)
+    };
+    if let Some(range) = queue.pop_front() {
+        return Work::Range(register(&mut lanes, range));
+    }
+    if let Some(range) = pick_victim(&lanes, now).and_then(|i| steal(&lanes[i], now)) {
+        return Work::Stolen(register(&mut lanes, range));
+    }
+    if lanes.iter().all(Lane::is_done) {
+        crew.leave();
+        return Work::AllDone;
+    }
+    Work::Wait
+}
+
+/// A refused connection puts the rest of its lane back for the others and leaves,
+/// unless it is the last one, which stays and keeps trying. True when it left.
+fn hand_back(lane: &Lane, pending: &Pending, crew: &Crew) -> bool {
+    let mut queue = pending.lock().unwrap();
+    if let Some(rest) = lane.take_rest() {
+        queue.push_back(rest);
+    }
+    crew.try_leave()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_ranges(
     client: &reqwest::Client,
@@ -487,8 +542,7 @@ async fn download_ranges(
 ) -> Result<u32, Error> {
     // Lanes are added as workers start them, so stealing only splits work in progress.
     let lanes: SharedLanes = Arc::new(std::sync::RwLock::new(Vec::with_capacity(segments.len())));
-    let pending: Arc<Mutex<std::collections::VecDeque<ByteRange>>> =
-        Arc::new(Mutex::new(segments.iter().copied().collect()));
+    let pending: Pending = Arc::new(Mutex::new(segments.iter().copied().collect()));
     let workers = segments.len().min(conns.max(1) as usize);
     *progress.lanes.lock().unwrap() = Some(Arc::clone(&lanes));
 
@@ -537,6 +591,9 @@ async fn download_ranges(
         None
     };
 
+    let crew = Arc::new(Crew::new(workers));
+    // Wakes idle connections when a lane ends, so the last byte ends the download at once.
+    let lane_ended = Arc::new(tokio::sync::Notify::new());
     for _ in 0..workers {
         let client_clone = client.clone();
         let url_clone = final_url.clone();
@@ -547,62 +604,44 @@ async fn download_ranges(
         let steals_clone = Arc::clone(&steals_count);
         let cancel_clone = cancel.clone();
         let pending_clone = Arc::clone(&pending);
+        let crew = Arc::clone(&crew);
+        let lane_ended = Arc::clone(&lane_ended);
 
         set.spawn(async move {
             loop {
-                let next = pending_clone.lock().unwrap().pop_front();
-                let Some(range) = next else {
-                    break;
-                };
-                let lane = crate::scheduler::Lane::new(range.start, range.end, Instant::now());
-                lanes_clone.write().unwrap().push(lane.clone());
-
-                crate::worker::fetch_lane(
-                    &client_clone,
-                    &url_clone,
-                    &validator_clone,
-                    Arc::new(lane),
-                    Arc::clone(&part_clone),
-                    Arc::clone(&prog_clone),
-                    cancel_clone.clone(),
-                )
-                .await?;
-            }
-
-            loop {
-                let stolen_range = {
-                    let guard = lanes_clone.read().unwrap();
-                    if let Some(victim_idx) = crate::scheduler::pick_victim(&guard, Instant::now())
-                    {
-                        crate::scheduler::steal(&guard[victim_idx])
-                    } else {
-                        None
+                let lane = match next_work(&pending_clone, &lanes_clone, &crew) {
+                    Work::Range(lane) => lane,
+                    Work::Stolen(lane) => {
+                        steals_clone.fetch_add(1, Ordering::SeqCst);
+                        lane
                     }
+                    // Another connection may still turn out slow, or hand its rest back.
+                    Work::Wait => {
+                        tokio::select! {
+                            _ = lane_ended.notified() => {}
+                            waited = sleep_or_cancel(IDLE_POLL, cancel_clone.as_ref()) => waited?,
+                        }
+                        continue;
+                    }
+                    Work::AllDone => break,
                 };
-
-                let Some(range) = stolen_range else {
-                    break;
-                };
-
-                steals_clone.fetch_add(1, Ordering::SeqCst);
-                let stolen_lane =
-                    crate::scheduler::Lane::new(range.start, range.end, Instant::now());
-                {
-                    lanes_clone.write().unwrap().push(stolen_lane.clone());
-                }
-
-                crate::worker::fetch_lane(
+                let end = crate::worker::fetch_lane(
                     &client_clone,
                     &url_clone,
                     &validator_clone,
-                    Arc::new(stolen_lane),
+                    Arc::clone(&lane),
                     Arc::clone(&part_clone),
                     Arc::clone(&prog_clone),
                     cancel_clone.clone(),
+                    Some(&crew),
                 )
                 .await?;
+                let left = end == LaneEnd::Refused && hand_back(&lane, &pending_clone, &crew);
+                lane_ended.notify_waiters();
+                if left {
+                    break;
+                }
             }
-
             Ok::<(), Error>(())
         });
     }
@@ -629,6 +668,14 @@ async fn download_ranges(
     let _ = done_tx.send(true);
     if let Some(h) = checkpoint_handle {
         let _ = h.await;
+    }
+
+    let unfinished =
+        !pending.lock().unwrap().is_empty() || lanes.read().unwrap().iter().any(|l| !l.is_done());
+    if first_error.is_none() && unfinished {
+        first_error = Some(Error::Protocol(
+            "the connections stopped with parts of the file still missing".to_string(),
+        ));
     }
 
     // If an error occurred (like Cancelled or LinkExpired), save state now
