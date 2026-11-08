@@ -40,6 +40,15 @@ pub enum Mode {
         bytes_per_sec: u64,
     },
     SimulateSize(u64),
+    /// Send the headers and at most `after` body bytes of each response, then
+    /// go silent while keeping the connection open.
+    Stall {
+        after: u64,
+    },
+    /// Send at most `bytes` body bytes of each response, then close the connection.
+    DropEvery {
+        bytes: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,6 +278,40 @@ impl TestServer {
                                     )
                                     .into_bytes();
                                     resp.push(42);
+                                    resp
+                                }
+                                Mode::Stall { after } => {
+                                    let total = body_ref.len();
+                                    let (start, end) = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let slice_len = end - start + 1;
+                                    let header = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    );
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    let sent = slice_len.min(*after as usize);
+                                    let _ = socket.write_all(&body_ref[start..start + sent]).await;
+                                    if sent < slice_len {
+                                        // Hold the connection open without sending anything.
+                                        let mut sink = [0u8; 64];
+                                        let _ = socket.read(&mut sink).await;
+                                    }
+                                    return;
+                                }
+                                Mode::DropEvery { bytes } => {
+                                    let total = body_ref.len();
+                                    let (start, end) = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let slice_len = end - start + 1;
+                                    let mut resp = format!(
+                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                    )
+                                    .into_bytes();
+                                    resp.extend_from_slice(&body_ref[start..start + slice_len.min(*bytes as usize)]);
                                     resp
                                 }
                                 Mode::DropMidBodyOnce => {

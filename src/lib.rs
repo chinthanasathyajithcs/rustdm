@@ -2,6 +2,7 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod cancel;
 pub mod daemon;
 pub mod disk;
 pub mod engine;

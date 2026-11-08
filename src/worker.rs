@@ -1,3 +1,4 @@
+use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::engine::Progress;
 use crate::error::Error;
 use crate::probe::Validator;
@@ -41,13 +42,14 @@ pub async fn fetch_lane(
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<(), Error> {
     let mut current_offset = lane.cursor.load(Ordering::SeqCst);
+    // Failed attempts in a row. Any attempt that writes bytes resets it, so a
+    // connection that keeps dropping but keeps making progress never gives up.
     let mut attempt = 0u32;
+    let cancel = cancel.as_ref();
 
     while current_offset < lane.end.load(Ordering::SeqCst) {
-        if let Some(ref rx) = cancel {
-            if *rx.borrow() {
-                return Err(Error::Cancelled);
-            }
+        if cancel.is_some_and(|rx| *rx.borrow()) {
+            return Err(Error::Cancelled);
         }
 
         let current_end = lane.end.load(Ordering::SeqCst);
@@ -79,7 +81,7 @@ pub async fn fetch_lane(
             false
         };
 
-        let res = match req_builder.send().await {
+        let res = match or_cancel(req_builder.send(), cancel).await? {
             Ok(r) => r,
             Err(_) => {
                 attempt += 1;
@@ -88,7 +90,7 @@ pub async fn fetch_lane(
                         "connection failed after {MAX_SEGMENT_ATTEMPTS} attempts"
                     )));
                 }
-                tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+                sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
                 continue;
             }
         };
@@ -122,7 +124,7 @@ pub async fn fetch_lane(
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after_secs)
                 .unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
-            tokio::time::sleep(delay).await;
+            sleep_or_cancel(delay, cancel).await?;
             continue;
         }
 
@@ -133,7 +135,7 @@ pub async fn fetch_lane(
                     "expected 206 Partial Content, received status {status_code}"
                 )));
             }
-            tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+            sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
             continue;
         }
 
@@ -152,22 +154,17 @@ pub async fn fetch_lane(
             if attempt >= MAX_SEGMENT_ATTEMPTS {
                 return Err(Error::Protocol("wrong Content-Range".to_string()));
             }
-            tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+            sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
             continue;
         }
 
-        // Stream body
+        // Stream body. A silent connection ends with a read timeout from the client.
         let mut stream = res;
         let mut stream_failed = false;
+        let offset_at_start = current_offset;
 
         loop {
-            if let Some(ref rx) = cancel {
-                if *rx.borrow() {
-                    return Err(Error::Cancelled);
-                }
-            }
-
-            match stream.chunk().await {
+            match or_cancel(stream.chunk(), cancel).await? {
                 Ok(Some(chunk)) => {
                     let end_limit = lane.end.load(Ordering::SeqCst);
                     if current_offset >= end_limit {
@@ -177,9 +174,7 @@ pub async fn fetch_lane(
                     let allowed = (end_limit - current_offset) as usize;
                     let to_write_len = chunk.len().min(allowed);
                     let to_write = chunk.slice(..to_write_len);
-                    progress
-                        .throttle(to_write_len as u64, cancel.as_ref())
-                        .await?;
+                    progress.throttle(to_write_len as u64, cancel).await?;
 
                     let part_clone = Arc::clone(&part);
                     let curr_offset = current_offset;
@@ -217,13 +212,16 @@ pub async fn fetch_lane(
 
         let target_end = lane.end.load(Ordering::SeqCst);
         if stream_failed && current_offset < target_end {
+            if current_offset > offset_at_start {
+                attempt = 0;
+            }
             attempt += 1;
             if attempt >= MAX_SEGMENT_ATTEMPTS {
                 return Err(Error::Protocol(format!(
                     "short body or connection drop reached max attempts ({MAX_SEGMENT_ATTEMPTS})"
                 )));
             }
-            tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+            sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
             continue;
         }
     }

@@ -306,40 +306,36 @@ async fn link_expired_fails_without_retry() {
 }
 
 #[tokio::test]
-async fn short_body_fails_at_attempt_cap() {
-    let body = pattern_bytes(2000);
-    let srv = TestServer::start(body, Mode::ShortBody).await;
+async fn short_bodies_are_retried_while_each_one_adds_bytes() {
+    // The server sends half of what is left each time: 8, 4, 2, 1, then 1 byte.
+    // Every attempt makes progress, so the range finishes instead of giving up.
+    let body = pattern_bytes(16);
+    let srv = TestServer::start(body.clone(), Mode::ShortBody).await;
     let client = build_client();
     let dir = tempdir().unwrap();
     let part_path = dir.path().join("short.bin.part");
-    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(2000)).unwrap());
+    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(16)).unwrap());
     let progress = Arc::new(Progress::new());
     let validator = rustdm::probe::Validator::default();
 
-    let err = rustdm::worker::fetch_range(
+    rustdm::worker::fetch_range(
         &client,
         &srv.url().join("short.bin").unwrap(),
         &validator,
-        rustdm::ranges::ByteRange {
-            start: 0,
-            end: 2000,
-        },
+        rustdm::ranges::ByteRange { start: 0, end: 16 },
         part,
-        progress,
+        Arc::clone(&progress),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    match err {
-        rustdm::error::Error::Protocol(_) => {}
-        other => panic!("expected Protocol error, got {other:?}"),
-    }
+    assert_eq!(fs::read(&part_path).unwrap(), body);
     let range_reqs = srv
         .requests()
         .into_iter()
-        .filter(|r| r.range.is_some() && r.range.as_deref() != Some("bytes=0-0"))
+        .filter(|r| r.range.is_some())
         .count();
-    assert_eq!(range_reqs as u32, rustdm::retry::MAX_SEGMENT_ATTEMPTS);
+    assert_eq!(range_reqs, 5);
 }
 
 #[tokio::test]

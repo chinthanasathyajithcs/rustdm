@@ -28,6 +28,7 @@ Updated: 2026-11-06
   - Top pane: downloads in queue order with status tabs; bottom pane: details, segment map, one bar per connection, and a speed graph. Toolbar buttons, tabs, and rows are clickable; the wheel scrolls; pasting a URL adds it; `Shift+↑/↓` reorders the queue.
   - Telemetry ticks now carry one entry per connection lane (`Progress::lane_snapshots`), on a dedicated connection that reconnects if the daemon restarts. The dashboard also survives a daemon restart.
   - Not a terminal, or `--plain`: prints a row whenever a download changes and exits once nothing is running or queued.
+- **Hardening, batch 1 (network resilience, branch `feat/network-resilience`):** HTTP connect and read timeouts (30 s) so a silent connection is reopened; pause interrupts any wait; a connection's retry count resets whenever it makes progress; the daemon retries failed downloads by itself (`retrying`, 3 s doubling to 2 min, 5 in a row without progress); missing output folders are created and file errors name the path; resumes that the server cannot serve start over; speed and ETA are averaged over 3 s.
 - **Testing:** 171 automated tests passing on Linux (unit, integration, crash, daemon process, queue, and CLI end-to-end suites). Windows-only code is type-checked; Windows CI runs on the next push.
 
 ## Milestone 2 Architecture & Status

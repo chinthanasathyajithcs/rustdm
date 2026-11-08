@@ -1,4 +1,5 @@
 use crate::daemon::queue_store::SavedDownload;
+use crate::daemon::speed::SpeedMeter;
 use crate::engine::{Outcome, PauseReason, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
@@ -7,7 +8,20 @@ use crate::state::{part_path, state_path};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Automatic retries in a row, without progress in between, before a download fails.
+pub const MAX_AUTO_RETRIES: u32 = 5;
+/// Wait before the first automatic retry; each later one waits twice as long.
+const FIRST_RETRY_DELAY: Duration = Duration::from_secs(3);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(120);
+
+/// Wait before automatic retry number `done + 1`.
+pub fn auto_retry_delay(done: u32) -> Duration {
+    FIRST_RETRY_DELAY
+        .saturating_mul(1 << done.min(16))
+        .min(MAX_RETRY_DELAY)
+}
 
 /// In-memory representation of a tracked download task.
 pub struct TaskRecord {
@@ -28,8 +42,14 @@ pub struct TaskRecord {
     pub progress: Arc<Progress>,
     pub cancel_tx: Option<tokio::sync::watch::Sender<bool>>,
     pub error_message: Option<String>,
-    pub last_tick_bytes: u64,
-    pub last_tick_time: Instant,
+    /// Speed averaged over the last few seconds.
+    pub speed: SpeedMeter,
+    /// Bytes on disk when the current engine run started.
+    pub bytes_at_start: u64,
+    /// Automatic retries since the download last made progress.
+    pub retries: u32,
+    /// When a `Retrying` download goes back into the queue.
+    pub retry_at: Option<Instant>,
     pub connections: u32,
     /// This download's own speed cap; a rate of 0 means none.
     pub speed_limiter: Arc<RateLimiter>,
@@ -72,8 +92,10 @@ impl TaskRecord {
             )),
             cancel_tx: None,
             error_message: None,
-            last_tick_bytes: 0,
-            last_tick_time: Instant::now(),
+            speed: SpeedMeter::default(),
+            bytes_at_start: 0,
+            retries: 0,
+            retry_at: None,
             connections,
             speed_limiter,
             running: false,
@@ -196,6 +218,13 @@ impl TaskRecord {
         }
     }
 
+    /// True when this download is waiting to retry and its wait is over.
+    pub fn retry_is_due(&self, now: Instant) -> bool {
+        self.status == DownloadStatus::Retrying
+            && !self.running
+            && self.retry_at.is_some_and(|at| at <= now)
+    }
+
     /// Record how an engine run ended. The engine reports every stop it was asked
     /// for as a pause, so a stopped download keeps the status it was given when it
     /// was stopped: cancelled, paused, or queued (sent back to the queue to free a slot).
@@ -222,6 +251,8 @@ impl TaskRecord {
                 self.total_bytes = Some(self.downloaded_bytes);
                 self.eta_secs = Some(0);
                 self.error_message = None;
+                self.retries = 0;
+                self.retry_at = None;
             }
             Ok(Outcome::Paused { reason, state: _ }) => {
                 let link_expired = matches!(reason, PauseReason::LinkExpired { .. });
@@ -232,13 +263,53 @@ impl TaskRecord {
                     self.error_message = Some(format!("link expired or removed (HTTP {status})"));
                 }
             }
-            Err(e) => {
-                if !cancelled {
-                    self.status = DownloadStatus::Failed;
-                }
-                self.error_message = Some(e.to_string());
-            }
+            Err(e) if cancelled => self.error_message = Some(e.to_string()),
+            Err(e) => self.fail_or_retry(e),
         }
+    }
+
+    /// Schedule an automatic retry for network or server trouble, unless this
+    /// download has already retried `MAX_AUTO_RETRIES` times without progress.
+    fn fail_or_retry(&mut self, e: Error) {
+        if self.downloaded_bytes > self.bytes_at_start {
+            self.retries = 0;
+        }
+        if !e.is_transient() || self.retries >= MAX_AUTO_RETRIES {
+            self.status = DownloadStatus::Failed;
+            self.retry_at = None;
+            self.error_message = Some(e.to_string());
+            return;
+        }
+        let delay = auto_retry_delay(self.retries);
+        self.retries += 1;
+        self.status = DownloadStatus::Retrying;
+        self.retry_at = Some(Instant::now() + delay);
+        self.error_message = Some(format!(
+            "{e}; retry {} of {MAX_AUTO_RETRIES} in {}s",
+            self.retries,
+            delay.as_secs()
+        ));
+    }
+
+    /// Get ready for a new engine run.
+    pub fn begin_run(&mut self) {
+        self.speed.reset();
+        self.bytes_at_start = self.downloaded_bytes;
+        self.retry_at = None;
+    }
+
+    /// Update speed and time left from the engine's byte count at `now`.
+    /// Returns the byte count.
+    pub fn measure(&mut self, now: Instant) -> u64 {
+        let bytes = self.progress.downloaded.load(Ordering::Relaxed);
+        self.downloaded_bytes = bytes;
+        self.speed_bps = self.speed.record(now, bytes);
+        self.eta_secs = match self.total_bytes {
+            Some(total) if bytes >= total => Some(0),
+            Some(total) if self.speed_bps > 0 => Some((total - bytes) / self.speed_bps),
+            _ => None,
+        };
+        bytes
     }
 }
 
@@ -316,6 +387,75 @@ mod tests {
         assert_eq!(saved.max_bytes_per_sec, 48 * 1024);
         let restored = TaskRecord::from_saved(saved, &Arc::new(RateLimiter::new(0)));
         assert_eq!(restored.to_summary().max_bytes_per_sec, 48 * 1024);
+    }
+
+    fn fail(rec: &mut TaskRecord, e: Error) {
+        rec.status = DownloadStatus::Active;
+        rec.running = true;
+        rec.apply_outcome(Err(e));
+    }
+
+    #[test]
+    fn network_trouble_schedules_a_retry_with_a_growing_wait() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.begin_run();
+        fail(&mut rec, Error::Protocol("status 500".into()));
+        assert_eq!(rec.status, DownloadStatus::Retrying);
+        assert!(!rec.retry_is_due(Instant::now()));
+        assert!(rec.retry_is_due(Instant::now() + auto_retry_delay(0)));
+        assert!(rec
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("retry 1 of 5 in 3s"));
+
+        assert_eq!(auto_retry_delay(1), Duration::from_secs(6));
+        assert_eq!(auto_retry_delay(30), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn retries_without_progress_run_out_and_the_download_fails() {
+        let mut rec = record(DownloadStatus::Active);
+        for _ in 0..MAX_AUTO_RETRIES {
+            rec.begin_run();
+            fail(&mut rec, Error::Protocol("status 500".into()));
+            assert_eq!(rec.status, DownloadStatus::Retrying);
+        }
+        rec.begin_run();
+        fail(&mut rec, Error::Protocol("status 500".into()));
+        assert_eq!(rec.status, DownloadStatus::Failed);
+        assert_eq!(rec.retry_at, None);
+    }
+
+    #[test]
+    fn a_run_that_made_progress_resets_the_retry_count() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.retries = MAX_AUTO_RETRIES;
+        rec.begin_run();
+        rec.progress.downloaded.store(4096, Ordering::Relaxed);
+        fail(&mut rec, Error::Protocol("connection dropped".into()));
+        assert_eq!(rec.status, DownloadStatus::Retrying);
+        assert_eq!(rec.retries, 1);
+    }
+
+    #[test]
+    fn problems_that_will_not_go_away_fail_at_once() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.begin_run();
+        fail(&mut rec, Error::FileChanged);
+        assert_eq!(rec.status, DownloadStatus::Failed);
+    }
+
+    #[test]
+    fn time_left_comes_from_the_averaged_speed() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.total_bytes = Some(10_000);
+        let t0 = Instant::now();
+        rec.measure(t0);
+        rec.progress.downloaded.store(1000, Ordering::Relaxed);
+        rec.measure(t0 + Duration::from_secs(1));
+        assert_eq!(rec.speed_bps, 1000);
+        assert_eq!(rec.eta_secs, Some(9));
     }
 
     #[test]

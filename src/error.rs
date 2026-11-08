@@ -23,3 +23,32 @@ pub enum Error {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
+
+impl Error {
+    /// Network or server trouble that may go away by itself, so the download is
+    /// worth trying again later. Disk, permission, and changed-file problems are not.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Error::Http(_) | Error::Protocol(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_network_and_server_errors_are_transient() {
+        assert!(Error::Protocol("status 500".into()).is_transient());
+        assert!(!Error::FileChanged.is_transient());
+        assert!(!Error::LinkExpired { status: 404 }.is_transient());
+        assert!(!Error::Cancelled.is_transient());
+        let disk_full = std::io::Error::new(std::io::ErrorKind::StorageFull, "full");
+        assert!(!Error::Io(disk_full).is_transient());
+        assert!(!Error::InsufficientDiskSpace {
+            target: "C:".into(),
+            required: 2,
+            available: 1
+        }
+        .is_transient());
+    }
+}

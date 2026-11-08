@@ -1,3 +1,4 @@
+use crate::cancel::or_cancel;
 use crate::error::Error;
 use crate::limiter::{throttle_all, RateLimiter};
 use crate::probe::{self, Probe};
@@ -127,11 +128,43 @@ pub enum Outcome {
     Paused { reason: PauseReason, state: PathBuf },
 }
 
+/// How long the HTTP client waits on a server before treating the attempt as failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Time allowed to open a connection.
+    pub connect: Duration,
+    /// Longest silence allowed while waiting for data; any data resets it.
+    pub read: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(30),
+            read: Duration::from_secs(30),
+        }
+    }
+}
+
 pub fn build_client() -> reqwest::Client {
+    build_client_with(Timeouts::default())
+}
+
+pub fn build_client_with(timeouts: Timeouts) -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(format!("rustdm/{}", crate::VERSION))
+        .connect_timeout(timeouts.connect)
+        .read_timeout(timeouts.read)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// An I/O error that names the file or folder it is about.
+fn path_error(action: &str, path: &Path, err: std::io::Error) -> Error {
+    Error::Io(std::io::Error::new(
+        err.kind(),
+        format!("cannot {action} {}: {err}", path.display()),
+    ))
 }
 
 fn utc_date_str() -> String {
@@ -189,12 +222,16 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
     let part_p = part_path(&final_path);
     let state_p = state::state_path(&final_path);
 
+    if let Some(folder) = final_path.parent() {
+        std::fs::create_dir_all(folder).map_err(|e| path_error("create folder", folder, e))?;
+    }
     if let Some(total) = probe_result.total {
         crate::disk::ensure_disk_space(&part_p, total, crate::disk::SAFETY_MARGIN_BYTES)?;
         req.progress.total.store(total, Ordering::SeqCst);
     }
 
-    let part_file = PartFile::create(&part_p, probe_result.total)?;
+    let part_file = PartFile::create(&part_p, probe_result.total)
+        .map_err(|e| path_error("create", &part_p, e))?;
     let part_arc = Arc::new(part_file);
 
     let conns = if req.connections == 0 {
@@ -236,7 +273,8 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
             client,
             &probe_result,
             Arc::clone(&part_arc),
-            &req,
+            &req.progress,
+            req.cancel.as_ref(),
             Some(&state_p),
             Some(&initial_state),
         )
@@ -244,16 +282,26 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
         .map(|_| 0)
     };
 
+    conclude(result, part_arc, final_path, state_p)
+}
+
+/// Turn the end of an engine run into an outcome: on success, move the part
+/// file into place and drop its state file; on a stop, report the pause.
+fn conclude(
+    result: Result<u32, Error>,
+    part: Arc<PartFile>,
+    output: PathBuf,
+    state_p: PathBuf,
+) -> Result<Outcome, Error> {
     match result {
         Ok(steals) => {
-            let part_file = Arc::try_unwrap(part_arc).map_err(|_| {
+            let part_file = Arc::try_unwrap(part).map_err(|_| {
                 Error::Protocol("failed to acquire ownership of part file".to_string())
             })?;
-            part_file.finish(&final_path)?;
+            part_file.finish(&output)?;
             let _ = std::fs::remove_file(&state_p);
-
             Ok(Outcome::Completed {
-                path: final_path,
+                path: output,
                 steals,
             })
         }
@@ -311,6 +359,16 @@ pub async fn resume_with_options(
     };
 
     let probe_result = probe::probe(client, &target_url).await?;
+    let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
+
+    // Without range support or a known size, the only way on is from byte 0.
+    if !probe_result.ranges_supported || state.total == 0 {
+        tracing::info!(
+            "{} cannot be resumed from where it stopped; starting it over",
+            state.output.display()
+        );
+        return restart(client, &state, state_path, &probe_result, progress, cancel).await;
+    }
 
     if probe_result.total != Some(state.total)
         || !validator_matches(&state.validator, &probe_result.validator)
@@ -331,7 +389,6 @@ pub async fn resume_with_options(
         .unwrap_or(DEFAULT_CONNECTIONS)
         .clamp(1, MAX_CONNECTIONS);
 
-    let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
     progress.total.store(state.total, Ordering::SeqCst);
     *progress.output.lock().unwrap() = Some(state.output.clone());
     progress
@@ -359,29 +416,55 @@ pub async fn resume_with_options(
         Ok(0)
     };
 
-    match result {
-        Ok(steals) => {
-            let part_file = Arc::try_unwrap(part_arc).map_err(|_| {
-                Error::Protocol("failed to acquire ownership of part file".to_string())
-            })?;
-            part_file.finish(&state.output)?;
-            let _ = std::fs::remove_file(state_path);
+    conclude(result, part_arc, state.output, state_path.to_path_buf())
+}
 
-            Ok(Outcome::Completed {
-                path: state.output,
-                steals,
-            })
-        }
-        Err(Error::Cancelled) => Ok(Outcome::Paused {
-            reason: PauseReason::Cancelled,
-            state: state_path.to_path_buf(),
-        }),
-        Err(Error::LinkExpired { status }) => Ok(Outcome::Paused {
-            reason: PauseReason::LinkExpired { status },
-            state: state_path.to_path_buf(),
-        }),
-        Err(err) => Err(err),
-    }
+/// Download the whole file again into the paused download's place, for servers
+/// that cannot send part of it.
+async fn restart(
+    client: &reqwest::Client,
+    old: &State,
+    state_path: &Path,
+    probe_result: &Probe,
+    progress: Arc<Progress>,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<Outcome, Error> {
+    let part_p = state::part_path(&old.output);
+    std::fs::remove_file(&part_p).map_err(|e| path_error("remove", &part_p, e))?;
+    let part = Arc::new(
+        PartFile::create(&part_p, probe_result.total)
+            .map_err(|e| path_error("create", &part_p, e))?,
+    );
+
+    let state = State {
+        url: old.url.clone(),
+        final_url: probe_result.final_url.to_string(),
+        total: probe_result.total.unwrap_or(0),
+        validator: probe_result.validator.clone(),
+        completed: vec![],
+        ..old.clone()
+    };
+    state::save_atomic(state_path, &state)?;
+
+    progress
+        .total
+        .store(probe_result.total.unwrap_or(0), Ordering::SeqCst);
+    progress.downloaded.store(0, Ordering::SeqCst);
+    *progress.completed.lock().unwrap() = RangeSet::new();
+    *progress.output.lock().unwrap() = Some(state.output.clone());
+
+    let result = download_single(
+        client,
+        probe_result,
+        Arc::clone(&part),
+        &progress,
+        cancel.as_ref(),
+        Some(state_path),
+        Some(&state),
+    )
+    .await
+    .map(|_| 0);
+    conclude(result, part, state.output, state_path.to_path_buf())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -561,19 +644,21 @@ async fn download_ranges(
     Ok(steals_count.load(Ordering::SeqCst) as u32)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_single(
     client: &reqwest::Client,
     probe: &Probe,
     part: Arc<PartFile>,
-    req: &DownloadRequest,
+    progress: &Arc<Progress>,
+    cancel: Option<&tokio::sync::watch::Receiver<bool>>,
     state_file_path: Option<&Path>,
     state_template: Option<&State>,
 ) -> Result<(), Error> {
-    let mut res = client
+    let request = client
         .get(probe.final_url.clone())
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
-        .send()
-        .await?;
+        .send();
+    let mut res = or_cancel(request, cancel).await??;
 
     if !res.status().is_success() {
         let status = res.status().as_u16();
@@ -591,42 +676,46 @@ async fn download_single(
     }
 
     let mut offset = 0u64;
-    while let Some(chunk) = res.chunk().await? {
-        let chunk_len = chunk.len() as u64;
-        let cancelled = req.cancel.as_ref().is_some_and(|rx| *rx.borrow())
-            || req
-                .progress
-                .throttle(chunk_len, req.cancel.as_ref())
-                .await
-                .is_err();
-        if cancelled {
+    loop {
+        // A pause or throttle cancel saves what is on disk and reports the stop.
+        let stopped = match or_cancel(res.chunk(), cancel).await {
+            Err(Error::Cancelled) => true,
+            Err(e) => return Err(e),
+            Ok(next) => match next? {
+                None => break,
+                Some(chunk) => {
+                    let chunk_len = chunk.len() as u64;
+                    if progress.throttle(chunk_len, cancel).await.is_err() {
+                        true
+                    } else {
+                        let part_clone = Arc::clone(&part);
+                        let curr_offset = offset;
+                        tokio::task::spawn_blocking(move || {
+                            part_clone.write_at(curr_offset, &chunk)
+                        })
+                        .await
+                        .map_err(|e| Error::Protocol(e.to_string()))??;
+
+                        offset += chunk_len;
+                        progress.downloaded.fetch_add(chunk_len, Ordering::SeqCst);
+                        progress.completed.lock().unwrap().insert(ByteRange {
+                            start: curr_offset,
+                            end: offset,
+                        });
+                        false
+                    }
+                }
+            },
+        };
+        if stopped {
             if let (Some(sp), Some(st)) = (state_file_path, state_template) {
-                let completed_snapshot: Vec<ByteRange> = {
-                    let guard = req.progress.completed.lock().unwrap();
-                    guard.ranges().to_vec()
-                };
-                let _ = part.sync();
                 let mut s = st.clone();
-                s.completed = completed_snapshot;
+                s.completed = progress.completed.lock().unwrap().ranges().to_vec();
+                let _ = part.sync();
                 let _ = state::save_atomic(sp, &s);
             }
             return Err(Error::Cancelled);
         }
-
-        let part_clone = Arc::clone(&part);
-        let curr_offset = offset;
-        tokio::task::spawn_blocking(move || part_clone.write_at(curr_offset, &chunk))
-            .await
-            .map_err(|e| Error::Protocol(e.to_string()))??;
-
-        offset += chunk_len;
-        req.progress
-            .downloaded
-            .fetch_add(chunk_len, Ordering::SeqCst);
-        req.progress.completed.lock().unwrap().insert(ByteRange {
-            start: curr_offset,
-            end: offset,
-        });
     }
 
     if let Some(total) = probe.total {

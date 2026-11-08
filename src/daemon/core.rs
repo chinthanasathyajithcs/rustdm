@@ -7,7 +7,6 @@ use crate::ipc::protocol::*;
 use crate::limiter::RateLimiter;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -249,6 +248,10 @@ impl DaemonCore {
             match task.status {
                 DownloadStatus::Completed => return Err(RpcError::cannot_pause_completed(id)),
                 DownloadStatus::Queued => task.status = DownloadStatus::Paused,
+                DownloadStatus::Retrying if !task.running => {
+                    task.status = DownloadStatus::Paused;
+                    task.retry_at = None;
+                }
                 DownloadStatus::Active | DownloadStatus::Retrying => {
                     task.status = DownloadStatus::Pausing;
                     if let Some(ref tx) = task.cancel_tx {
@@ -286,6 +289,8 @@ impl DaemonCore {
                     task.status = DownloadStatus::Queued;
                     task.error_message = None;
                     task.resume_after_restart = false;
+                    task.retries = 0;
+                    task.retry_at = None;
                 }
             }
         }
@@ -515,8 +520,7 @@ impl DaemonCore {
         task.cancel_tx = Some(cancel_tx);
         task.error_message = None;
         task.progress = Arc::clone(&progress);
-        task.last_tick_bytes = task.downloaded_bytes;
-        task.last_tick_time = Instant::now();
+        task.begin_run();
 
         let template = match task.requested_name {
             Some(ref name) => format!("{{downloads}}/{}", name),
@@ -572,6 +576,30 @@ impl DaemonCore {
         self.schedule();
     }
 
+    /// Put downloads whose retry wait is over back in the queue.
+    pub fn retry_due_downloads(&self) {
+        let now = Instant::now();
+        let mut any = false;
+        {
+            let state = self.state.lock().unwrap();
+            if state.is_shutting_down {
+                return;
+            }
+            for task_lock in state.downloads.values() {
+                let mut task = task_lock.lock().unwrap();
+                if task.retry_is_due(now) {
+                    task.status = DownloadStatus::Queued;
+                    task.retry_at = None;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.persist();
+            self.schedule();
+        }
+    }
+
     pub fn tick_telemetry(&self) {
         let mut changed = false;
         {
@@ -584,27 +612,8 @@ impl DaemonCore {
                     continue;
                 }
                 changed |= task.sync_from_progress();
-
-                let current_bytes = task.progress.downloaded.load(Ordering::Relaxed);
-                let elapsed = now.duration_since(task.last_tick_time).as_secs_f64();
-                if elapsed < 0.1 {
-                    continue;
-                }
-
-                let delta = current_bytes.saturating_sub(task.last_tick_bytes);
-                let speed = (delta as f64 / elapsed) as u64;
-                task.speed_bps = speed;
-                task.downloaded_bytes = current_bytes;
-                task.last_tick_bytes = current_bytes;
-                task.last_tick_time = now;
-
-                if let Some(total) = task.total_bytes {
-                    if speed > 0 && total > current_bytes {
-                        task.eta_secs = Some((total - current_bytes) / speed);
-                    } else if total <= current_bytes {
-                        task.eta_secs = Some(0);
-                    }
-                }
+                let current_bytes = task.measure(now);
+                let speed = task.speed_bps;
 
                 let segments = task
                     .progress
