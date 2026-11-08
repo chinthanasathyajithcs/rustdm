@@ -1,13 +1,18 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use rustdm::daemon::launch::{daemon_exe_path, spawn_detached};
 use rustdm::daemon::service::{daemon_holds_lock, DEFAULT_SETTLE_TIMEOUT};
-use rustdm::engine::{build_client, download, resume, DownloadRequest, Outcome, Progress};
+use rustdm::daemon::speed::SpeedMeter;
+use rustdm::engine::{
+    build_client, download, resume_with_options, DownloadRequest, Outcome, Progress,
+};
 use rustdm::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
     AddDownloadParams, DaemonLimits, DownloadSummary, QueuePosition, SetLimitsParams,
 };
 use rustdm::ipc::transport::IpcEndpoint;
-use rustdm::tui::format::{format_row, format_speed_cap, status_label};
+use rustdm::tui::format::{
+    format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
+};
 use rustdm::tui::{default_downloads_dir, run_interactive, run_plain, PLAIN_INTERVAL};
 use std::error::Error;
 use std::io::{IsTerminal, Write};
@@ -276,28 +281,20 @@ async fn tui(endpoint: &IpcEndpoint, plain: bool) -> CliResult {
 
 async fn download_foreground(url: &str, out: String, connections: u32) -> CliResult {
     let parsed_url = url::Url::parse(url)?;
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = cancel_tx.send(true);
-    });
-
     let progress = Arc::new(Progress::new());
-    let progress_printer = spawn_progress_printer(Arc::clone(&progress));
-
     let req = DownloadRequest {
         url: parsed_url,
         template: out,
         downloads_dir: default_downloads_dir(),
         connections,
-        progress,
-        cancel: Some(cancel_rx),
+        progress: Arc::clone(&progress),
+        cancel: Some(pause_on_ctrl_c()),
         file_name: None,
     };
 
+    let printer = spawn_progress_printer(progress);
     let result = download(&build_client(), req).await;
-    progress_printer.abort();
+    printer.abort();
     eprintln!();
     report_outcome("Download", result?);
     Ok(())
@@ -305,41 +302,71 @@ async fn download_foreground(url: &str, out: String, connections: u32) -> CliRes
 
 async fn resume_foreground(state: &Path, url: Option<String>) -> CliResult {
     let url_override = url.map(|u| url::Url::parse(&u)).transpose()?;
-    report_outcome(
-        "Resume",
-        resume(&build_client(), state, url_override).await?,
-    );
+    let progress = Arc::new(Progress::new());
+    let printer = spawn_progress_printer(Arc::clone(&progress));
+    let result = resume_with_options(
+        &build_client(),
+        state,
+        url_override,
+        Some(progress),
+        Some(pause_on_ctrl_c()),
+    )
+    .await;
+    printer.abort();
+    eprintln!();
+    report_outcome("Resume", result?);
     Ok(())
+}
+
+/// A cancel flag that Ctrl+C sets, so a foreground download pauses and saves
+/// its state instead of being killed.
+fn pause_on_ctrl_c() -> tokio::sync::watch::Receiver<bool> {
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = cancel_tx.send(true);
+    });
+    cancel_rx
 }
 
 fn spawn_progress_printer(progress: Arc<Progress>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_bytes = 0u64;
-        let mut last_time = Instant::now();
+        let mut meter = SpeedMeter::default();
         let mut interval = tokio::time::interval(Duration::from_millis(500));
-
+        // Pad with spaces rather than an erase escape, which older Windows
+        // consoles print as text.
+        let mut last_len = 0;
         loop {
             interval.tick().await;
             let downloaded = progress.downloaded.load(Ordering::SeqCst);
-            let elapsed = last_time.elapsed().as_secs_f64();
-            let bytes_diff = downloaded.saturating_sub(last_bytes);
-            let speed_mb = if elapsed > 0.0 {
-                (bytes_diff as f64 / (1024.0 * 1024.0)) / elapsed
-            } else {
-                0.0
-            };
-
-            let mb_done = downloaded as f64 / (1024.0 * 1024.0);
-            eprint!(
-                "\r[rdm] Downloaded: {:.2} MB | Speed: {:.2} MB/s",
-                mb_done, speed_mb
-            );
+            let speed = meter.record(Instant::now(), downloaded);
+            let total = Some(progress.total.load(Ordering::SeqCst)).filter(|&t| t > 0);
+            let line = progress_line(downloaded, total, speed);
+            eprint!("\r{line:<width$}", width = last_len);
+            last_len = line.len();
             let _ = std::io::stderr().flush();
-
-            last_bytes = downloaded;
-            last_time = Instant::now();
         }
     })
+}
+
+/// "[rdm] 25.0 MiB / 100.0 MiB (25%)  2.0 MiB/s  ETA 37s", shortened when the
+/// size is unknown.
+fn progress_line(downloaded: u64, total: Option<u64>, speed: u64) -> String {
+    let speed_text = format_speed(speed);
+    match total {
+        Some(total) => {
+            let eta = (speed > 0).then(|| total.saturating_sub(downloaded) / speed);
+            format!(
+                "[rdm] {} / {} ({:.0}%)  {}  ETA {}",
+                format_bytes(downloaded),
+                format_bytes(total),
+                downloaded as f64 * 100.0 / total as f64,
+                speed_text,
+                format_eta(eta)
+            )
+        }
+        None => format!("[rdm] {}  {}", format_bytes(downloaded), speed_text),
+    }
 }
 
 fn report_outcome(verb: &str, outcome: Outcome) {
@@ -580,6 +607,23 @@ mod tests {
         assert_eq!(
             format_limits(&limits),
             "Downloads at once: 3\nSpeed cap: unlimited"
+        );
+    }
+
+    #[test]
+    fn the_progress_line_uses_binary_units_and_shows_percent_and_eta() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(
+            progress_line(25 * MIB, Some(100 * MIB), 2 * MIB),
+            "[rdm] 25.0 MiB / 100.0 MiB (25%)  2.0 MiB/s  ETA 37s"
+        );
+        assert_eq!(
+            progress_line(25 * MIB, Some(100 * MIB), 0),
+            "[rdm] 25.0 MiB / 100.0 MiB (25%)  -  ETA -"
+        );
+        assert_eq!(
+            progress_line(3 * MIB, None, MIB),
+            "[rdm] 3.0 MiB  1.0 MiB/s"
         );
     }
 }
