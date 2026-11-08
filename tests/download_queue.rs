@@ -636,3 +636,141 @@ async fn pausing_a_download_that_waits_to_retry_stops_the_retry() {
         DownloadStatus::Paused
     );
 }
+
+#[tokio::test]
+async fn a_requested_file_name_cannot_leave_the_download_folder() {
+    let body = pattern_bytes(4096);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("inside");
+    std::fs::create_dir(&dir).unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+
+    let added = client
+        .add(AddDownloadParams {
+            filename: Some("../{downloads}/escaped.bin".to_string()),
+            ..add_params(&mock, "x.bin", &dir)
+        })
+        .await
+        .unwrap();
+    let list = wait_for(&mut client, "never finished", |list| {
+        status_of(list, &added.id) == DownloadStatus::Completed
+    })
+    .await;
+
+    let saved = &list[0].destination;
+    assert_eq!(saved.parent(), Some(dir.as_path()), "saved at {saved:?}");
+    assert_eq!(std::fs::read(saved).unwrap(), body);
+    assert!(!root.path().join("escaped.bin").exists());
+
+    expect_rpc_code(
+        client
+            .add(AddDownloadParams {
+                filename: Some("..".to_string()),
+                ..add_params(&mock, "y.bin", &dir)
+            })
+            .await,
+        CODE_INVALID_PARAMS,
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_download_can_be_resumed_from_its_partial_file() {
+    let body = pattern_bytes(512 * 1024);
+    let mock = TestServer::start(
+        body.clone(),
+        Mode::Throttle {
+            bytes_per_sec: 256 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    let added = client
+        .add(add_params(&mock, "again.bin", dir.path()))
+        .await
+        .unwrap();
+    wait_for(&mut client, "never started", |list| {
+        list[0].downloaded_bytes > 0
+    })
+    .await;
+    client.cancel(&added.id, false).await.unwrap();
+
+    // While the engine is still stopping, resume is refused; then it is accepted.
+    let start = Instant::now();
+    let resumed = loop {
+        match client.resume(&added.id).await {
+            Ok(summary) => break summary,
+            Err(e) => expect_rpc_code(Err::<(), _>(e), CODE_OPERATION_IN_PROGRESS),
+        }
+        assert!(start.elapsed() < WAIT_TIMEOUT, "resume never accepted");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_ne!(resumed.status, DownloadStatus::Cancelled);
+    assert!(
+        resumed.downloaded_bytes > 0,
+        "kept the bytes already on disk"
+    );
+
+    wait_until_all_completed(&mut client).await;
+    assert_eq!(std::fs::read(dir.path().join("again.bin")).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_overall_cap_is_shared_fairly_between_downloads() {
+    const MIB: u64 = 1024 * 1024;
+    let mock = TestServer::start(
+        pattern_bytes(64 * MIB),
+        Mode::Throttle {
+            bytes_per_sec: 4 * MIB,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    client
+        .set_limits(limits(None, Some(3 * MIB)))
+        .await
+        .unwrap();
+
+    // Started at different times and with different connection counts.
+    for (name, connections) in [("a.bin", 8), ("b.bin", 1), ("c.bin", 4)] {
+        client
+            .add(AddDownloadParams {
+                connections: Some(connections),
+                ..add_params(&mock, name, dir.path())
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before: Vec<u64> = client
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.downloaded_bytes)
+        .collect();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let after: Vec<u64> = client
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.downloaded_bytes)
+        .collect();
+
+    let rates: Vec<f64> = before
+        .iter()
+        .zip(&after)
+        .map(|(b, a)| (a - b) as f64 / 5.0 / MIB as f64)
+        .collect();
+    for rate in &rates {
+        assert!(
+            (0.7..=1.35).contains(rate),
+            "each should get about 1 MiB/s, got {rates:.2?} MiB/s"
+        );
+    }
+}

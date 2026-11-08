@@ -27,6 +27,7 @@ fn request(srv: &TestServer, name: &str, template: &str, dir: &Path) -> Download
     DownloadRequest {
         url: srv.url().join(name).unwrap(),
         template: template.to_string(),
+        file_name: None,
         downloads_dir: dir.to_path_buf(),
         connections: 1,
         progress: Arc::new(Progress::new()),

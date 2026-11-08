@@ -201,3 +201,42 @@ async fn test_stale_socket_cleanup_and_active_detection() {
         }
     }
 }
+
+#[tokio::test]
+async fn an_oversized_message_is_refused_instead_of_buffered() {
+    use rustdm::ipc::transport::{IpcTransportError, MAX_MESSAGE_BYTES};
+    let endpoint = next_test_endpoint();
+    let mut listener = IpcListener::bind(&endpoint).await.expect("bind listener");
+    let server_task = tokio::spawn(async move {
+        let mut conn = listener.accept().await.expect("accept client");
+        conn.recv().await
+    });
+
+    let mut client = IpcConnection::connect(&endpoint).await.expect("connect");
+    let huge = "x".repeat(MAX_MESSAGE_BYTES as usize + 1);
+    let req = RpcRequest::new(
+        RpcId::Number(1),
+        "download.add",
+        Some(serde_json::json!({ "url": huge })),
+    );
+    // The server may close the connection before the whole message is written.
+    let _ = client.send(&req).await;
+
+    match server_task.await.unwrap() {
+        Err(IpcTransportError::MessageTooLarge(limit)) => assert_eq!(limit, MAX_MESSAGE_BYTES),
+        other => panic!("expected MessageTooLarge, got {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn only_the_owner_may_connect_to_the_socket() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owner.sock");
+    let _listener = IpcListener::bind(&IpcEndpoint::UnixSocket(path.clone()))
+        .await
+        .expect("bind listener");
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}

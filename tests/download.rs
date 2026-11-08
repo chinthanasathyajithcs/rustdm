@@ -21,6 +21,7 @@ async fn downloads_whole_file_when_range_ignored() {
         connections: 1,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -48,6 +49,7 @@ async fn downloads_unknown_length_stream() {
         connections: 1,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -74,6 +76,7 @@ async fn progress_reaches_total() {
         connections: 1,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let _ = download(&client, req).await.unwrap();
@@ -98,6 +101,7 @@ async fn never_overwrites_existing_file() {
         connections: 1,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -128,6 +132,7 @@ async fn multi_connection_download_matches_source() {
             connections: conns,
             progress: Arc::clone(&progress),
             cancel: None,
+            file_name: None,
         };
 
         let outcome = download(&client, req).await.unwrap();
@@ -156,6 +161,7 @@ async fn small_file_uses_one_range_request() {
         connections: 8,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let _ = download(&client, req).await.unwrap();
@@ -183,6 +189,7 @@ async fn every_range_request_sends_if_range_and_identity() {
         connections: 4,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let _ = download(&client, req).await.unwrap();
@@ -263,6 +270,7 @@ async fn honors_retry_after_on_503() {
         connections: 1,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -437,6 +445,7 @@ async fn stealing_with_slow_low_half_is_byte_identical() {
         connections: 2,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -473,6 +482,7 @@ async fn cancel_pauses_and_state_resumes() {
         connections: 4,
         progress: Arc::clone(&progress),
         cancel: Some(cancel_rx),
+        file_name: None,
     };
 
     let download_handle = tokio::spawn(async move { download(&client, req).await });
@@ -519,6 +529,7 @@ async fn link_expired_pauses_with_state_saved() {
         connections: 4,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let outcome = download(&client, req).await.unwrap();
@@ -549,6 +560,7 @@ async fn pre_flight_disk_space_check_aborts_before_creating_part_file() {
         connections: 4,
         progress: Arc::clone(&progress),
         cancel: None,
+        file_name: None,
     };
 
     let err = download(&client, req).await.unwrap_err();
@@ -598,6 +610,7 @@ async fn paused_download_remembers_its_connection_count() {
         connections: 3,
         progress: Arc::clone(&progress),
         cancel: Some(cancel_rx),
+        file_name: None,
     };
 
     let handle = tokio::spawn(async move { download(&build_client(), req).await });

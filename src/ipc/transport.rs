@@ -7,9 +7,14 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{
-    split, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf, ReadHalf,
-    WriteHalf,
+    split, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+    ReadHalf, WriteHalf,
 };
+
+/// Longest message either side accepts, newline included. Far above any real
+/// message; it stops a misbehaving peer from making the other side buffer
+/// without limit.
+pub const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcTransportError {
@@ -25,6 +30,8 @@ pub enum IpcTransportError {
     ConnectionClosed,
     #[error("Connection timed out")]
     Timeout,
+    #[error("message longer than {0} bytes")]
+    MessageTooLarge(u64),
 }
 
 /// IPC Endpoint specification for Unix sockets or Windows Named Pipes.
@@ -42,12 +49,21 @@ impl IpcEndpoint {
             if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
                 Self::UnixSocket(PathBuf::from(runtime_dir).join("rustdm.sock"))
             } else {
-                Self::UnixSocket(PathBuf::from("/tmp/rustdm.sock"))
+                // Shared /tmp: one socket per user, so users never collide.
+                let uid = crate::ipc::owner::current_uid();
+                Self::UnixSocket(PathBuf::from(format!("/tmp/rustdm-{uid}.sock")))
             }
         }
         #[cfg(windows)]
         {
-            Self::NamedPipe(r"\\.\pipe\rustdm".to_string())
+            // Pipe names are machine-wide, so each user gets their own.
+            match std::env::var("USERNAME") {
+                Ok(user) if !user.is_empty() => Self::NamedPipe(format!(
+                    r"\\.\pipe\rustdm-{}",
+                    crate::ipc::owner::endpoint_safe(&user)
+                )),
+                _ => Self::NamedPipe(r"\\.\pipe\rustdm".to_string()),
+            }
         }
     }
 
@@ -230,20 +246,24 @@ pub struct IpcReceiver {
 
 impl IpcReceiver {
     pub async fn recv(&mut self) -> Result<Option<RpcMessage>, IpcTransportError> {
+        match self.recv_raw_line().await? {
+            Some(line) => Ok(Some(parse_rpc_message(&line)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Read one message line, refusing lines over `MAX_MESSAGE_BYTES`.
+    pub async fn recv_raw_line(&mut self) -> Result<Option<String>, IpcTransportError> {
         let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line).await?;
+        let bytes_read = (&mut self.reader)
+            .take(MAX_MESSAGE_BYTES + 1)
+            .read_line(&mut line)
+            .await?;
         if bytes_read == 0 {
             return Ok(None);
         }
-        let msg = parse_rpc_message(&line)?;
-        Ok(Some(msg))
-    }
-
-    pub async fn recv_raw_line(&mut self) -> Result<Option<String>, IpcTransportError> {
-        let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line).await?;
-        if bytes_read == 0 {
-            return Ok(None);
+        if bytes_read as u64 > MAX_MESSAGE_BYTES {
+            return Err(IpcTransportError::MessageTooLarge(MAX_MESSAGE_BYTES));
         }
         Ok(Some(line))
     }
@@ -251,13 +271,10 @@ impl IpcReceiver {
     pub async fn recv_typed<T: serde::de::DeserializeOwned>(
         &mut self,
     ) -> Result<Option<T>, IpcTransportError> {
-        let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line).await?;
-        if bytes_read == 0 {
-            return Ok(None);
+        match self.recv_raw_line().await? {
+            Some(line) => Ok(Some(decode_message(&line)?)),
+            None => Ok(None),
         }
-        let val = decode_message(&line)?;
-        Ok(Some(val))
     }
 }
 
@@ -283,6 +300,7 @@ impl IpcConnection {
         match endpoint {
             #[cfg(unix)]
             IpcEndpoint::UnixSocket(path) => {
+                crate::ipc::owner::check_socket_owner(path, crate::ipc::owner::current_uid())?;
                 let stream = tokio::net::UnixStream::connect(path).await?;
                 Ok(Self::from_stream(InnerStream::Unix(stream)))
             }
@@ -307,6 +325,7 @@ impl IpcConnection {
                         Err(e) => return Err(IpcTransportError::Io(e)),
                     }
                 };
+                crate::ipc::owner::check_pipe_server_owner(&client, pipe_name)?;
                 Ok(Self::from_stream(InnerStream::NamedPipeClient(client)))
             }
             #[cfg(not(windows))]
@@ -390,6 +409,7 @@ impl IpcListener {
                 }
 
                 let listener = tokio::net::UnixListener::bind(path)?;
+                crate::ipc::owner::restrict_socket(path)?;
                 Ok(Self {
                     listener,
                     socket_path: Some(path.clone()),

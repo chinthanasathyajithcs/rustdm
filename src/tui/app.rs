@@ -119,6 +119,8 @@ pub enum Mode {
     Browse,
     /// Typing a URL to add; holds the text so far.
     AddUrl(String),
+    /// Waiting for `y` to cancel this download.
+    ConfirmCancel(String),
 }
 
 /// Screen areas the last frame drew, so a mouse click can find what it hit.
@@ -256,7 +258,9 @@ impl App {
                 let text: String = text.chars().filter(|c| !c.is_control()).collect();
                 match &mut self.mode {
                     Mode::AddUrl(input) => input.push_str(&text),
-                    Mode::Browse => self.mode = Mode::AddUrl(text.trim().to_string()),
+                    Mode::Browse | Mode::ConfirmCancel(_) => {
+                        self.mode = Mode::AddUrl(text.trim().to_string())
+                    }
                 }
                 None
             }
@@ -267,6 +271,12 @@ impl App {
     fn handle_key(&mut self, key: &KeyEvent) -> Option<Action> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Action::Quit);
+        }
+
+        if let Mode::ConfirmCancel(id) = &self.mode {
+            let id = id.clone();
+            self.mode = Mode::Browse;
+            return (key.code == KeyCode::Char('y')).then_some(Action::Cancel(id));
         }
 
         if let Mode::AddUrl(input) = &mut self.mode {
@@ -341,8 +351,15 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> Option<Action> {
-        if matches!(self.mode, Mode::AddUrl(_)) {
-            return None;
+        match self.mode {
+            Mode::AddUrl(_) => return None,
+            Mode::ConfirmCancel(_) => {
+                if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                    self.mode = Mode::Browse;
+                }
+                return None;
+            }
+            Mode::Browse => {}
         }
         let at = Position::new(mouse.column, mouse.row);
         match mouse.kind {
@@ -387,9 +404,16 @@ impl App {
                 return None;
             }
             Button::Quit => return Some(Action::Quit),
+            Button::Cancel => {
+                // Cancelling stops the download for good unless resumed, so ask first.
+                match self.selected_summary() {
+                    Some(d) => self.mode = Mode::ConfirmCancel(d.id.clone()),
+                    None => self.notify("Select a download first", true),
+                }
+                return None;
+            }
             Button::Pause => Action::Pause,
             Button::Resume => Action::Resume,
-            Button::Cancel => Action::Cancel,
             Button::Remove => Action::Remove,
         };
         match self.selected_summary() {
@@ -590,8 +614,11 @@ mod tests {
 
         app.handle_event(&click(3, 6));
         assert_eq!(app.selected.as_deref(), Some("dl_2"));
+        // The Cancel button asks first; "y" confirms.
+        assert_eq!(app.handle_event(&click(2, 1)), None);
+        assert_eq!(app.mode, Mode::ConfirmCancel("dl_2".to_string()));
         assert_eq!(
-            app.handle_event(&click(2, 1)),
+            app.handle_event(&key(KeyCode::Char('y'))),
             Some(Action::Cancel("dl_2".to_string()))
         );
         app.handle_event(&click(12, 2));
@@ -637,5 +664,31 @@ mod tests {
         let history = &app.speed_history["dl_1"];
         assert_eq!(history.len(), SPEED_HISTORY_LEN);
         assert_eq!(history.front(), Some(&5));
+    }
+
+    #[test]
+    fn cancel_asks_first_and_only_y_confirms() {
+        use DownloadStatus::*;
+        let mut app = app_with(&[Active]);
+        assert_eq!(app.handle_event(&key(KeyCode::Char('c'))), None);
+        assert_eq!(app.mode, Mode::ConfirmCancel("dl_1".to_string()));
+        assert_eq!(
+            app.handle_event(&key(KeyCode::Char('y'))),
+            Some(Action::Cancel("dl_1".to_string()))
+        );
+        assert_eq!(app.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn any_other_key_or_a_click_backs_out_of_cancelling() {
+        use DownloadStatus::*;
+        let mut app = app_with(&[Active]);
+        app.handle_event(&key(KeyCode::Char('c')));
+        assert_eq!(app.handle_event(&key(KeyCode::Char('n'))), None);
+        assert_eq!(app.mode, Mode::Browse);
+
+        app.handle_event(&key(KeyCode::Char('c')));
+        assert_eq!(app.handle_event(&click(0, 0)), None);
+        assert_eq!(app.mode, Mode::Browse);
     }
 }

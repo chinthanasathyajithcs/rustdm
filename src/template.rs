@@ -86,20 +86,47 @@ pub fn split_stem_ext(name: &str) -> (String, String) {
     }
 }
 
+/// Fill in the `{token}`s of `template` in one pass, so text inside a token's
+/// value (such as a server-supplied name containing `{date}`) is never expanded.
+/// Unknown tokens and unclosed braces are kept as written.
 pub fn expand(template: &str, tokens: &Tokens) -> String {
-    let s_downloads = &tokens.downloads;
     let s_host = sanitize_component(&tokens.host);
     let s_name = sanitize_component(&tokens.name);
     let (stem, ext) = split_stem_ext(&s_name);
     let s_date = sanitize_component(&tokens.date);
+    let value = |token: &str| -> Option<&str> {
+        match token {
+            "downloads" => Some(&tokens.downloads),
+            "host" => Some(&s_host),
+            "name" => Some(&s_name),
+            "stem" => Some(&stem),
+            "ext" => Some(&ext),
+            "date" => Some(&s_date),
+            _ => None,
+        }
+    };
 
-    template
-        .replace("{downloads}", s_downloads)
-        .replace("{host}", &s_host)
-        .replace("{name}", &s_name)
-        .replace("{stem}", &stem)
-        .replace("{ext}", &ext)
-        .replace("{date}", &s_date)
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after
+            .find('}')
+            .and_then(|close| Some((close, value(&after[..close])?)))
+        {
+            Some((close, v)) => {
+                out.push_str(v);
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn parse_content_disposition(cd: &str) -> (Option<String>, Option<String>) {
@@ -279,5 +306,24 @@ mod tests {
     fn collision_names_use_numbered_suffix() {
         assert_eq!(collision_name("file.iso", 1), "file (1).iso");
         assert_eq!(collision_name("README", 2), "README (2)");
+    }
+
+    #[test]
+    fn token_values_are_never_expanded_again() {
+        let t = tokens("/dl", "{date} {downloads}.zip");
+        assert_eq!(
+            expand("{downloads}/{name}", &t),
+            "/dl/{date} {downloads}.zip"
+        );
+        assert_eq!(
+            expand("{stem}-{date}.{ext}", &t),
+            "{date} {downloads}-2026-10-14.zip"
+        );
+    }
+
+    #[test]
+    fn unknown_or_unclosed_braces_are_kept_as_written() {
+        let t = tokens("/dl", "a.bin");
+        assert_eq!(expand("{downloads}/{nope}/{name", &t), "/dl/{nope}/{name");
     }
 }

@@ -1,9 +1,11 @@
 use clap::Parser;
+use rustdm::daemon::log::open_log_file;
 use rustdm::daemon::queue_store::{default_data_dir, DATA_DIR_ENV};
 use rustdm::daemon::service::{run_daemon, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::ipc::transport::IpcEndpoint;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -23,14 +25,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let args = Args::parse();
     let endpoint = args
         .endpoint
@@ -41,6 +35,7 @@ async fn main() -> ExitCode {
         .data_dir
         .or_else(|| std::env::var_os(DATA_DIR_ENV).map(PathBuf::from))
         .unwrap_or_else(default_data_dir);
+    init_logging(&data_dir);
 
     match run_daemon(
         &endpoint,
@@ -54,6 +49,29 @@ async fn main() -> ExitCode {
         Err(e) => {
             eprintln!("rdmd: {e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Log to stderr and to `<data_dir>/rdmd.log`. When `rdm` starts the daemon in
+/// the background its stderr goes nowhere, so the file is the only record.
+fn init_logging(data_dir: &Path) {
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    match open_log_file(data_dir) {
+        Ok(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::io::stderr.and(Arc::new(file)))
+            .init(),
+        Err(e) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .init();
+            tracing::warn!("cannot open the log file in {}: {e}", data_dir.display());
         }
     }
 }

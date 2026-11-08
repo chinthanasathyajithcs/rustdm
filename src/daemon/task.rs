@@ -53,6 +53,11 @@ pub struct TaskRecord {
     pub connections: u32,
     /// This download's own speed cap; a rate of 0 means none.
     pub speed_limiter: Arc<RateLimiter>,
+    /// This download's share of the overall speed cap, set by the daemon
+    /// (see `daemon::fair_share`); a rate of 0 means no cap.
+    pub share_limiter: Arc<RateLimiter>,
+    /// When the current engine run started.
+    pub run_started: Instant,
     /// An engine task is running for this download.
     pub running: bool,
     /// Paused by daemon shutdown rather than by the user, so it is queued again on restart.
@@ -68,12 +73,12 @@ impl TaskRecord {
         directory: PathBuf,
         requested_name: Option<String>,
         connections: u32,
-        limiter: &Arc<RateLimiter>,
     ) -> Self {
         let filename = requested_name
             .clone()
             .unwrap_or_else(|| placeholder_name(&url));
         let speed_limiter = Arc::new(RateLimiter::new(0));
+        let share_limiter = Arc::new(RateLimiter::new(0));
         Self {
             id,
             url,
@@ -87,7 +92,7 @@ impl TaskRecord {
             speed_bps: 0,
             eta_secs: None,
             progress: Arc::new(Progress::with_rate_limiters(
-                Arc::clone(limiter),
+                Arc::clone(&share_limiter),
                 Arc::clone(&speed_limiter),
             )),
             cancel_tx: None,
@@ -98,20 +103,21 @@ impl TaskRecord {
             retry_at: None,
             connections,
             speed_limiter,
+            share_limiter,
+            run_started: Instant::now(),
             running: false,
             resume_after_restart: false,
             delete_on_stop: false,
         }
     }
 
-    pub fn from_saved(saved: SavedDownload, limiter: &Arc<RateLimiter>) -> Self {
+    pub fn from_saved(saved: SavedDownload) -> Self {
         let mut rec = Self::new(
             saved.id,
             saved.url,
             saved.directory,
             saved.requested_name,
             saved.connections,
-            limiter,
         );
         rec.filename = saved.filename;
         rec.output = saved.output;
@@ -294,8 +300,14 @@ impl TaskRecord {
     /// Get ready for a new engine run.
     pub fn begin_run(&mut self) {
         self.speed.reset();
+        self.run_started = Instant::now();
         self.bytes_at_start = self.downloaded_bytes;
         self.retry_at = None;
+    }
+
+    /// True once this run has lasted a whole speed window, so its speed means something.
+    pub fn speed_is_settled(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.run_started) >= crate::daemon::speed::SPEED_WINDOW
     }
 
     /// Update speed and time left from the engine's byte count at `now`.
@@ -337,7 +349,6 @@ mod tests {
             PathBuf::from("/downloads"),
             None,
             8,
-            &Arc::new(RateLimiter::new(0)),
         );
         rec.status = status;
         rec
@@ -385,7 +396,7 @@ mod tests {
         rec.speed_limiter.set_bytes_per_sec(48 * 1024);
         let saved = rec.to_saved();
         assert_eq!(saved.max_bytes_per_sec, 48 * 1024);
-        let restored = TaskRecord::from_saved(saved, &Arc::new(RateLimiter::new(0)));
+        let restored = TaskRecord::from_saved(saved);
         assert_eq!(restored.to_summary().max_bytes_per_sec, 48 * 1024);
     }
 

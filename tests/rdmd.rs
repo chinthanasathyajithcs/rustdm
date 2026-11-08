@@ -203,3 +203,42 @@ async fn rdmd_exits_cleanly_on_sigterm() {
     assert!(wait_for_exit(&mut daemon).await.success());
     assert!(!endpoint.as_path().unwrap().exists());
 }
+
+#[tokio::test]
+async fn rdmd_keeps_a_log_in_its_data_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let endpoint = test_endpoint(dir.path());
+    let mut daemon = spawn_rdmd(&endpoint, dir.path());
+    let mut client = wait_for_daemon(&endpoint).await;
+    client.shutdown().await.expect("shutdown");
+    assert!(wait_for_exit(&mut daemon).await.success());
+
+    let log = std::fs::read_to_string(dir.path().join("data").join("rdmd.log")).unwrap();
+    assert!(log.contains("listening on"), "log was: {log}");
+    assert!(log.contains("rdmd stopped"), "log was: {log}");
+    assert!(
+        !log.contains('\u{1b}'),
+        "no terminal colour codes in the file"
+    );
+}
+
+#[tokio::test]
+async fn a_second_rdmd_cannot_share_the_data_folder_even_on_another_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let first_endpoint = test_endpoint(dir.path());
+    let mut first = spawn_rdmd(&first_endpoint, dir.path());
+    let mut client = wait_for_daemon(&first_endpoint).await;
+
+    let second = spawn_rdmd(&test_endpoint(dir.path()), dir.path());
+    let output = tokio::time::timeout(EXIT_TIMEOUT, second.wait_with_output())
+        .await
+        .expect("second rdmd exits")
+        .expect("wait on second rdmd");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("already running"), "stderr was: {stderr}");
+    assert!(stderr.contains("rdmd.lock"), "stderr was: {stderr}");
+
+    client.shutdown().await.expect("shutdown");
+    assert!(wait_for_exit(&mut first).await.success());
+}

@@ -110,6 +110,8 @@ impl Default for Progress {
 pub struct DownloadRequest {
     pub url: url::Url,
     pub template: String,
+    /// File name to use for `{name}` instead of the server's; sanitized like any name.
+    pub file_name: Option<String>,
     pub downloads_dir: PathBuf,
     pub connections: u32,
     pub progress: Arc<Progress>,
@@ -187,7 +189,10 @@ fn utc_date_str() -> String {
 }
 
 fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
-    let base_name = template::pick_name(probe.content_disposition.as_deref(), &probe.final_url);
+    let base_name = match &req.file_name {
+        Some(name) => name.clone(),
+        None => template::pick_name(probe.content_disposition.as_deref(), &probe.final_url),
+    };
     let host = probe.final_url.host_str().unwrap_or("").to_string();
     let date = utc_date_str();
 

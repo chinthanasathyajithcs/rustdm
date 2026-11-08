@@ -1,10 +1,9 @@
-use crate::daemon::queue_order;
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::task::TaskRecord;
+use crate::daemon::{fair_share, queue_order};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::*;
-use crate::limiter::RateLimiter;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,6 +40,31 @@ impl DaemonState {
     }
 }
 
+/// Give each running download its fair share of the overall speed cap.
+/// Called whenever downloads start or stop, and on every telemetry tick.
+fn rebalance_shares(state: &DaemonState, now: Instant) {
+    let running: Vec<_> = state
+        .in_order()
+        .filter(|t| t.lock().unwrap().running)
+        .collect();
+    let demands: Vec<_> = running
+        .iter()
+        .map(|t| {
+            let t = t.lock().unwrap();
+            fair_share::demand(
+                t.speed_bps,
+                t.share_limiter.bytes_per_sec(),
+                t.max_bytes_per_sec(),
+                t.speed_is_settled(now),
+            )
+        })
+        .collect();
+    let shares = fair_share::fair_shares(state.limits.max_bytes_per_sec, &demands);
+    for (task, share) in running.iter().zip(shares) {
+        task.lock().unwrap().share_limiter.set_bytes_per_sec(share);
+    }
+}
+
 /// A speed cap must be 0 (none) or at least `MIN_BYTES_PER_SEC`.
 fn validate_speed(bytes_per_sec: u64) -> Result<(), RpcError> {
     if bytes_per_sec != 0 && bytes_per_sec < MIN_BYTES_PER_SEC {
@@ -59,7 +83,6 @@ pub struct DaemonCore {
     pub client: reqwest::Client,
     pub telemetry_tx: broadcast::Sender<TelemetryTick>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
-    pub rate_limiter: Arc<RateLimiter>,
     store: Option<Arc<QueueStore>>,
 }
 
@@ -96,7 +119,6 @@ impl DaemonCore {
                 max_active: DEFAULT_MAX_ACTIVE,
                 max_bytes_per_sec: 0,
             });
-        let rate_limiter = Arc::new(RateLimiter::new(limits.max_bytes_per_sec));
 
         let mut downloads = HashMap::new();
         let mut order = Vec::new();
@@ -106,7 +128,7 @@ impl DaemonCore {
             // Saved in queue order.
             for saved in snapshot.downloads {
                 next_id = next_id.max(download_id_number(&saved.id));
-                let rec = TaskRecord::from_saved(saved, &rate_limiter);
+                let rec = TaskRecord::from_saved(saved);
                 order.push(rec.id.clone());
                 downloads.insert(rec.id.clone(), Arc::new(Mutex::new(rec)));
             }
@@ -125,7 +147,6 @@ impl DaemonCore {
             client: build_client(),
             telemetry_tx,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-            rate_limiter,
             store: store.map(Arc::new),
         }
     }
@@ -190,6 +211,13 @@ impl DaemonCore {
             .map_err(|e| RpcError::invalid_params(format!("Invalid URL: {}", e)))?;
         let max_bytes_per_sec = params.max_bytes_per_sec.unwrap_or(0);
         validate_speed(max_bytes_per_sec)?;
+        if let Some(name) = &params.filename {
+            if crate::template::sanitize_component(name).is_empty() {
+                return Err(RpcError::invalid_params(format!(
+                    "{name:?} is not a usable file name"
+                )));
+            }
+        }
 
         let task = {
             let mut state = self.state.lock().unwrap();
@@ -224,7 +252,6 @@ impl DaemonCore {
                 directory,
                 params.filename,
                 connections,
-                &self.rate_limiter,
             )));
             task.lock()
                 .unwrap()
@@ -269,23 +296,27 @@ impl DaemonCore {
         Ok(summary)
     }
 
-    /// Put a paused or failed download back in the queue; it starts when a slot is free.
+    /// Put a paused, failed, or cancelled download back in the queue; it starts
+    /// when a slot is free.
     pub fn resume_download(&self, id: &str) -> Result<DownloadSummary, RpcError> {
         let task_lock = self.get_task(id)?;
         {
             let mut task = task_lock.lock().unwrap();
             match task.status {
                 DownloadStatus::Completed => return Err(RpcError::already_completed(id)),
-                DownloadStatus::Cancelled => {
-                    return Err(RpcError::invalid_request(Some(
-                        "Cannot resume cancelled download".into(),
-                    )))
+                DownloadStatus::Cancelled if task.running => {
+                    return Err(RpcError::operation_in_progress(id, "cancelling"))
                 }
                 DownloadStatus::Pausing => {
                     return Err(RpcError::operation_in_progress(id, "pausing"))
                 }
                 DownloadStatus::Active | DownloadStatus::Queued => {}
-                DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Retrying => {
+                // A stopped cancel continues from its partial file, or starts
+                // over if `--delete` removed it.
+                DownloadStatus::Paused
+                | DownloadStatus::Failed
+                | DownloadStatus::Retrying
+                | DownloadStatus::Cancelled => {
                     task.status = DownloadStatus::Queued;
                     task.error_message = None;
                     task.resume_after_restart = false;
@@ -436,9 +467,6 @@ impl DaemonCore {
             }
             state.limits.clone()
         };
-        self.rate_limiter
-            .set_bytes_per_sec(limits.max_bytes_per_sec);
-
         self.requeue_extra_downloads();
         self.persist();
         self.schedule();
@@ -494,6 +522,7 @@ impl DaemonCore {
         for task_lock in queued.into_iter().take(free) {
             self.start_task(&task_lock);
         }
+        rebalance_shares(&state, Instant::now());
     }
 
     /// Spawn the engine for a queued task: a resume when its state file exists,
@@ -506,7 +535,7 @@ impl DaemonCore {
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let progress = Arc::new(Progress::with_rate_limiters(
-            Arc::clone(&self.rate_limiter),
+            Arc::clone(&task.share_limiter),
             Arc::clone(&task.speed_limiter),
         ));
         let resume_from = task.state_file().filter(|p| p.exists());
@@ -522,10 +551,10 @@ impl DaemonCore {
         task.progress = Arc::clone(&progress);
         task.begin_run();
 
-        let template = match task.requested_name {
-            Some(ref name) => format!("{{downloads}}/{}", name),
-            None => "{downloads}/{name}".to_string(),
-        };
+        // The requested name is a value for {name}, never part of the template,
+        // so it is sanitized and cannot reach outside the folder.
+        let template = "{downloads}/{name}".to_string();
+        let file_name = task.requested_name.clone();
         let url = task.url.clone();
         let directory = task.directory.clone();
         let connections = task.connections;
@@ -549,6 +578,7 @@ impl DaemonCore {
                         let req = DownloadRequest {
                             url,
                             template,
+                            file_name,
                             downloads_dir: directory,
                             connections,
                             progress,
@@ -663,6 +693,7 @@ impl DaemonCore {
                 };
                 let _ = self.telemetry_tx.send(tick);
             }
+            rebalance_shares(&state, now);
         }
 
         if changed {

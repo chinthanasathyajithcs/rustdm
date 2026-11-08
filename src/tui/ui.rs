@@ -553,6 +553,24 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 ),
             ])
         }
+        (Mode::ConfirmCancel(id), _) => {
+            let name = app
+                .downloads
+                .iter()
+                .find(|d| &d.id == id)
+                .map(|d| d.filename.as_str())
+                .unwrap_or("");
+            Line::from(vec![
+                Span::styled(
+                    format!("Cancel {id} ({name})? "),
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "y cancels · any other key keeps it",
+                    Style::new().fg(Color::DarkGray),
+                ),
+            ])
+        }
         (Mode::Browse, Some(notice)) => {
             let color = if notice.is_error {
                 Color::Red
@@ -706,5 +724,18 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         assert!(screen_text(&terminal).contains("Add URL: http://example.com/a"));
+    }
+
+    #[test]
+    fn cancelling_asks_in_the_footer() {
+        let mut app = sample_app();
+        let id = app.downloads[0].id.clone();
+        let name = app.downloads[0].filename.clone();
+        app.mode = Mode::ConfirmCancel(id.clone());
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains(&format!("Cancel {id} ({name})?")), "{text}");
+        assert!(text.contains("y cancels"), "{text}");
     }
 }
