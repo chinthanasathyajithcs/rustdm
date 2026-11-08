@@ -112,3 +112,15 @@ When output is not a terminal, or with `rdm tui --plain`, it prints a plain row 
   - Native Desktop GUI (Slint/Tauri) connecting to the daemon.
   - Browser extension integration & native messaging host.
   - Universal media sniffer & adaptive HLS/DASH chunk muxing with ffmpeg.
+
+## License
+
+Copyright (C) 2026 ChinthanaSathyajith
+
+rustdm is free software: you can redistribute it and/or modify it under the terms of the
+GNU General Public License as published by the Free Software Foundation, either version 3
+of the License, or (at your option) any later version.
+
+rustdm is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+[GNU General Public License](LICENSE) for more details.
