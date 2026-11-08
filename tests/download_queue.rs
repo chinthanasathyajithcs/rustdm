@@ -715,3 +715,62 @@ async fn a_cancelled_download_can_be_resumed_from_its_partial_file() {
     wait_until_all_completed(&mut client).await;
     assert_eq!(std::fs::read(dir.path().join("again.bin")).unwrap(), body);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_overall_cap_is_shared_fairly_between_downloads() {
+    const MIB: u64 = 1024 * 1024;
+    let mock = TestServer::start(
+        pattern_bytes(64 * MIB),
+        Mode::Throttle {
+            bytes_per_sec: 4 * MIB,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut client, _server) = serve(DaemonCore::new()).await;
+    client
+        .set_limits(limits(None, Some(3 * MIB)))
+        .await
+        .unwrap();
+
+    // Started at different times and with different connection counts.
+    for (name, connections) in [("a.bin", 8), ("b.bin", 1), ("c.bin", 4)] {
+        client
+            .add(AddDownloadParams {
+                connections: Some(connections),
+                ..add_params(&mock, name, dir.path())
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let before: Vec<u64> = client
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.downloaded_bytes)
+        .collect();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let after: Vec<u64> = client
+        .list()
+        .await
+        .unwrap()
+        .iter()
+        .map(|d| d.downloaded_bytes)
+        .collect();
+
+    let rates: Vec<f64> = before
+        .iter()
+        .zip(&after)
+        .map(|(b, a)| (a - b) as f64 / 5.0 / MIB as f64)
+        .collect();
+    for rate in &rates {
+        assert!(
+            (0.7..=1.35).contains(rate),
+            "each should get about 1 MiB/s, got {rates:.2?} MiB/s"
+        );
+    }
+}

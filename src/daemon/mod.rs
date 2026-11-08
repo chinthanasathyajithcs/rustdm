@@ -1,4 +1,5 @@
 pub mod core;
+pub mod fair_share;
 pub mod launch;
 pub mod log;
 pub mod queue_order;
