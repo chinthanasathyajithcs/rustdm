@@ -49,6 +49,49 @@ pub enum Mode {
     DropEvery {
         bytes: u64,
     },
+    /// Serve at most `limit` data requests at a time, each at `bytes_per_sec`;
+    /// any request beyond the limit gets 503 at once (the probe is not counted).
+    ConnectionLimit {
+        limit: usize,
+        bytes_per_sec: u64,
+    },
+    /// Every `every`-th data request (the probe not counted) crawls at
+    /// `bytes_per_sec`; the others go at `fast_bytes_per_sec`, or at once.
+    SlowEvery {
+        every: u32,
+        bytes_per_sec: u64,
+        fast_bytes_per_sec: Option<u64>,
+    },
+}
+
+/// Headers of a 206 answer for `start..=end` of a `total`-byte file.
+fn partial_header(
+    start: usize,
+    end: usize,
+    total: usize,
+    etag: &str,
+    last_modified: &str,
+) -> String {
+    let len = end - start + 1;
+    format!(
+        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {len}\r\nETag: {etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+    )
+}
+
+/// Write `body` at about `bytes_per_sec`, waiting before each piece so a finished
+/// answer stops counting as in flight right away.
+async fn write_throttled(socket: &mut tokio::net::TcpStream, body: &[u8], bytes_per_sec: u64) {
+    let bytes_per_sec = bytes_per_sec.max(1);
+    let piece = (bytes_per_sec as usize / 10)
+        .max(512)
+        .min(body.len().max(1));
+    let pause = tokio::time::Duration::from_millis(piece as u64 * 1000 / bytes_per_sec);
+    for chunk in body.chunks(piece) {
+        tokio::time::sleep(pause).await;
+        if socket.write_all(chunk).await.is_err() {
+            return;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,26 +465,51 @@ impl TestServer {
                                 }
                                 Mode::Throttle { bytes_per_sec } => {
                                     let total = body_ref.len();
-                                    let serve_range = range_hdr
+                                    let (start, end) = range_hdr
                                         .as_deref()
                                         .and_then(|r| parse_range(r, total))
                                         .unwrap_or((0, total.saturating_sub(1)));
-                                    let (start, end) = serve_range;
-                                    let slice_len = end - start + 1;
-                                    let header = format!(
-                                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
-                                    );
+                                    let header = partial_header(start, end, total, &current_etag, last_modified);
                                     let _ = socket.write_all(header.as_bytes()).await;
-
+                                    write_throttled(&mut socket, &body_ref[start..=end], *bytes_per_sec).await;
+                                    let _ = socket.shutdown().await;
+                                    return;
+                                }
+                                Mode::ConnectionLimit { limit, bytes_per_sec } => {
+                                    if !is_probe && in_flight.load(Ordering::SeqCst) > *limit {
+                                        let _ = socket
+                                            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                                            .await;
+                                        let _ = socket.shutdown().await;
+                                        return;
+                                    }
+                                    let total = body_ref.len();
+                                    let (start, end) = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let header = partial_header(start, end, total, &current_etag, last_modified);
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    write_throttled(&mut socket, &body_ref[start..=end], *bytes_per_sec).await;
+                                    let _ = socket.shutdown().await;
+                                    return;
+                                }
+                                Mode::SlowEvery { every, bytes_per_sec, fast_bytes_per_sec } => {
+                                    let total = body_ref.len();
+                                    let (start, end) = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let slow = !is_probe
+                                        && (counter.fetch_add(1, Ordering::SeqCst) + 1).is_multiple_of((*every).max(1));
+                                    let header = partial_header(start, end, total, &current_etag, last_modified);
+                                    let _ = socket.write_all(header.as_bytes()).await;
                                     let slice = &body_ref[start..=end];
-                                    let chunk_size = (*bytes_per_sec as usize / 10).max(512).min(slice.len());
-                                    let delay_ms = (chunk_size as u64 * 1000) / bytes_per_sec.max(&1);
-                                    // Wait before each chunk, not after, so a finished
-                                    // response stops counting as in flight right away.
-                                    for chunk in slice.chunks(chunk_size) {
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                                        if socket.write_all(chunk).await.is_err() {
-                                            break;
+                                    match (slow, fast_bytes_per_sec) {
+                                        (true, _) => write_throttled(&mut socket, slice, *bytes_per_sec).await,
+                                        (false, Some(fast)) => write_throttled(&mut socket, slice, *fast).await,
+                                        (false, None) => {
+                                            let _ = socket.write_all(slice).await;
                                         }
                                     }
                                     let _ = socket.shutdown().await;

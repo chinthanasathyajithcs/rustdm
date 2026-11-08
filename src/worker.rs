@@ -4,7 +4,7 @@ use crate::error::Error;
 use crate::probe::Validator;
 use crate::ranges::ByteRange;
 use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
-use crate::scheduler::Lane;
+use crate::scheduler::{Crew, Lane};
 use crate::writer::PartFile;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_RANGE, IF_RANGE, RANGE, RETRY_AFTER};
 use std::sync::atomic::Ordering;
@@ -20,6 +20,16 @@ fn parse_content_range_bounds(value: &str) -> Option<(u64, u64)> {
     Some((start, end))
 }
 
+/// How a connection's work on a lane ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneEnd {
+    /// Every byte of the lane is written.
+    Finished,
+    /// The server refused this connection (429/503) while others of the crew were
+    /// still downloading: it is at its connection limit. The lane's rest is unwritten.
+    Refused,
+}
+
 pub async fn fetch_range(
     client: &reqwest::Client,
     url: &url::Url,
@@ -29,9 +39,12 @@ pub async fn fetch_range(
     progress: Arc<Progress>,
 ) -> Result<(), Error> {
     let lane = Arc::new(Lane::new(range.start, range.end, std::time::Instant::now()));
-    fetch_lane(client, url, validator, lane, part, progress, None).await
+    fetch_lane(client, url, validator, lane, part, progress, None, None)
+        .await
+        .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_lane(
     client: &reqwest::Client,
     url: &url::Url,
@@ -40,7 +53,8 @@ pub async fn fetch_lane(
     part: Arc<PartFile>,
     progress: Arc<Progress>,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
-) -> Result<(), Error> {
+    crew: Option<&Crew>,
+) -> Result<LaneEnd, Error> {
     let mut current_offset = lane.cursor.load(Ordering::SeqCst);
     // Failed attempts in a row. Any attempt that writes bytes resets it, so a
     // connection that keeps dropping but keeps making progress never gives up.
@@ -112,6 +126,10 @@ pub async fn fetch_lane(
 
         // 429 or 503 -> retry with Retry-After or backoff
         if status_code == 429 || status_code == 503 {
+            // Others are getting through: this one is over the server's limit.
+            if crew.is_some_and(Crew::others_active) {
+                return Ok(LaneEnd::Refused);
+            }
             attempt += 1;
             if attempt >= MAX_SEGMENT_ATTEMPTS {
                 return Err(Error::Protocol(format!(
@@ -187,6 +205,7 @@ pub async fn fetch_lane(
                     .and_then(|res| res.map_err(Error::from))?;
 
                     current_offset += to_write_len as u64;
+                    lane.mark_first_byte();
                     lane.cursor.store(current_offset, Ordering::SeqCst);
                     lane.bytes_done
                         .fetch_add(to_write_len as u64, Ordering::SeqCst);
@@ -212,8 +231,10 @@ pub async fn fetch_lane(
 
         let target_end = lane.end.load(Ordering::SeqCst);
         if stream_failed && current_offset < target_end {
+            // It was making progress: reconnect at once, with a fresh set of attempts.
             if current_offset > offset_at_start {
                 attempt = 0;
+                continue;
             }
             attempt += 1;
             if attempt >= MAX_SEGMENT_ATTEMPTS {
@@ -226,5 +247,5 @@ pub async fn fetch_lane(
         }
     }
 
-    Ok(())
+    Ok(LaneEnd::Finished)
 }
