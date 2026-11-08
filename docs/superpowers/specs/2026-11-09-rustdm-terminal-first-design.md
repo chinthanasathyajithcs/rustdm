@@ -156,15 +156,22 @@ Both are additive: old queue files load, and old clients keep working.
 
 **Defaults for new downloads**
 
-- New type `DownloadDefaults { folder: Option<PathBuf>, connections: Option<u32>,
-  max_bytes_per_sec: u64 }`, saved in the queue snapshot next to the limits
-  with `#[serde(default)]`, so a file without it loads with built-in defaults.
-- New methods `defaults.get` and `defaults.set`, mirroring `limits.get` and
-  `limits.set`. The daemon validates: connections 1 to 16 (the engine's
-  `MAX_CONNECTIONS`), a folder that is an absolute path and writable, a valid
-  speed. A bad value returns `invalid params` naming the field.
+- New saved type `SavedDefaults { folder: Option<PathBuf>, connections:
+  Option<u32>, max_bytes_per_sec: u64 }`, stored in the queue snapshot next to
+  the limits with `#[serde(default)]`, so a file without it loads with built-in
+  defaults.
+- New methods `daemon.get_defaults` and `daemon.set_defaults`, mirroring the
+  existing `daemon.get_limits` and `daemon.set_limits`. `get_defaults` returns
+  the resolved values (`DownloadDefaults { folder: PathBuf, connections: u32,
+  max_bytes_per_sec: u64 }`), so every client shows the real folder. The daemon
+  validates: connections 1 to 16 (the engine's `MAX_CONNECTIONS`), a folder
+  that is an absolute path and writable, a valid speed. A bad value returns
+  `invalid params` whose message starts with the field name (`folder: `,
+  `connections: `, `speed: `).
 - `download.add` fills any field left empty from the defaults. An unset default
-  folder means the user's Downloads folder, resolved by the daemon.
+  folder means the user's Downloads folder, resolved by the daemon. (Today an
+  empty destination falls back to the daemon's working folder; this replaces
+  that.)
 - `rdm add` stops resolving the Downloads folder itself and sends only what the
   user gave, so the CLI and the TUI follow the same Settings.
 - New CLI command `rdm defaults [--dir] [--connections] [--speed]`, working like
