@@ -108,10 +108,11 @@ When output is not a terminal, or with `rdm tui --plain`, it prints a plain row 
   - **Background Daemon (`rdmd`) (Done):** Runs downloads in the background over local IPC (Windows Named Pipes / Unix sockets), surviving terminal closure, controlled with `rdm add/list/pause/resume/cancel/daemon`.
   - **Multi-Download Queue (Done):** At most N downloads at once, global and per-download speed caps, queue reordering, and a queue that survives daemon restarts.
   - **Interactive Terminal UI (TUI) (Done):** Mouse-clickable buttons and tabs, browsable downloads table, live segment map, connection lanes, and speed graph using Ratatui, with a plain-text fallback for scripts.
-- **Milestone 3+ (Planned):**
-  - Native Desktop GUI (Slint/Tauri) connecting to the daemon.
-  - Browser extension integration & native messaging host.
-  - Universal media sniffer & adaptive HLS/DASH chunk muxing with ffmpeg.
+- **Terminal-first interface (Designed, not started):** the TUI becomes rustdm's complete interface, with Downloads, Settings, Logs and Help screens, dialogs for adding and managing downloads, and defaults for new downloads kept by the daemon. CLI subcommands stay for scripts. Design: [`docs/superpowers/specs/2026-11-09-rustdm-terminal-first-design.md`](docs/superpowers/specs/2026-11-09-rustdm-terminal-first-design.md); plan: [`docs/superpowers/plans/2026-11-09-rustdm-terminal-first.md`](docs/superpowers/plans/2026-11-09-rustdm-terminal-first.md).
+- **Later (Planned):**
+  - Browser extension integration & native messaging host, feeding downloads to the daemon.
+  - HLS/DASH stream downloads.
+  - A desktop GUI on the same daemon API, if one is needed.
 
 ## License
 
