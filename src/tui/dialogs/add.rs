@@ -402,9 +402,15 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::Terminal;
 
+    /// A default folder that is already a full path on this platform.
+    #[cfg(windows)]
+    const DEFAULT_DIR: &str = r"C:\dl";
+    #[cfg(not(windows))]
+    const DEFAULT_DIR: &str = "/dl";
+
     fn defaults() -> DownloadDefaults {
         DownloadDefaults {
-            folder: "/dl".into(),
+            folder: DEFAULT_DIR.into(),
             connections: 4,
             max_bytes_per_sec: 512 * 1024,
         }
@@ -446,7 +452,7 @@ mod tests {
             params,
             vec![AddDownloadParams {
                 url: "https://example.com/a.iso".into(),
-                destination: Some("/dl".into()),
+                destination: Some(DEFAULT_DIR.into()),
                 filename: None,
                 connections: Some(4),
                 max_bytes_per_sec: Some(512 * 1024),
@@ -523,7 +529,7 @@ mod tests {
             dialog.field_text(AddField::Url),
             "https://example.com/typed.iso"
         );
-        assert_eq!(dialog.field_text(AddField::Folder), "/dl");
+        assert_eq!(dialog.field_text(AddField::Folder), DEFAULT_DIR);
         assert_eq!(dialog.title_error(), Some("rdmd is not running"));
         assert!(!dialog.is_pending());
         assert_eq!(app.notice, None, "the error shows in the dialog");
