@@ -292,8 +292,10 @@ async fn stopping_the_daemon_from_the_tui_pauses_downloads() {
         .expect("rdmd stopped")
         .unwrap();
 
-    // On Windows the pipe lingers until the daemon's connection tasks see the
-    // TUI's connections close, so give it a moment to go away.
+    // On Windows a connected client keeps the pipe name alive after rdmd stops
+    // (connecting then says "All pipe instances are busy"), so close this
+    // test's own client too, then give the daemon's connection tasks a moment.
+    drop(client);
     let start = Instant::now();
     loop {
         match DaemonClient::connect(&endpoint).await {
