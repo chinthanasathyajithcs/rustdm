@@ -22,9 +22,11 @@ use ratatui::prelude::CrosstermBackend;
 use ratatui::Terminal;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+pub use crate::dirs::default_downloads_dir;
 
 /// How often the dashboard re-reads the download list and limits.
 pub const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -262,16 +264,5 @@ pub async fn run_plain<W: Write>(
             return Ok(());
         }
         tokio::time::sleep(interval).await;
-    }
-}
-
-/// Default folder for downloads added from the dashboard.
-pub fn default_downloads_dir() -> PathBuf {
-    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        PathBuf::from(userprofile).join("Downloads")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join("Downloads")
-    } else {
-        PathBuf::from("Downloads")
     }
 }

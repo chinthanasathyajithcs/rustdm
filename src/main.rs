@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rustdm::daemon::launch::{daemon_exe_path, spawn_detached};
 use rustdm::daemon::service::{daemon_holds_lock, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::daemon::speed::SpeedMeter;
+use rustdm::dirs::default_downloads_dir;
 use rustdm::engine::{
     build_client, download, resume_with_options, DownloadRequest, Outcome, Progress,
 };
@@ -13,7 +14,8 @@ use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::tui::format::{
     format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
 };
-use rustdm::tui::{default_downloads_dir, run_interactive, run_plain, PLAIN_INTERVAL};
+use rustdm::tui::{run_interactive, run_plain, PLAIN_INTERVAL};
+use rustdm::units::parse_speed;
 use std::error::Error;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -530,32 +532,6 @@ fn format_limits(limits: &DaemonLimits) -> String {
     )
 }
 
-/// Parse a speed such as `500K`, `2M`, `1.5MiB/s` or `0`/`off` (unlimited).
-/// Units are binary: K = 1024 bytes.
-fn parse_speed(raw: &str) -> Result<u64, String> {
-    let lower = raw.trim().to_ascii_lowercase();
-    if matches!(lower.as_str(), "0" | "off" | "unlimited") {
-        return Ok(0);
-    }
-
-    let text = lower.strip_suffix("/s").unwrap_or(&lower);
-    let split = text
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let value: f64 = number
-        .parse()
-        .map_err(|_| format!("invalid speed '{raw}'; try 500K or 2M"))?;
-    let multiplier: u64 = match unit.trim() {
-        "" | "b" => 1,
-        "k" | "kb" | "kib" => 1024,
-        "m" | "mb" | "mib" => 1024 * 1024,
-        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
-        other => return Err(format!("unknown speed unit '{other}'; use K, M or G")),
-    };
-    Ok((value * multiplier as f64) as u64)
-}
-
 fn format_uptime(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 {
@@ -585,17 +561,6 @@ mod tests {
         assert_eq!(format_uptime(9), "9s");
         assert_eq!(format_uptime(125), "2m 05s");
         assert_eq!(format_uptime(3723), "1h 02m 03s");
-    }
-
-    #[test]
-    fn speeds_accept_binary_units_and_off() {
-        assert_eq!(parse_speed("500K"), Ok(500 * 1024));
-        assert_eq!(parse_speed("2M"), Ok(2 * 1024 * 1024));
-        assert_eq!(parse_speed("1.5MiB/s"), Ok(1536 * 1024));
-        assert_eq!(parse_speed("4096"), Ok(4096));
-        assert_eq!(parse_speed("off"), Ok(0));
-        assert!(parse_speed("fast").is_err());
-        assert!(parse_speed("10X").is_err());
     }
 
     #[test]
