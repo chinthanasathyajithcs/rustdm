@@ -5,3 +5,4 @@ pub mod lanes;
 pub mod segment_map;
 pub mod speed_graph;
 pub mod table;
+pub mod text_field;

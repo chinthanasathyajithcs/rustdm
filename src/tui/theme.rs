@@ -27,6 +27,10 @@ pub const SELECTED_ROW: Style = Style::new()
 pub const BUTTON: Style = Style::new().fg(Color::Black).bg(Color::Gray);
 pub const BUTTON_ADD: Style = Style::new().fg(Color::Black).bg(Color::Green);
 pub const BUTTON_QUIT: Style = Style::new().fg(Color::White).bg(Color::DarkGray);
+/// A text field that does not have the cursor.
+pub const FIELD: Style = Style::new().fg(Color::Gray).bg(Color::Black);
+/// The text field being typed in.
+pub const FIELD_FOCUSED: Style = Style::new().fg(Color::White).bg(Color::DarkGray);
 /// A prompt waiting for input.
 pub const PROMPT: Style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
 /// A question that needs an answer before anything else happens.
