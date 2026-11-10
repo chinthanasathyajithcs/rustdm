@@ -6,6 +6,7 @@ use crate::ipc::protocol::{AddDownloadParams, DownloadSummary, QueuePosition, Te
 use crate::ipc::transport::IpcEndpoint;
 use crate::tui::action::Action;
 use crate::tui::format::{format_speed_cap, status_label};
+use crate::tui::open_folder::open_folder;
 use crate::tui::state::App;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -105,6 +106,16 @@ pub(crate) async fn perform(
     client: &mut Option<DaemonClient>,
     action: &Action,
 ) -> Result<Outcome, ActionError> {
+    // Opening a folder is local; it works even while rdmd is away.
+    if let Action::OpenFolder(path) = action {
+        return open_folder(path)
+            .map(|()| Outcome::default())
+            .map_err(|e| ActionError {
+                message: format!("Couldn't open the folder: {e}"),
+                code: None,
+                not_added: Vec::new(),
+            });
+    }
     let Some(conn) = client.as_mut() else {
         return Err(ClientError::NotRunning.into());
     };
@@ -148,7 +159,7 @@ pub(crate) async fn perform(
                 position_word(*position)
             )));
         }
-        Action::Quit => return Ok(Outcome::default()),
+        Action::Quit | Action::OpenFolder(_) => return Ok(Outcome::default()),
     };
     Ok(changed(&summary))
 }

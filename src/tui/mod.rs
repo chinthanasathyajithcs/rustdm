@@ -4,6 +4,7 @@ pub mod action;
 pub mod daemon_link;
 pub mod dialogs;
 pub mod format;
+pub mod open_folder;
 pub mod runtime;
 pub mod screens;
 pub mod state;

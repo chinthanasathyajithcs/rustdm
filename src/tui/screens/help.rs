@@ -19,6 +19,7 @@ const DOWNLOADS_KEYS: &[(&str, &str)] = &[
     ("c", "Cancel"),
     ("x", "Remove"),
     ("v", "Speed cap"),
+    ("o", "Open folder"),
     ("s", "Settings"),
     ("l", "Logs"),
     ("?", "Help"),

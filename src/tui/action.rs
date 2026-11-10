@@ -1,5 +1,7 @@
 //! What the TUI asks for: a daemon call, or quitting.
 
+use std::path::PathBuf;
+
 use crate::ipc::protocol::{AddDownloadParams, QueuePosition, SetDefaultsParams, SetLimitsParams};
 
 /// Something the dashboard asks the daemon to do.
@@ -26,6 +28,8 @@ pub enum Action {
     /// Stop rdmd, which pauses active downloads until it starts again.
     StopDaemon,
     Remove(String),
+    /// Show this download's file, or the folder it goes in, in the file manager.
+    OpenFolder(PathBuf),
     /// Move a download one place up or down the queue.
     Move(String, QueuePosition),
     Quit,

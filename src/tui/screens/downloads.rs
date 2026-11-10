@@ -85,6 +85,7 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('c') => press(app, Button::Cancel),
         KeyCode::Char('x') | KeyCode::Delete => press(app, Button::Remove),
         KeyCode::Char('v') => press(app, Button::Speed),
+        KeyCode::Char('o') => open_selected_folder(app),
         _ => None,
     }
 }
@@ -123,6 +124,21 @@ fn move_in_queue(app: &mut App, position: QueuePosition) -> Option<Action> {
             None
         }
     }
+}
+
+/// The selected download's file: `destination` is the file once the download
+/// has started, and the folder it goes in before that.
+fn open_selected_folder(app: &mut App) -> Option<Action> {
+    let Some(d) = app.selected_summary() else {
+        app.notify("Select a download first", true);
+        return None;
+    };
+    let path = if d.destination.is_dir() {
+        d.destination.join(&d.filename)
+    } else {
+        d.destination.clone()
+    };
+    Some(Action::OpenFolder(path))
 }
 
 fn open_add_dialog(app: &mut App, paste: Option<&str>) {
@@ -254,6 +270,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
+    use std::path::PathBuf;
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -338,6 +355,39 @@ mod tests {
         let mut app = App::default();
         assert_eq!(handle_event(&mut app, &key(KeyCode::Char('p'))), None);
         assert!(app.notice.as_ref().unwrap().is_error);
+    }
+
+    #[test]
+    fn o_targets_the_selected_download_path() {
+        let mut app = app_with(&[DownloadStatus::Completed]);
+        let mut finished = app.downloads[0].clone();
+        finished.destination = PathBuf::from("/downloads/dl_1.bin");
+        app.set_downloads(vec![finished]);
+        assert_eq!(
+            handle_event(&mut app, &key(KeyCode::Char('o'))),
+            Some(Action::OpenFolder(PathBuf::from("/downloads/dl_1.bin"))),
+            "a started download reports its file path"
+        );
+
+        let folder = tempfile::tempdir().unwrap();
+        let mut queued = app.downloads[0].clone();
+        queued.destination = folder.path().to_path_buf();
+        app.set_downloads(vec![queued]);
+        assert_eq!(
+            handle_event(&mut app, &key(KeyCode::Char('o'))),
+            Some(Action::OpenFolder(folder.path().join("dl_1.bin"))),
+            "before it starts, the destination is its folder"
+        );
+    }
+
+    #[test]
+    fn o_without_a_selection_asks_for_one() {
+        let mut app = App::default();
+        assert_eq!(handle_event(&mut app, &key(KeyCode::Char('o'))), None);
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("Select a download first")
+        );
     }
 
     fn add_dialog_urls(app: &App) -> Vec<String> {
