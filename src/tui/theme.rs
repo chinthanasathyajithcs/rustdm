@@ -31,6 +31,8 @@ pub const BUTTON_QUIT: Style = Style::new().fg(Color::White).bg(Color::DarkGray)
 pub const FIELD: Style = Style::new().fg(Color::Gray).bg(Color::Black);
 /// The text field being typed in.
 pub const FIELD_FOCUSED: Style = Style::new().fg(Color::White).bg(Color::DarkGray);
+/// Laid over the screen behind an open dialog.
+pub const BEHIND_DIALOG: Style = Style::new().add_modifier(Modifier::DIM);
 /// A prompt waiting for input.
 pub const PROMPT: Style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
 /// A question that needs an answer before anything else happens.

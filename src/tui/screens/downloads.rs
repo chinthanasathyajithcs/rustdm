@@ -2,6 +2,8 @@
 
 use crate::ipc::protocol::QueuePosition;
 use crate::tui::action::Action;
+use crate::tui::dialogs::add::AddDialog;
+use crate::tui::dialogs::Dialog;
 use crate::tui::screens::hit;
 use crate::tui::state::{App, Button, Mode, Tab};
 use crate::tui::theme;
@@ -25,13 +27,9 @@ pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
         Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
         Event::Mouse(mouse) => handle_mouse(app, mouse),
         Event::Paste(text) => {
-            let text: String = text.chars().filter(|c| !c.is_control()).collect();
-            match &mut app.mode {
-                Mode::AddUrl(input) => input.push_str(&text),
-                Mode::Browse | Mode::ConfirmCancel(_) => {
-                    app.mode = Mode::AddUrl(text.trim().to_string())
-                }
-            }
+            // A paste while browsing is almost always a link to add.
+            app.mode = Mode::Browse;
+            open_add_dialog(app, Some(text));
             None
         }
         _ => None,
@@ -43,25 +41,6 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
         let id = id.clone();
         app.mode = Mode::Browse;
         return (key.code == KeyCode::Char('y')).then_some(Action::Cancel(id));
-    }
-
-    if let Mode::AddUrl(input) = &mut app.mode {
-        match key.code {
-            KeyCode::Esc => app.mode = Mode::Browse,
-            KeyCode::Backspace => {
-                input.pop();
-            }
-            KeyCode::Char(c) => input.push(c),
-            KeyCode::Enter => {
-                let url = input.trim().to_string();
-                app.mode = Mode::Browse;
-                if !url.is_empty() {
-                    return Some(Action::Add(url));
-                }
-            }
-            _ => {}
-        }
-        return None;
     }
 
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -117,7 +96,6 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
 
 fn handle_mouse(app: &mut App, mouse: &MouseEvent) -> Option<Action> {
     match app.mode {
-        Mode::AddUrl(_) => return None,
         Mode::ConfirmCancel(_) => {
             if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 app.mode = Mode::Browse;
@@ -161,11 +139,16 @@ fn move_in_queue(app: &mut App, position: QueuePosition) -> Option<Action> {
     }
 }
 
+fn open_add_dialog(app: &mut App, paste: Option<&str>) {
+    let dialog = AddDialog::new(app.defaults.as_ref(), paste);
+    app.dialogs.push(Dialog::Add(dialog));
+}
+
 /// Run a toolbar button. Buttons that act on a download need one selected.
 fn press(app: &mut App, button: Button) -> Option<Action> {
     let make: fn(String) -> Action = match button {
         Button::Add => {
-            app.mode = Mode::AddUrl(String::new());
+            open_add_dialog(app, None);
             return None;
         }
         Button::Quit => return Some(Action::Quit),
@@ -273,23 +256,10 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<(Rect, Tab)> {
     tabs
 }
 
-/// The footer line while the screen waits for input: the URL being typed or
-/// the cancel question. `None` while browsing.
-pub fn prompt_line(frame: &mut Frame, app: &App, area: Rect) -> Option<Line<'static>> {
+/// The footer line while the screen waits for an answer to the cancel
+/// question. `None` while browsing.
+pub fn prompt_line(app: &App) -> Option<Line<'static>> {
     let line = match &app.mode {
-        Mode::AddUrl(input) => {
-            let prompt = "Add URL: ";
-            let cursor_x = area.x + (prompt.len() + input.chars().count()) as u16;
-            frame.set_cursor_position(Position::new(
-                cursor_x.min(area.right().saturating_sub(1)),
-                area.y,
-            ));
-            Line::from(vec![
-                Span::styled(prompt, theme::PROMPT),
-                Span::raw(input.clone()),
-                Span::styled("   Enter adds · Esc cancels", theme::DIM),
-            ])
-        }
         Mode::ConfirmCancel(id) => {
             let name = app
                 .downloads
@@ -311,6 +281,7 @@ pub fn prompt_line(frame: &mut Frame, app: &App, area: Rect) -> Option<Line<'sta
 mod tests {
     use super::*;
     use crate::ipc::protocol::DownloadStatus;
+    use crate::tui::dialogs::add::AddField;
     use crate::tui::state::test_support::{app_with, sample_app, screen_text};
     use crate::tui::state::{App, HitMap};
     use ratatui::backend::TestBackend;
@@ -402,37 +373,36 @@ mod tests {
         assert!(app.notice.as_ref().unwrap().is_error);
     }
 
-    #[test]
-    fn typing_or_pasting_a_url_then_enter_adds_it() {
-        let mut app = App::default();
-        handle_event(&mut app, &key(KeyCode::Char('a')));
-        for c in "http://x/a".chars() {
-            handle_event(&mut app, &key(KeyCode::Char(c)));
+    fn add_dialog_urls(app: &App) -> Vec<String> {
+        match app.dialogs.last() {
+            Some(Dialog::Add(add)) => add.urls(),
+            None => panic!("no dialog is open"),
         }
-        handle_event(&mut app, &key(KeyCode::Backspace));
-        handle_event(&mut app, &Event::Paste("b.iso\n".to_string()));
-        assert_eq!(
-            handle_event(&mut app, &key(KeyCode::Enter)),
-            Some(Action::Add("http://x/b.iso".to_string()))
-        );
-        assert_eq!(app.mode, Mode::Browse);
     }
 
     #[test]
-    fn letters_typed_into_the_url_box_are_not_shortcuts() {
-        let mut app = app_with(&[DownloadStatus::Active]);
-        handle_event(&mut app, &key(KeyCode::Char('a')));
-        assert_eq!(handle_event(&mut app, &key(KeyCode::Char('q'))), None);
-        assert_eq!(app.mode, Mode::AddUrl("q".to_string()));
-        handle_event(&mut app, &key(KeyCode::Esc));
-        assert_eq!(app.mode, Mode::Browse);
+    fn a_opens_the_add_dialog_with_the_daemon_defaults() {
+        let mut app = App {
+            defaults: Some(crate::ipc::protocol::DownloadDefaults {
+                folder: "/dl".into(),
+                connections: 3,
+                max_bytes_per_sec: 0,
+            }),
+            ..App::default()
+        };
+        assert_eq!(handle_event(&mut app, &key(KeyCode::Char('a'))), None);
+        let Some(Dialog::Add(add)) = app.dialogs.last() else {
+            panic!("no Add dialog");
+        };
+        assert_eq!(add.field_text(AddField::Folder), "/dl");
+        assert_eq!(add.field_text(AddField::Connections), "3");
     }
 
     #[test]
-    fn pasting_while_browsing_opens_the_add_box() {
+    fn pasting_while_browsing_opens_the_add_dialog_with_the_paste() {
         let mut app = App::default();
-        handle_event(&mut app, &Event::Paste("  http://x/y  ".to_string()));
-        assert_eq!(app.mode, Mode::AddUrl("http://x/y".to_string()));
+        handle_event(&mut app, &Event::Paste("  http://x/y  \r\n".to_string()));
+        assert_eq!(add_dialog_urls(&app), vec!["http://x/y"]);
     }
 
     #[test]
@@ -561,14 +531,20 @@ mod tests {
     }
 
     #[test]
-    fn add_mode_shows_the_url_being_typed() {
+    fn the_add_dialog_draws_over_the_screen() {
         let mut app = sample_app();
-        app.mode = Mode::AddUrl("http://example.com/a".to_string());
+        app.dialogs.push(Dialog::Add(AddDialog::new(
+            None,
+            Some("http://example.com/a"),
+        )));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
             .draw(|f| crate::tui::screens::render(f, &mut app))
             .unwrap();
-        assert!(screen_text(&terminal).contains("Add URL: http://example.com/a"));
+        let text = screen_text(&terminal);
+        assert!(text.contains("Add a download"), "{text}");
+        assert!(text.contains("http://example.com/a"), "{text}");
+        assert!(!app.hits.dialog.is_empty());
     }
 
     #[test]

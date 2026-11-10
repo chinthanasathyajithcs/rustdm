@@ -107,22 +107,7 @@ pub(crate) async fn perform(
         return Err(ClientError::NotRunning.into());
     };
     let summary = match action {
-        Action::Add(url) => {
-            let s = conn
-                .add(AddDownloadParams {
-                    url: url.clone(),
-                    // The daemon fills in its default folder.
-                    destination: None,
-                    filename: None,
-                    connections: None,
-                    max_bytes_per_sec: None,
-                })
-                .await?;
-            return Ok(Outcome {
-                message: format!("Added {} ({})", s.id, status_label(s.status)),
-                select: Some(s.id),
-            });
-        }
+        Action::Add(downloads) => return add_each(conn, downloads).await,
         Action::Pause(id) => conn.pause(id).await?,
         Action::Resume(id) => conn.resume(id).await?,
         Action::Cancel(id) => conn.cancel(id, false).await?,
@@ -141,6 +126,49 @@ pub(crate) async fn perform(
         Action::Quit => return Ok(Outcome::default()),
     };
     Ok(changed(&summary))
+}
+
+/// Add each download in turn. When some fail, the error lists the links that
+/// were not added, so the Add dialog can keep only those.
+async fn add_each(
+    conn: &mut DaemonClient,
+    downloads: &[AddDownloadParams],
+) -> Result<Outcome, ActionError> {
+    let mut added: Vec<DownloadSummary> = Vec::new();
+    let mut first_error: Option<ActionError> = None;
+    let mut not_added = Vec::new();
+    for params in downloads {
+        match conn.add(params.clone()).await {
+            Ok(summary) => added.push(summary),
+            Err(e) => {
+                first_error.get_or_insert_with(|| e.into());
+                not_added.push(params.url.clone());
+            }
+        }
+    }
+    if let Some(first) = first_error {
+        let message = match downloads.len() {
+            1 => first.message,
+            total => format!(
+                "{} of {total} not added: {}",
+                not_added.len(),
+                first.message
+            ),
+        };
+        return Err(ActionError {
+            message,
+            code: first.code,
+            not_added,
+        });
+    }
+    let message = match added.as_slice() {
+        [one] => format!("Added {} ({})", one.id, status_label(one.status)),
+        many => format!("Added {} downloads", many.len()),
+    };
+    Ok(Outcome {
+        message,
+        select: added.first().map(|s| s.id.clone()),
+    })
 }
 
 fn message(text: String) -> Outcome {

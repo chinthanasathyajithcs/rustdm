@@ -5,6 +5,7 @@ use crate::ipc::protocol::{
     DaemonLimits, DownloadDefaults, DownloadStatus, DownloadSummary, TelemetryTick,
 };
 use crate::tui::daemon_link::{ActionError, Outcome};
+use crate::tui::dialogs::{Dialog, DialogTarget};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
 
@@ -123,8 +124,6 @@ impl Button {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Browse,
-    /// Typing a URL to add; holds the text so far.
-    AddUrl(String),
     /// Waiting for `y` to cancel this download.
     ConfirmCancel(String),
 }
@@ -138,6 +137,8 @@ pub struct HitMap {
     pub tabs: Vec<(Rect, Tab)>,
     /// One entry per table row on screen, with that row's download id.
     pub rows: Vec<(Rect, String)>,
+    /// Fields and buttons of the top dialog.
+    pub dialog: Vec<(Rect, DialogTarget)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +160,8 @@ pub struct App {
     pub screen: Screen,
     /// The Help overlay is drawn over the current screen.
     pub help_open: bool,
+    /// Open dialogs; the last one is on top and gets the keys.
+    pub dialogs: Vec<Dialog>,
     pub tab: Tab,
     pub selected: Option<String>,
     /// Index of the first visible table row.
@@ -179,6 +182,7 @@ impl Default for App {
             connected: false,
             screen: Screen::Downloads,
             help_open: false,
+            dialogs: Vec::new(),
             tab: Tab::All,
             selected: None,
             table_offset: 0,
@@ -265,9 +269,20 @@ impl App {
     }
 
     /// Show the result of an action: select what it names and report it.
+    /// A dialog waiting on the action closes when it worked, and shows the
+    /// error and stays open when it didn't.
     pub fn apply_outcome(&mut self, result: Result<Outcome, ActionError>) {
+        let waiting = self.dialogs.last().is_some_and(Dialog::is_pending);
         match result {
+            Err(e) if waiting => {
+                if let Some(dialog) = self.dialogs.last_mut() {
+                    dialog.set_error(&e);
+                }
+            }
             Ok(outcome) => {
+                if waiting {
+                    self.dialogs.pop();
+                }
                 if let Some(id) = outcome.select {
                     self.selected = Some(id);
                 }

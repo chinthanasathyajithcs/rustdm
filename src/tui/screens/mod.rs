@@ -8,6 +8,7 @@ pub mod logs;
 pub mod settings;
 
 use crate::tui::action::Action;
+use crate::tui::dialogs::DialogResult;
 use crate::tui::format::format_speed;
 use crate::tui::state::{App, Mode, Screen};
 use crate::tui::theme;
@@ -33,6 +34,9 @@ pub(crate) fn hit<T: Clone>(areas: &[(Rect, T)], at: Position) -> Option<T> {
 /// Turn a terminal event into an action: the global keys first, then the
 /// current screen's own handling.
 pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
+    if !app.dialogs.is_empty() {
+        return dialog_event(app, event);
+    }
     match event {
         // Windows also reports key releases; act on presses only.
         Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
@@ -50,8 +54,37 @@ pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
     }
 }
 
+/// The top dialog gets every event; Ctrl+C still quits.
+fn dialog_event(app: &mut App, event: &Event) -> Option<Action> {
+    let result = match event {
+        Event::Key(key) if is_ctrl_c(key) => return Some(Action::Quit),
+        Event::Mouse(mouse) => {
+            let at = Position::new(mouse.column, mouse.row);
+            match (mouse.kind, hit(&app.hits.dialog, at)) {
+                (MouseEventKind::Down(MouseButton::Left), Some(target)) => {
+                    app.dialogs.last_mut()?.click(target)
+                }
+                _ => DialogResult::Used,
+            }
+        }
+        _ => app.dialogs.last_mut()?.handle_event(event),
+    };
+    match result {
+        DialogResult::Used => None,
+        DialogResult::Close => {
+            app.dialogs.pop();
+            None
+        }
+        DialogResult::Submit(action) => Some(action),
+    }
+}
+
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
+}
+
 fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    if is_ctrl_c(key) {
         return Some(Action::Quit);
     }
     // While the screen is asking for input, keys belong to it.
@@ -118,6 +151,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.help_open {
         help::render_overlay(frame, app.screen, area);
     }
+    if !app.dialogs.is_empty() {
+        // Dim what is behind, then draw the stack bottom to top.
+        frame.buffer_mut().set_style(area, theme::BEHIND_DIALOG);
+        for dialog in &app.dialogs {
+            app.hits.dialog = dialog.render(frame, area);
+        }
+    }
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) -> Vec<(Rect, Screen)> {
@@ -175,7 +215,7 @@ fn daemon_status(app: &App) -> Vec<Span<'static>> {
 /// keys for the current screen that fit.
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = match app.screen {
-        Screen::Downloads => downloads::prompt_line(frame, app, area),
+        Screen::Downloads => downloads::prompt_line(app),
         _ => None,
     };
     let line = match (prompt, &app.notice) {
@@ -222,6 +262,8 @@ mod tests {
     use super::*;
     use crate::ipc::protocol::DownloadStatus;
     use crate::tui::action::Action;
+    use crate::tui::dialogs::add::{AddDialog, AddField};
+    use crate::tui::dialogs::{Dialog, DialogTarget};
     use crate::tui::state::test_support::{app_with, sample_app, screen_text};
     use crate::tui::state::{App, Screen};
     use ratatui::backend::TestBackend;
@@ -318,14 +360,51 @@ mod tests {
     }
 
     #[test]
-    fn screen_keys_are_not_shortcuts_while_typing_a_url() {
-        let mut app = App::default();
+    fn letters_typed_into_the_dialog_are_not_shortcuts() {
+        let mut app = app_with(&[DownloadStatus::Active]);
         handle_event(&mut app, &key(KeyCode::Char('a')));
-        for c in ['s', 'l', '?', 'q'] {
+        for c in "qsl?pc".chars() {
             assert_eq!(handle_event(&mut app, &key(KeyCode::Char(c))), None);
         }
         assert_eq!(app.screen, Screen::Downloads);
         assert!(!app.help_open);
+        let Some(Dialog::Add(add)) = app.dialogs.last() else {
+            panic!("the dialog closed");
+        };
+        assert_eq!(add.field_text(AddField::Url), "qsl?pc");
+        handle_event(&mut app, &key(KeyCode::Esc));
+        assert!(app.dialogs.is_empty(), "Esc closes the dialog");
+        assert_eq!(app.screen, Screen::Downloads);
+    }
+
+    #[test]
+    fn a_paste_and_enter_submit_the_add_dialog() {
+        let mut app = App::default();
+        handle_event(&mut app, &key(KeyCode::Char('a')));
+        handle_event(&mut app, &Event::Paste("https://example.com/a".into()));
+        let Some(Action::Add(params)) = handle_event(&mut app, &key(KeyCode::Enter)) else {
+            panic!("Enter did not submit");
+        };
+        assert_eq!(params[0].url, "https://example.com/a");
+        assert_eq!(app.dialogs.len(), 1, "open until the daemon answers");
+    }
+
+    #[test]
+    fn clicking_the_add_button_of_the_dialog_submits() {
+        let mut app = App::default();
+        app.dialogs.push(Dialog::Add(AddDialog::new(
+            None,
+            Some("https://example.com/a"),
+        )));
+        draw(&mut app, 100, 30);
+        let (button, _) = *app
+            .hits
+            .dialog
+            .iter()
+            .find(|(_, t)| *t == DialogTarget::Key(KeyCode::Enter))
+            .expect("Add button");
+        let action = handle_event(&mut app, &click(button.x, button.y));
+        assert!(matches!(action, Some(Action::Add(_))), "{action:?}");
     }
 
     #[test]

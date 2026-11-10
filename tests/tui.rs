@@ -209,6 +209,44 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
 }
 
 #[tokio::test]
+async fn the_add_dialog_adds_with_the_daemon_defaults() {
+    let body = pattern_bytes(256 * 1024);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    client
+        .set_defaults(SetDefaultsParams {
+            connections: Some(2),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (events, dashboard) = start_dashboard(&endpoint);
+    // Let the first refresh load the defaults before the dialog opens.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let url = mock.url().join("with-defaults.bin").unwrap().to_string();
+    events.send(key(KeyCode::Char('a'))).await.unwrap();
+    events.send(Event::Paste(url.clone())).await.unwrap();
+    events.send(key(KeyCode::Enter)).await.unwrap();
+    wait_for(&mut client, "the dialog never added it", |list| {
+        list.iter()
+            .any(|d| d.url == url && d.status == DownloadStatus::Completed)
+    })
+    .await;
+    assert_eq!(
+        std::fs::read(dir.path().join("with-defaults.bin")).unwrap(),
+        body
+    );
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn esc_no_longer_quits_the_dashboard() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, _client) = serve_into(dir.path()).await;

@@ -2,6 +2,7 @@
 
 pub mod action;
 pub mod daemon_link;
+pub mod dialogs;
 pub mod format;
 pub mod runtime;
 pub mod screens;
