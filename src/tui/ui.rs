@@ -1,8 +1,8 @@
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary, TelemetryTick};
-use crate::tui::app::{App, Button, HitMap, Mode, Tab};
 use crate::tui::format::{
     format_bytes, format_eta, format_speed, format_speed_cap, fraction_done, status_label,
 };
+use crate::tui::state::{App, Button, HitMap, Mode, Tab};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

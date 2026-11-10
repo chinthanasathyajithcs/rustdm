@@ -1,0 +1,342 @@
+//! The TUI's state: what the daemon reported, what the user selected, and
+//! what the last frame drew.
+
+use crate::ipc::protocol::{DaemonLimits, DownloadStatus, DownloadSummary, TelemetryTick};
+use crate::tui::daemon_link::{ActionError, Outcome};
+use ratatui::layout::Rect;
+use std::collections::{HashMap, VecDeque};
+
+/// Speed samples kept per download for the speed graph: about 30 s at 4 ticks a second.
+pub const SPEED_HISTORY_LEN: usize = 120;
+
+/// Status filters shown as tabs above the downloads table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    All,
+    Active,
+    Queued,
+    Completed,
+    Stopped,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 5] = [
+        Tab::All,
+        Tab::Active,
+        Tab::Queued,
+        Tab::Completed,
+        Tab::Stopped,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::All => "All",
+            Tab::Active => "Downloading",
+            Tab::Queued => "Queued",
+            Tab::Completed => "Completed",
+            Tab::Stopped => "Stopped",
+        }
+    }
+
+    pub fn includes(self, status: DownloadStatus) -> bool {
+        match self {
+            Tab::All => true,
+            Tab::Active => matches!(
+                status,
+                DownloadStatus::Active | DownloadStatus::Pausing | DownloadStatus::Retrying
+            ),
+            Tab::Queued => status == DownloadStatus::Queued,
+            Tab::Completed => status == DownloadStatus::Completed,
+            Tab::Stopped => matches!(
+                status,
+                DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Cancelled
+            ),
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
+    pub(crate) fn offset(self, delta: isize) -> Tab {
+        let len = Tab::ALL.len() as isize;
+        let next = (self.index() as isize + delta).rem_euclid(len);
+        Tab::ALL[next as usize]
+    }
+}
+
+/// Toolbar buttons, in the order they are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Add,
+    Pause,
+    Resume,
+    Cancel,
+    Remove,
+    Quit,
+}
+
+impl Button {
+    pub const ALL: [Button; 6] = [
+        Button::Add,
+        Button::Pause,
+        Button::Resume,
+        Button::Cancel,
+        Button::Remove,
+        Button::Quit,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Button::Add => "+ Add",
+            Button::Pause => "|| Pause",
+            Button::Resume => "> Resume",
+            Button::Cancel => "x Cancel",
+            Button::Remove => "- Remove",
+            Button::Quit => "Quit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Browse,
+    /// Typing a URL to add; holds the text so far.
+    AddUrl(String),
+    /// Waiting for `y` to cancel this download.
+    ConfirmCancel(String),
+}
+
+/// Screen areas the last frame drew, so a mouse click can find what it hit.
+#[derive(Clone, Debug, Default)]
+pub struct HitMap {
+    pub buttons: Vec<(Rect, Button)>,
+    pub tabs: Vec<(Rect, Tab)>,
+    /// One entry per table row on screen, with that row's download id.
+    pub rows: Vec<(Rect, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub is_error: bool,
+}
+
+pub struct App {
+    /// Every download the daemon knows, in queue order.
+    pub downloads: Vec<DownloadSummary>,
+    /// Latest telemetry per download id.
+    pub ticks: HashMap<String, TelemetryTick>,
+    pub speed_history: HashMap<String, VecDeque<u64>>,
+    pub limits: Option<DaemonLimits>,
+    pub connected: bool,
+    pub tab: Tab,
+    pub selected: Option<String>,
+    /// Index of the first visible table row.
+    pub table_offset: usize,
+    pub mode: Mode,
+    pub notice: Option<Notice>,
+    pub hits: HitMap,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            downloads: Vec::new(),
+            ticks: HashMap::new(),
+            speed_history: HashMap::new(),
+            limits: None,
+            connected: false,
+            tab: Tab::All,
+            selected: None,
+            table_offset: 0,
+            mode: Mode::Browse,
+            notice: None,
+            hits: HitMap::default(),
+        }
+    }
+}
+
+impl App {
+    /// Downloads in the current tab, in queue order.
+    pub fn visible(&self) -> Vec<&DownloadSummary> {
+        self.downloads
+            .iter()
+            .filter(|d| self.tab.includes(d.status))
+            .collect()
+    }
+
+    pub fn count(&self, tab: Tab) -> usize {
+        self.downloads
+            .iter()
+            .filter(|d| tab.includes(d.status))
+            .count()
+    }
+
+    pub fn selected_summary(&self) -> Option<&DownloadSummary> {
+        let id = self.selected.as_ref()?;
+        self.visible().into_iter().find(|d| &d.id == id)
+    }
+
+    pub fn selected_index(&self) -> Option<usize> {
+        let id = self.selected.as_ref()?;
+        self.visible().iter().position(|d| &d.id == id)
+    }
+
+    /// Replace the list with the daemon's, which comes in queue order.
+    pub fn set_downloads(&mut self, downloads: Vec<DownloadSummary>) {
+        self.ticks
+            .retain(|id, _| downloads.iter().any(|d| &d.id == id));
+        self.speed_history
+            .retain(|id, _| downloads.iter().any(|d| &d.id == id));
+        self.downloads = downloads;
+        self.ensure_selection();
+    }
+
+    pub fn apply_tick(&mut self, tick: TelemetryTick) {
+        let history = self.speed_history.entry(tick.id.clone()).or_default();
+        if history.len() == SPEED_HISTORY_LEN {
+            history.pop_front();
+        }
+        history.push_back(tick.speed_bps);
+        self.ticks.insert(tick.id.clone(), tick);
+    }
+
+    pub fn notify(&mut self, text: impl Into<String>, is_error: bool) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            is_error,
+        });
+    }
+
+    pub fn select_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.table_offset = 0;
+        self.ensure_selection();
+    }
+
+    /// Keep the selection on a download in the current tab, falling back to the first one.
+    fn ensure_selection(&mut self) {
+        if self.selected_index().is_none() {
+            self.selected = self.visible().first().map(|d| d.id.clone());
+        }
+    }
+
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        let visible = self.visible();
+        if visible.is_empty() {
+            return;
+        }
+        let current = self.selected_index().unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, visible.len() as isize - 1) as usize;
+        self.selected = Some(visible[next].id.clone());
+    }
+
+    /// Show the result of an action: select what it names and report it.
+    pub fn apply_outcome(&mut self, result: Result<Outcome, ActionError>) {
+        match result {
+            Ok(outcome) => {
+                if let Some(id) = outcome.select {
+                    self.selected = Some(id);
+                }
+                if !outcome.message.is_empty() {
+                    self.notify(outcome.message, false);
+                }
+            }
+            Err(e) => self.notify(e.message, true),
+        }
+    }
+}
+
+/// Builders shared by the TUI's unit tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::path::PathBuf;
+
+    pub(crate) fn summary(id: &str, status: DownloadStatus) -> DownloadSummary {
+        DownloadSummary {
+            id: id.to_string(),
+            url: format!("http://example.com/{id}.bin"),
+            destination: PathBuf::from("/downloads"),
+            filename: format!("{id}.bin"),
+            status,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bps: 0,
+            eta_secs: None,
+            error_message: None,
+            max_bytes_per_sec: 0,
+        }
+    }
+
+    pub(crate) fn app_with(statuses: &[DownloadStatus]) -> App {
+        let mut app = App::default();
+        let downloads = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, s)| summary(&format!("dl_{}", i + 1), *s))
+            .collect();
+        app.set_downloads(downloads);
+        app
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+
+    #[test]
+    fn downloads_keep_the_daemon_queue_order_and_the_first_is_selected() {
+        let mut app = App::default();
+        app.set_downloads(vec![
+            summary("dl_10", DownloadStatus::Queued),
+            summary("dl_2", DownloadStatus::Active),
+        ]);
+        let ids: Vec<_> = app.downloads.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["dl_10", "dl_2"]);
+        assert_eq!(app.selected.as_deref(), Some("dl_10"));
+    }
+
+    #[test]
+    fn speed_history_is_capped() {
+        let mut app = App::default();
+        for i in 0..(SPEED_HISTORY_LEN as u64 + 5) {
+            app.apply_tick(TelemetryTick {
+                id: "dl_1".to_string(),
+                downloaded_bytes: 0,
+                total_bytes: None,
+                speed_bps: i,
+                active_connections: 1,
+                segments: Vec::new(),
+                lanes: Vec::new(),
+            });
+        }
+        let history = &app.speed_history["dl_1"];
+        assert_eq!(history.len(), SPEED_HISTORY_LEN);
+        assert_eq!(history.front(), Some(&5));
+    }
+
+    #[test]
+    fn an_outcome_selects_the_new_download_and_an_error_becomes_a_notice() {
+        let mut app = App::default();
+        app.apply_outcome(Ok(Outcome {
+            message: "Added dl_1 (queued)".into(),
+            select: Some("dl_1".into()),
+        }));
+        assert_eq!(app.selected.as_deref(), Some("dl_1"));
+        app.apply_outcome(Err(ActionError {
+            message: "boom".into(),
+            code: None,
+            not_added: vec![],
+        }));
+        assert_eq!(
+            app.notice,
+            Some(Notice {
+                text: "boom".into(),
+                is_error: true
+            })
+        );
+    }
+}
