@@ -1,6 +1,6 @@
 //! Questions with a few one-key answers: cancelling a download, stopping rdmd.
 
-use super::{centered, draw_box, put, render_buttons, DialogResult, DialogTarget};
+use super::{dialog_area, draw_box, put, render_buttons, DialogResult, DialogTarget};
 use crate::ipc::protocol::DownloadSummary;
 use crate::tui::action::Action;
 use crate::tui::daemon_link::ActionError;
@@ -133,7 +133,7 @@ impl ConfirmDialog {
             .div_ceil(text_width)
             .max(1);
         let height = question_rows + 4;
-        let inner = draw_box(frame, centered(area, CONFIRM_WIDTH, height), self.title);
+        let inner = draw_box(frame, dialog_area(area, CONFIRM_WIDTH, height), self.title);
         let question = Rect::new(
             inner.x,
             inner.y,

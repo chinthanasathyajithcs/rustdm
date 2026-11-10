@@ -10,6 +10,75 @@ use ratatui::Frame;
 
 /// Width of the progress bar in the table's PROGRESS column.
 pub const TABLE_BAR_WIDTH: usize = 10;
+/// Below this many columns the ETA column is left out.
+const ETA_MIN_WIDTH: u16 = 80;
+/// Below this many columns the SPEED column is left out too.
+const SPEED_MIN_WIDTH: u16 = 64;
+
+/// The table's columns, left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Column {
+    Id,
+    Name,
+    Status,
+    Progress,
+    Size,
+    Speed,
+    Eta,
+}
+
+impl Column {
+    fn header(self) -> &'static str {
+        match self {
+            Column::Id => "ID",
+            Column::Name => "NAME",
+            Column::Status => "STATUS",
+            Column::Progress => "PROGRESS",
+            Column::Size => "SIZE",
+            Column::Speed => "SPEED",
+            Column::Eta => "ETA",
+        }
+    }
+
+    fn width(self) -> Constraint {
+        match self {
+            Column::Id => Constraint::Length(6),
+            Column::Name => Constraint::Min(12),
+            Column::Status => Constraint::Length(9),
+            Column::Progress => Constraint::Length(TABLE_BAR_WIDTH as u16 + 5),
+            Column::Size => Constraint::Length(21),
+            Column::Speed => Constraint::Length(12),
+            Column::Eta => Constraint::Length(8),
+        }
+    }
+
+    fn cell(self, d: &DownloadSummary) -> Cell<'static> {
+        match self {
+            Column::Id => Cell::from(d.id.clone()),
+            Column::Name => Cell::from(d.filename.clone()),
+            Column::Status => {
+                Cell::from(status_label(d.status)).style(theme::status_style(d.status))
+            }
+            Column::Progress => Cell::from(progress_bar(fraction_done(d), TABLE_BAR_WIDTH)),
+            Column::Size => Cell::from(size_text(d)),
+            Column::Speed => Cell::from(format_speed(d.speed_bps)),
+            Column::Eta => Cell::from(format_eta(d.eta_secs)),
+        }
+    }
+}
+
+/// The columns that fit a table `width` columns wide: ETA goes first, then SPEED.
+pub fn table_columns(width: u16) -> Vec<Column> {
+    use Column::*;
+    [Id, Name, Status, Progress, Size, Speed, Eta]
+        .into_iter()
+        .filter(|c| match c {
+            Eta => width >= ETA_MIN_WIDTH,
+            Speed => width >= SPEED_MIN_WIDTH,
+            _ => true,
+        })
+        .collect()
+}
 
 /// "██████░░░░ 60%" for a known size, or blanks while unknown.
 pub fn progress_bar(fraction: Option<f64>, width: usize) -> String {
@@ -73,18 +142,11 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
         .take(body_rows)
         .copied()
         .collect();
+    let columns = table_columns(area.width);
     let rows: Vec<Row> = shown
         .iter()
         .map(|d| {
-            let row = Row::new(vec![
-                Cell::from(d.id.clone()),
-                Cell::from(d.filename.clone()),
-                Cell::from(status_label(d.status)).style(theme::status_style(d.status)),
-                Cell::from(progress_bar(fraction_done(d), TABLE_BAR_WIDTH)),
-                Cell::from(size_text(d)),
-                Cell::from(format_speed(d.speed_bps)),
-                Cell::from(format_eta(d.eta_secs)),
-            ]);
+            let row = Row::new(columns.iter().map(|c| c.cell(d)));
             if app.selected.as_deref() == Some(d.id.as_str()) {
                 row.style(theme::SELECTED_ROW)
             } else {
@@ -103,20 +165,75 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
         })
         .collect();
 
-    let header = Row::new(vec![
-        "ID", "NAME", "STATUS", "PROGRESS", "SIZE", "SPEED", "ETA",
-    ])
-    .style(theme::TABLE_HEADER);
-    let widths = [
-        Constraint::Length(6),
-        Constraint::Min(12),
-        Constraint::Length(9),
-        Constraint::Length(TABLE_BAR_WIDTH as u16 + 5),
-        Constraint::Length(21),
-        Constraint::Length(12),
-        Constraint::Length(8),
-    ];
+    let header = Row::new(columns.iter().map(|c| c.header())).style(theme::TABLE_HEADER);
+    let widths: Vec<Constraint> = columns.iter().map(|c| c.width()).collect();
     frame.render_widget(Table::new(rows, widths).header(header), inner);
     app.table_offset = offset;
     hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::protocol::DownloadStatus;
+    use crate::tui::state::test_support::{sample_app, screen_text, summary};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn draw(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, app))
+            .unwrap();
+        screen_text(&terminal)
+    }
+
+    #[test]
+    fn eta_drops_below_80_columns_and_speed_below_64() {
+        assert!(table_columns(80).contains(&Column::Eta));
+        assert!(!table_columns(79).contains(&Column::Eta));
+        assert!(table_columns(79).contains(&Column::Speed));
+        assert!(table_columns(64).contains(&Column::Speed));
+        assert!(!table_columns(63).contains(&Column::Speed));
+        assert!(table_columns(40).contains(&Column::Name));
+
+        let mut app = sample_app();
+        let header = |text: String| {
+            text.lines()
+                .find(|l| l.contains("NAME"))
+                .unwrap()
+                .to_string()
+        };
+        let wide = header(draw(&mut app, 120, 30));
+        assert!(wide.contains("SPEED") && wide.contains("ETA"), "{wide}");
+        let medium = header(draw(&mut app, 70, 30));
+        assert!(
+            medium.contains("SPEED") && !medium.contains("ETA"),
+            "{medium}"
+        );
+        let narrow = header(draw(&mut app, 60, 30));
+        assert!(!narrow.contains("SPEED"), "{narrow}");
+    }
+
+    #[test]
+    fn long_urls_and_file_names_are_cut_not_wrapped() {
+        let mut app = App::default();
+        let mut long = summary("dl_1", DownloadStatus::Active);
+        long.filename = "x".repeat(300);
+        long.url = format!("http://example.com/{}", "y".repeat(300));
+        app.set_downloads(vec![long, summary("dl_2", DownloadStatus::Queued)]);
+        let text = draw(&mut app, 80, 24);
+        // The table: from its header row to its bottom border.
+        let table: Vec<&str> = text
+            .lines()
+            .skip_while(|l| !l.contains("NAME"))
+            .take_while(|l| !l.contains('└'))
+            .collect();
+        assert_eq!(table.len(), 3, "header and one row each:\n{text}");
+        assert!(
+            table[1].contains("dl_1") && table[1].contains("xxxxx"),
+            "{text}"
+        );
+        assert!(table[2].contains("dl_2"), "{text}");
+    }
 }

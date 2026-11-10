@@ -1,6 +1,6 @@
 //! The speed cap of one download.
 
-use super::{centered, draw_box, put, render_buttons, DialogResult, DialogTarget};
+use super::{dialog_area, draw_box, put, render_buttons, DialogResult, DialogTarget};
 use crate::ipc::protocol::DownloadSummary;
 use crate::tui::action::Action;
 use crate::tui::daemon_link::ActionError;
@@ -110,7 +110,7 @@ impl SpeedDialog {
     pub fn render(&self, frame: &mut Frame, area: Rect) -> Vec<(Rect, DialogTarget)> {
         let inner = draw_box(
             frame,
-            centered(area, SPEED_WIDTH, SPEED_HEIGHT),
+            dialog_area(area, SPEED_WIDTH, SPEED_HEIGHT),
             &self.title,
         );
         let mut hits = Vec::new();

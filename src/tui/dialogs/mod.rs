@@ -92,7 +92,7 @@ impl Dialog {
 }
 
 /// A box of the wanted size centred on `screen`, clamped to fit it.
-pub(crate) fn centered(screen: Rect, wanted_width: u16, wanted_height: u16) -> Rect {
+pub fn dialog_area(screen: Rect, wanted_width: u16, wanted_height: u16) -> Rect {
     let width = wanted_width.min(screen.width);
     let height = wanted_height.min(screen.height);
     Rect::new(
@@ -148,4 +148,64 @@ pub(crate) fn render_buttons(
         x += width + 2;
     }
     hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add::AddDialog;
+    use super::confirm::ConfirmDialog;
+    use super::speed::SpeedDialog;
+    use super::*;
+    use crate::tui::state::test_support::sample_app;
+    use crate::tui::state::App;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn dialog_area_is_centred_and_clamped_to_the_screen() {
+        let screen = Rect::new(0, 0, 100, 30);
+        assert_eq!(dialog_area(screen, 60, 10), Rect::new(20, 10, 60, 10));
+        let tiny = Rect::new(0, 0, 30, 8);
+        assert_eq!(dialog_area(tiny, 60, 12), tiny);
+        assert_eq!(dialog_area(Rect::new(0, 0, 0, 0), 60, 12).area(), 0);
+    }
+
+    #[test]
+    fn dialogs_fit_tiny_terminals_without_panicking() {
+        let base = sample_app();
+        let d = base.downloads[0].clone();
+        let dialogs = [
+            Dialog::Add(Box::new(AddDialog::new(
+                None,
+                Some("https://example.com/a"),
+            ))),
+            Dialog::Confirm(ConfirmDialog::cancel(&d)),
+            Dialog::Confirm(ConfirmDialog::stop_daemon(2)),
+            Dialog::Speed(SpeedDialog::new(&d)),
+        ];
+        for (width, height) in [(30, 8), (10, 3), (1, 1)] {
+            for dialog in &dialogs {
+                let mut app = sample_app();
+                app.dialogs.push(dialog.clone());
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|f| crate::tui::screens::render(f, &mut app))
+                    .unwrap();
+                for (rect, _) in &app.hits.dialog {
+                    assert!(
+                        rect.right() <= width && rect.bottom() <= height,
+                        "{rect:?} outside {width}x{height}"
+                    );
+                }
+            }
+            let mut app = App {
+                help_open: true,
+                ..sample_app()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| crate::tui::screens::render(f, &mut app))
+                .unwrap();
+        }
+    }
 }

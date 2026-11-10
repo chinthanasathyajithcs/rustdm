@@ -176,6 +176,9 @@ fn press(app: &mut App, button: Button) -> Option<Action> {
         Button::Add | Button::Quit => None,
     }
 }
+/// Terminal rows needed before the details pane shows; below this the table gets them all.
+pub const INSPECTOR_MIN_ROWS: u16 = 24;
+
 /// Height of the details pane when the window is tall enough.
 const INSPECTOR_HEIGHT: u16 = 16;
 
@@ -218,7 +221,11 @@ pub fn tabs_layout(app: &App, area: Rect) -> Vec<(Rect, Tab)> {
 
 /// Draw the Downloads screen into `area` and record its click targets.
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
-    let inspector_height = INSPECTOR_HEIGHT.min(area.height.saturating_sub(2 + MIN_TABLE_HEIGHT));
+    let inspector_height = if frame.area().height < INSPECTOR_MIN_ROWS {
+        0
+    } else {
+        INSPECTOR_HEIGHT.min(area.height.saturating_sub(2 + MIN_TABLE_HEIGHT))
+    };
     let [toolbar, tabs, table, inspector] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -508,6 +515,22 @@ mod tests {
         assert_eq!(app.hits.tabs.len(), Tab::ALL.len());
         assert_eq!(app.hits.rows.len(), 1);
         assert_eq!(app.hits.rows[0].1, "dl_1");
+    }
+
+    #[test]
+    fn the_inspector_hides_below_24_rows() {
+        let mut app = sample_app();
+        let draw = |app: &mut App, height: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(120, height)).unwrap();
+            terminal
+                .draw(|f| crate::tui::screens::render(f, app))
+                .unwrap();
+            screen_text(&terminal)
+        };
+        assert!(draw(&mut app, INSPECTOR_MIN_ROWS).contains("Segments"));
+        let short = draw(&mut app, INSPECTOR_MIN_ROWS - 1);
+        assert!(!short.contains("Segments"), "{short}");
+        assert!(short.contains("ubuntu.iso"), "the table keeps the room");
     }
 
     #[test]

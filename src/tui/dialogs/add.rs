@@ -1,7 +1,7 @@
 //! The Add dialog: one or more links, with folder, file name, connections
 //! and speed cap starting from the daemon's defaults.
 
-use super::{centered, draw_box, put, render_buttons, DialogResult, DialogTarget};
+use super::{dialog_area, draw_box, put, render_buttons, DialogResult, DialogTarget};
 use crate::engine::MAX_CONNECTIONS;
 use crate::ipc::protocol::{
     AddDownloadParams, DownloadDefaults, CODE_DESTINATION_EXISTS, CODE_INVALID_PATH,
@@ -305,7 +305,7 @@ impl AddDialog {
     pub fn render(&self, frame: &mut Frame, area: Rect) -> Vec<(Rect, DialogTarget)> {
         let inner = draw_box(
             frame,
-            centered(area, DIALOG_WIDTH, DIALOG_HEIGHT),
+            dialog_area(area, DIALOG_WIDTH, DIALOG_HEIGHT),
             "Add a download",
         );
         let mut hits = Vec::new();
