@@ -557,3 +557,28 @@ async fn add_takes_connections_and_speed_from_the_defaults() {
     })
     .unwrap();
 }
+
+fn ping(core: &DaemonCore) -> PingResult {
+    let reply = core.handle_request(RpcRequest::new(
+        RpcId::Number(1),
+        "daemon.ping".to_string(),
+        None,
+    ));
+    serde_json::from_value(reply.result.expect("ping result")).unwrap()
+}
+
+#[test]
+fn ping_reports_the_log_path_of_a_daemon_with_a_data_folder() {
+    let data = tempfile::tempdir().unwrap();
+    let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+    let reply = ping(&core);
+    assert_eq!(reply.data_dir.as_deref(), Some(data.path()));
+    assert_eq!(reply.log_path, Some(data.path().join("rdmd.log")));
+}
+
+#[test]
+fn ping_without_a_data_folder_reports_none() {
+    let reply = ping(&DaemonCore::new());
+    assert_eq!(reply.data_dir, None);
+    assert_eq!(reply.log_path, None);
+}

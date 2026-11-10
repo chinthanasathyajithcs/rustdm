@@ -29,6 +29,8 @@ async fn test_client_server_ping_pong() {
                 let result = PingResult {
                     version: "0.1.0".to_string(),
                     uptime_secs: 42,
+                    data_dir: None,
+                    log_path: None,
                 };
                 let resp = RpcResponse::success(req.id, serde_json::to_value(&result).unwrap());
                 server_conn.send(&resp).await.expect("send response");

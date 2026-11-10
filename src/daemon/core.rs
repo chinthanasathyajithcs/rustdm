@@ -85,6 +85,8 @@ pub struct DaemonCore {
     pub telemetry_tx: broadcast::Sender<TelemetryTick>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
     store: Option<Arc<QueueStore>>,
+    /// Folder holding the queue file and the log, when the queue is saved.
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for DaemonCore {
@@ -154,8 +156,17 @@ impl DaemonCore {
             client: build_client(),
             telemetry_tx,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            data_dir: store
+                .as_ref()
+                .and_then(|s| s.path().parent())
+                .map(|p| p.to_path_buf()),
             store: store.map(Arc::new),
         }
+    }
+
+    /// Folder holding the queue file and the log, if this core saves its queue.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self.data_dir.as_deref()
     }
 
     pub fn shutdown(&self) {

@@ -397,6 +397,12 @@ pub enum RpcMessage {
 pub struct PingResult {
     pub version: String,
     pub uptime_secs: u64,
+    /// Folder holding the daemon's queue and log; absent for an in-memory daemon
+    /// or one from before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,6 +713,8 @@ mod tests {
         let result = PingResult {
             version: "0.1.0".to_string(),
             uptime_secs: 120,
+            data_dir: None,
+            log_path: None,
         };
         let resp = RpcResponse::success(RpcId::Number(1), serde_json::to_value(&result).unwrap());
 
@@ -920,5 +928,15 @@ mod tests {
         assert_eq!(saved.folder, None);
         assert_eq!(saved.connections, None);
         assert_eq!(saved.max_bytes_per_sec, 0);
+    }
+
+    #[test]
+    fn an_old_ping_reply_without_paths_still_decodes() {
+        let ping: PingResult =
+            serde_json::from_str(r#"{"version":"0.1.0","uptime_secs":5}"#).unwrap();
+        assert_eq!(ping.data_dir, None);
+        assert_eq!(ping.log_path, None);
+        let encoded = serde_json::to_string(&ping).unwrap();
+        assert!(!encoded.contains("log_path"), "{encoded}");
     }
 }

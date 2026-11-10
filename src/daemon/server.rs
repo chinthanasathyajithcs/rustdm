@@ -33,6 +33,8 @@ impl DaemonCore {
                     Ok(PingResult {
                         version: crate::VERSION.to_string(),
                         uptime_secs: uptime,
+                        data_dir: self.data_dir().map(|d| d.to_path_buf()),
+                        log_path: self.data_dir().map(crate::daemon::log::log_path),
                     }),
                 )
             }
