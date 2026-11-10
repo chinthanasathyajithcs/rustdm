@@ -87,16 +87,23 @@ rdm speed dl_2 1M                             # change one download's cap; 0 or 
 rdm move dl_5 top                             # reorder the queue: top, up, down, bottom
 rdm cancel dl_4 --delete                      # also delete the partial files
 rdm remove dl_4                               # drop a finished or cancelled download from the list
+rdm defaults                                  # show the folder, connections and speed cap new downloads start with
+rdm defaults --dir ~/Downloads --connections 4 --speed off
 ```
+
+Downloads added without `--dir`, `--connections` or `--max-speed` use those defaults, which the daemon saves and every client shares, so the CLI and the dashboard's Settings screen agree.
 
 ## Dashboard
 
-Run `rdm` with no command (or `rdm tui`) for a live dashboard of the daemon's downloads. It starts the daemon if needed.
+Run `rdm` with no command (or `rdm tui`) for the full terminal interface. It starts the daemon if needed. Quitting with `q` leaves downloads running; `Q` stops the daemon after asking.
 
-- **Top pane:** every download in queue order, with status tabs (All, Downloading, Queued, Completed, Stopped) and counts.
-- **Bottom pane:** the selected download's details, a segment map of what is on disk, one bar per connection, and a speed graph.
-- **Mouse:** click the toolbar buttons (`[ + Add ]`, `[ || Pause ]`, `[ > Resume ]`, `[ x Cancel ]`, `[ - Remove ]`), tabs, and rows; the wheel scrolls.
-- **Keys:** `a` add (or paste a URL), `p` pause, `r` resume, `c` cancel, `x` remove, `Shift+↑/↓` or `K`/`J` reorder the queue, `←/→` or `1`-`5` tabs, `↑/↓` select, `q` quit.
+- **Downloads:** every download in queue order, with status tabs (All, Downloading, Queued, Completed, Stopped) and counts. Below it, the selected download's details, a segment map of what is on disk, one bar per connection, and a speed graph (hidden when the terminal is under 24 rows).
+- **Settings (`s`):** downloads at once and the total speed cap, plus the folder, connections and speed cap new downloads start with. `Enter` edits a field, `Enter` saves it to the daemon, `Esc` cancels the edit.
+- **Logs (`l`):** the end of `rdmd.log`, updated while open, and the messages the footer has shown. `↑/↓`, `PgUp/PgDn` and the wheel scroll; `G` jumps to the newest line.
+- **Help (`?`):** every key for the current screen.
+- **Dialogs:** `a` (or pasting links) opens Add, with folder, file name, connections and speed cap filled in from the defaults; paste several links to add them all. `c` asks whether to keep or delete the partial files, and `v` sets one download's speed cap.
+- **Mouse:** click the toolbar buttons, tabs, rows, screen names, and dialog fields and buttons; the wheel scrolls.
+- **Download keys:** `a` add, `p` pause, `r` resume, `c` cancel, `x` remove, `v` speed cap, `o` open the download's folder, `Shift+↑/↓` or `K`/`J` reorder the queue, `←/→` or `1`-`5` tabs, `↑/↓` select. `Esc` goes back to Downloads.
 
 When output is not a terminal, or with `rdm tui --plain`, it prints a plain row each time a download changes and exits once nothing is running or queued, so scripts can use it.
 
@@ -108,7 +115,7 @@ When output is not a terminal, or with `rdm tui --plain`, it prints a plain row 
   - **Background Daemon (`rdmd`) (Done):** Runs downloads in the background over local IPC (Windows Named Pipes / Unix sockets), surviving terminal closure, controlled with `rdm add/list/pause/resume/cancel/daemon`.
   - **Multi-Download Queue (Done):** At most N downloads at once, global and per-download speed caps, queue reordering, and a queue that survives daemon restarts.
   - **Interactive Terminal UI (TUI) (Done):** Mouse-clickable buttons and tabs, browsable downloads table, live segment map, connection lanes, and speed graph using Ratatui, with a plain-text fallback for scripts.
-- **Terminal-first interface (Designed, not started):** the TUI becomes rustdm's complete interface, with Downloads, Settings, Logs and Help screens, dialogs for adding and managing downloads, and defaults for new downloads kept by the daemon. CLI subcommands stay for scripts. Design: [`docs/superpowers/specs/2026-11-09-rustdm-terminal-first-design.md`](docs/superpowers/specs/2026-11-09-rustdm-terminal-first-design.md); plan: [`docs/superpowers/plans/2026-11-09-rustdm-terminal-first.md`](docs/superpowers/plans/2026-11-09-rustdm-terminal-first.md).
+- **Terminal-first interface (Done):** the TUI is rustdm's complete interface, with Downloads, Settings, Logs and Help screens, dialogs for adding and managing downloads, and defaults for new downloads kept by the daemon. CLI subcommands stay for scripts. Design: [`docs/superpowers/specs/2026-11-09-rustdm-terminal-first-design.md`](docs/superpowers/specs/2026-11-09-rustdm-terminal-first-design.md); plan: [`docs/superpowers/plans/2026-11-09-rustdm-terminal-first.md`](docs/superpowers/plans/2026-11-09-rustdm-terminal-first.md).
 - **Later (Planned):**
   - Browser extension integration & native messaging host, feeding downloads to the daemon.
   - HLS/DASH stream downloads.
