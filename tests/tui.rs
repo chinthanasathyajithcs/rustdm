@@ -292,10 +292,20 @@ async fn stopping_the_daemon_from_the_tui_pauses_downloads() {
         .expect("rdmd stopped")
         .unwrap();
 
-    assert!(matches!(
-        DaemonClient::connect(&endpoint).await,
-        Err(ClientError::NotRunning)
-    ));
+    // On Windows the pipe lingers until the daemon's connection tasks see the
+    // TUI's connections close, so give it a moment to go away.
+    let start = Instant::now();
+    loop {
+        match DaemonClient::connect(&endpoint).await {
+            Err(ClientError::NotRunning) => break,
+            other => assert!(
+                start.elapsed() < WAIT_TIMEOUT,
+                "rdmd still answers: {:?}",
+                other.map(|_| ())
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let status = core.get_status(&added.id).unwrap().status;
     assert!(
         !matches!(status, DownloadStatus::Active | DownloadStatus::Completed),
