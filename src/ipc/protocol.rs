@@ -397,6 +397,12 @@ pub enum RpcMessage {
 pub struct PingResult {
     pub version: String,
     pub uptime_secs: u64,
+    /// Folder holding the daemon's queue and log; absent for an in-memory daemon
+    /// or one from before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,6 +483,38 @@ pub struct SetLimitsParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_active: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_bytes_per_sec: Option<u64>,
+}
+
+/// Defaults for new downloads as the daemon saves them. `None` means the
+/// built-in default: the user's Downloads folder, and the engine's connections.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
+    /// Speed cap for each new download; 0 means none.
+    #[serde(default)]
+    pub max_bytes_per_sec: u64,
+}
+
+/// Defaults for new downloads with the built-in values filled in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadDefaults {
+    pub folder: PathBuf,
+    pub connections: u32,
+    pub max_bytes_per_sec: u64,
+}
+
+/// Fields left out keep their current value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetDefaultsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes_per_sec: Option<u64>,
 }
 
@@ -675,6 +713,8 @@ mod tests {
         let result = PingResult {
             version: "0.1.0".to_string(),
             uptime_secs: 120,
+            data_dir: None,
+            log_path: None,
         };
         let resp = RpcResponse::success(RpcId::Number(1), serde_json::to_value(&result).unwrap());
 
@@ -877,5 +917,26 @@ mod tests {
 
         assert_eq!(parsed_lf, req);
         assert_eq!(parsed_crlf, req);
+    }
+
+    #[test]
+    fn defaults_left_out_mean_unchanged_or_built_in() {
+        let unchanged = SetDefaultsParams::default();
+        assert_eq!(serde_json::to_string(&unchanged).unwrap(), "{}");
+        let saved: SavedDefaults = serde_json::from_str("{}").unwrap();
+        assert_eq!(saved, SavedDefaults::default());
+        assert_eq!(saved.folder, None);
+        assert_eq!(saved.connections, None);
+        assert_eq!(saved.max_bytes_per_sec, 0);
+    }
+
+    #[test]
+    fn an_old_ping_reply_without_paths_still_decodes() {
+        let ping: PingResult =
+            serde_json::from_str(r#"{"version":"0.1.0","uptime_secs":5}"#).unwrap();
+        assert_eq!(ping.data_dir, None);
+        assert_eq!(ping.log_path, None);
+        let encoded = serde_json::to_string(&ping).unwrap();
+        assert!(!encoded.contains("log_path"), "{encoded}");
     }
 }

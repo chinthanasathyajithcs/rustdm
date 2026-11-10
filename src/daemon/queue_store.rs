@@ -1,4 +1,4 @@
-use crate::ipc::protocol::{DaemonLimits, DownloadStatus};
+use crate::ipc::protocol::{DaemonLimits, DownloadStatus, SavedDefaults};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,9 @@ pub struct QueueSnapshot {
     pub version: u32,
     pub next_id: u64,
     pub limits: DaemonLimits,
+    /// Defaults for new downloads. Missing from older queue files.
+    #[serde(default)]
+    pub defaults: SavedDefaults,
     pub downloads: Vec<SavedDownload>,
 }
 
@@ -137,6 +140,7 @@ mod tests {
                 max_active: 2,
                 max_bytes_per_sec: 0,
             },
+            defaults: SavedDefaults::default(),
             downloads: vec![SavedDownload {
                 id: "dl_2".to_string(),
                 url: "http://example.com/a.iso".to_string(),
@@ -180,5 +184,18 @@ mod tests {
             std::fs::read(dir.path().join("queue.json.corrupt")).unwrap(),
             b"{ not json"
         );
+    }
+
+    #[test]
+    fn a_queue_file_without_defaults_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::in_dir(dir.path());
+        std::fs::write(
+            store.path(),
+            br#"{"version":1,"next_id":0,"limits":{"max_active":3,"max_bytes_per_sec":0},"downloads":[]}"#,
+        )
+        .unwrap();
+        let snapshot = store.load().unwrap().expect("loads");
+        assert_eq!(snapshot.defaults, SavedDefaults::default());
     }
 }

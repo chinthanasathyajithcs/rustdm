@@ -4,9 +4,12 @@
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
+use rustdm::daemon::queue_store::QueueStore;
 use rustdm::daemon::{DaemonCore, DaemonServer};
-use rustdm::ipc::client::DaemonClient;
-use rustdm::ipc::protocol::{AddDownloadParams, DownloadStatus, DownloadSummary, SetLimitsParams};
+use rustdm::ipc::client::{ClientError, DaemonClient};
+use rustdm::ipc::protocol::{
+    AddDownloadParams, DownloadStatus, DownloadSummary, SetDefaultsParams, SetLimitsParams,
+};
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
 use rustdm::tui::{run_app, run_plain};
@@ -17,6 +20,19 @@ use tokio::sync::mpsc;
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A daemon whose default folder is `folder`, so no test writes to the real Downloads.
+async fn serve_into(folder: &Path) -> (IpcEndpoint, DaemonClient) {
+    let (endpoint, mut client) = serve().await;
+    client
+        .set_defaults(SetDefaultsParams {
+            folder: Some(folder.to_path_buf()),
+            ..Default::default()
+        })
+        .await
+        .expect("set defaults");
+    (endpoint, client)
+}
 
 async fn serve() -> (IpcEndpoint, DaemonClient) {
     let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -77,17 +93,15 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
 /// Start the dashboard in the background; it returns its terminal when it quits.
 fn start_dashboard(
     endpoint: &IpcEndpoint,
-    downloads_dir: &Path,
 ) -> (
     mpsc::Sender<Event>,
     tokio::task::JoinHandle<Terminal<TestBackend>>,
 ) {
     let (events_tx, events_rx) = mpsc::channel(64);
     let endpoint = endpoint.clone();
-    let dir = downloads_dir.to_path_buf();
     let dashboard = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(140, 36)).unwrap();
-        run_app(&mut terminal, events_rx, &endpoint, &dir)
+        run_app(&mut terminal, events_rx, &endpoint)
             .await
             .expect("dashboard");
         terminal
@@ -105,8 +119,8 @@ async fn the_dashboard_adds_pauses_and_shows_a_download() {
     )
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, mut client) = serve().await;
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
 
     // Press "a", paste the URL, and confirm with Enter.
     let url = mock.url().join("from-tui.bin").unwrap().to_string();
@@ -149,7 +163,7 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
     )
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, mut client) = serve().await;
+    let (endpoint, mut client) = serve_into(dir.path()).await;
     client
         .set_limits(SetLimitsParams {
             max_active: Some(1),
@@ -169,7 +183,7 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
     })
     .await;
 
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (events, dashboard) = start_dashboard(&endpoint);
     // dl_1 is selected first; move it below dl_2.
     events.send(shift(KeyCode::Down)).await.unwrap();
     let list = wait_for(&mut client, "the dashboard never moved it", |list| {
@@ -196,10 +210,241 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
 }
 
 #[tokio::test]
+async fn the_add_dialog_adds_with_the_daemon_defaults() {
+    let body = pattern_bytes(256 * 1024);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    client
+        .set_defaults(SetDefaultsParams {
+            connections: Some(2),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let (events, dashboard) = start_dashboard(&endpoint);
+    // Let the first refresh load the defaults before the dialog opens.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let url = mock.url().join("with-defaults.bin").unwrap().to_string();
+    events.send(key(KeyCode::Char('a'))).await.unwrap();
+    events.send(Event::Paste(url.clone())).await.unwrap();
+    events.send(key(KeyCode::Enter)).await.unwrap();
+    wait_for(&mut client, "the dialog never added it", |list| {
+        list.iter()
+            .any(|d| d.url == url && d.status == DownloadStatus::Completed)
+    })
+    .await;
+    assert_eq!(
+        std::fs::read(dir.path().join("with-defaults.bin")).unwrap(),
+        body
+    );
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stopping_the_daemon_from_the_tui_pauses_downloads() {
+    let mock = TestServer::start(
+        pattern_bytes(4 * 1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 64 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let endpoint = IpcEndpoint::test_endpoint(&format!("tui_{id}"));
+    let core = DaemonCore::new();
+    let server = DaemonServer::bind_with_core(&endpoint, core.clone())
+        .await
+        .expect("bind daemon");
+    let daemon = tokio::spawn(async move { server.run().await.unwrap() });
+    let mut client = DaemonClient::connect(&endpoint).await.expect("connect");
+    let added = client
+        .add(add_params(&mock, "slow.bin", dir.path()))
+        .await
+        .unwrap();
+    wait_for(&mut client, "the download never started", |list| {
+        list[0].downloaded_bytes > 0
+    })
+    .await;
+
+    let (events, dashboard) = start_dashboard(&endpoint);
+    events
+        .send(Event::Key(KeyEvent::new(
+            KeyCode::Char('Q'),
+            KeyModifiers::SHIFT,
+        )))
+        .await
+        .unwrap();
+    events.send(key(KeyCode::Char('y'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("the dashboard quits after stopping rdmd")
+        .unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, daemon)
+        .await
+        .expect("rdmd stopped")
+        .unwrap();
+
+    // On Windows a connected client keeps the pipe name alive after rdmd stops
+    // (connecting then says "All pipe instances are busy"), so close this
+    // test's own client too, then give the daemon's connection tasks a moment.
+    drop(client);
+    let start = Instant::now();
+    loop {
+        match DaemonClient::connect(&endpoint).await {
+            Err(ClientError::NotRunning) => break,
+            other => assert!(
+                start.elapsed() < WAIT_TIMEOUT,
+                "rdmd still answers: {:?}",
+                other.map(|_| ())
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let status = core.get_status(&added.id).unwrap().status;
+    assert!(
+        !matches!(status, DownloadStatus::Active | DownloadStatus::Completed),
+        "{status:?}"
+    );
+}
+
+/// On Windows a paste arrives as key presses, so a second pasted link's letters
+/// must not reach the Downloads screen as shortcuts once the first one is added.
+#[tokio::test]
+async fn keys_typed_ahead_of_an_add_are_not_shortcuts() {
+    let mock = TestServer::start(
+        pattern_bytes(4 * 1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 64 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
+
+    let url = mock.url().join("typed.bin").unwrap().to_string();
+    events.send(key(KeyCode::Char('a'))).await.unwrap();
+    for c in url.chars() {
+        events.send(key(KeyCode::Char(c))).await.unwrap();
+    }
+    events.send(key(KeyCode::Enter)).await.unwrap();
+    // The rest of the "paste": pause, cancel, and delete the partial files.
+    for c in "pcd".chars() {
+        events.send(key(KeyCode::Char(c))).await.unwrap();
+    }
+    let list = wait_for(&mut client, "the link was never added", |list| {
+        list.iter().any(|d| d.downloaded_bytes > 0)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status = client.status(&list[0].id).await.unwrap().status;
+    assert_eq!(status, DownloadStatus::Active, "type-ahead acted on it");
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn esc_no_longer_quits_the_dashboard() {
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, _client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
+
+    events.send(key(KeyCode::Esc)).await.unwrap();
+    events.send(key(KeyCode::Char('s'))).await.unwrap();
+    events.send(key(KeyCode::Esc)).await.unwrap();
+    events.send(key(KeyCode::Esc)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!dashboard.is_finished(), "Esc must not quit");
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("q quits")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn settings_saves_the_default_folder_to_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    let new_folder = dir.path().join("from-settings");
+    let (events, dashboard) = start_dashboard(&endpoint);
+    // Let the first refresh load the defaults, so editing starts from them.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    events.send(key(KeyCode::Char('s'))).await.unwrap();
+    events.send(key(KeyCode::Down)).await.unwrap();
+    events.send(key(KeyCode::Down)).await.unwrap();
+    events.send(key(KeyCode::Enter)).await.unwrap();
+    let clear = Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    events.send(clear).await.unwrap();
+    events
+        .send(Event::Paste(new_folder.display().to_string()))
+        .await
+        .unwrap();
+    events.send(key(KeyCode::Enter)).await.unwrap();
+
+    let start = Instant::now();
+    while client.get_defaults().await.unwrap().folder != new_folder {
+        assert!(start.elapsed() < WAIT_TIMEOUT, "the folder was never saved");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+    let text = screen_text(&terminal);
+    assert!(text.contains("Defaults for new downloads saved"), "{text}");
+    assert!(text.contains("from-settings"), "{text}");
+}
+
+#[tokio::test]
+async fn the_logs_screen_shows_the_daemon_log() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        data.path().join("rdmd.log"),
+        "rdmd started\nan older line\nthe newest log line\n",
+    )
+    .unwrap();
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let endpoint = IpcEndpoint::test_endpoint(&format!("tui_{id}"));
+    let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+    let server = DaemonServer::bind_with_core(&endpoint, core)
+        .await
+        .expect("bind daemon");
+    tokio::spawn(async move { server.run().await.unwrap() });
+    let (events, dashboard) = start_dashboard(&endpoint);
+
+    events.send(key(KeyCode::Char('l'))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+    let text = screen_text(&terminal);
+    assert!(text.contains("the newest log line"), "{text}");
+}
+
+#[tokio::test]
 async fn the_dashboard_quits_when_its_event_stream_ends() {
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, _client) = serve().await;
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (endpoint, _client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
     drop(events);
     let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
         .await

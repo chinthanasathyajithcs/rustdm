@@ -1,4 +1,5 @@
 pub mod core;
+pub mod defaults;
 pub mod fair_share;
 pub mod launch;
 pub mod log;

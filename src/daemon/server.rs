@@ -33,6 +33,8 @@ impl DaemonCore {
                     Ok(PingResult {
                         version: crate::VERSION.to_string(),
                         uptime_secs: uptime,
+                        data_dir: self.data_dir().map(|d| d.to_path_buf()),
+                        log_path: self.data_dir().map(crate::daemon::log::log_path),
                     }),
                 )
             }
@@ -48,6 +50,10 @@ impl DaemonCore {
             "daemon.get_limits" => respond(id, Ok(self.limits())),
             "daemon.set_limits" => {
                 respond(id, parse_params(params).and_then(|p| self.set_limits(p)))
+            }
+            "daemon.get_defaults" => respond(id, Ok(self.get_defaults())),
+            "daemon.set_defaults" => {
+                respond(id, parse_params(params).and_then(|p| self.set_defaults(p)))
             }
             "download.add" => respond(id, parse_params(params).and_then(|p| self.add_download(p))),
             "download.pause" => respond(

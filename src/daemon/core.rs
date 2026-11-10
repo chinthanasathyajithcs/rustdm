@@ -1,11 +1,10 @@
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::task::TaskRecord;
-use crate::daemon::{fair_share, queue_order};
+use crate::daemon::{defaults, fair_share, queue_order};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -31,6 +30,8 @@ pub struct DaemonState {
     pub start_time: Instant,
     pub is_shutting_down: bool,
     pub limits: DaemonLimits,
+    /// Defaults for new downloads, as saved.
+    pub defaults: SavedDefaults,
 }
 
 impl DaemonState {
@@ -84,6 +85,8 @@ pub struct DaemonCore {
     pub telemetry_tx: broadcast::Sender<TelemetryTick>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
     store: Option<Arc<QueueStore>>,
+    /// Folder holding the queue file and the log, when the queue is saved.
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for DaemonCore {
@@ -120,6 +123,11 @@ impl DaemonCore {
                 max_bytes_per_sec: 0,
             });
 
+        let defaults = snapshot
+            .as_ref()
+            .map(|s| s.defaults.clone())
+            .unwrap_or_default();
+
         let mut downloads = HashMap::new();
         let mut order = Vec::new();
         let mut next_id = 0;
@@ -143,12 +151,22 @@ impl DaemonCore {
                 start_time: Instant::now(),
                 is_shutting_down: false,
                 limits,
+                defaults,
             })),
             client: build_client(),
             telemetry_tx,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            data_dir: store
+                .as_ref()
+                .and_then(|s| s.path().parent())
+                .map(|p| p.to_path_buf()),
             store: store.map(Arc::new),
         }
+    }
+
+    /// Folder holding the queue file and the log, if this core saves its queue.
+    pub fn data_dir(&self) -> Option<&std::path::Path> {
+        self.data_dir.as_deref()
     }
 
     pub fn shutdown(&self) {
@@ -209,7 +227,11 @@ impl DaemonCore {
     pub fn add_download(&self, params: AddDownloadParams) -> Result<DownloadSummary, RpcError> {
         Url::parse(&params.url)
             .map_err(|e| RpcError::invalid_params(format!("Invalid URL: {}", e)))?;
-        let max_bytes_per_sec = params.max_bytes_per_sec.unwrap_or(0);
+        // Every field the client left out comes from the defaults.
+        let defaults = self.get_defaults();
+        let max_bytes_per_sec = params
+            .max_bytes_per_sec
+            .unwrap_or(defaults.max_bytes_per_sec);
         validate_speed(max_bytes_per_sec)?;
         if let Some(name) = &params.filename {
             if crate::template::sanitize_component(name).is_empty() {
@@ -238,12 +260,10 @@ impl DaemonCore {
 
             state.next_id += 1;
             let id = format!("dl_{}", state.next_id);
-            let directory = params
-                .destination
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let directory = params.destination.unwrap_or(defaults.folder);
             let connections = params
                 .connections
-                .unwrap_or(engine::DEFAULT_CONNECTIONS as usize)
+                .unwrap_or(defaults.connections as usize)
                 .clamp(1, MAX_CONNECTIONS) as u32;
 
             let task = Arc::new(Mutex::new(TaskRecord::new(
@@ -440,6 +460,22 @@ impl DaemonCore {
 
     pub fn limits(&self) -> DaemonLimits {
         self.state.lock().unwrap().limits.clone()
+    }
+
+    /// Defaults for new downloads, with the built-in values filled in.
+    pub fn get_defaults(&self) -> DownloadDefaults {
+        defaults::resolve(&self.state.lock().unwrap().defaults)
+    }
+
+    /// Change the defaults for new downloads; fields left out are kept.
+    pub fn set_defaults(&self, params: SetDefaultsParams) -> Result<DownloadDefaults, RpcError> {
+        let resolved = {
+            let mut state = self.state.lock().unwrap();
+            state.defaults = defaults::updated(&state.defaults, params, validate_speed)?;
+            defaults::resolve(&state.defaults)
+        };
+        self.persist();
+        Ok(resolved)
     }
 
     /// Change the queue limits. When `max_active` drops below the number running,
@@ -711,6 +747,7 @@ impl DaemonCore {
             version: QUEUE_VERSION,
             next_id: state.next_id,
             limits: state.limits.clone(),
+            defaults: state.defaults.clone(),
             downloads,
         }
     }
