@@ -5,7 +5,7 @@ use crate::ipc::transport::IpcEndpoint;
 use crate::tui::action::Action;
 use crate::tui::daemon_link::{listen_for_telemetry, perform, refresh};
 use crate::tui::state::App;
-use crate::tui::{screens, ui, TuiResult, REFRESH_INTERVAL};
+use crate::tui::{screens, TuiResult, REFRESH_INTERVAL};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
@@ -32,7 +32,7 @@ pub async fn run_app<B: Backend>(
     refresh_timer.tick().await;
 
     let result = loop {
-        if let Err(e) = terminal.draw(|frame| ui::render(frame, &mut app)) {
+        if let Err(e) = terminal.draw(|frame| screens::render(frame, &mut app)) {
             break Err(io::Error::other(e.to_string()).into());
         }
         tokio::select! {

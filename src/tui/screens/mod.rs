@@ -12,3 +12,8 @@ pub(crate) fn hit<T: Clone>(areas: &[(Rect, T)], at: Position) -> Option<T> {
         .find(|(rect, _)| rect.contains(at))
         .map(|(_, value)| value.clone())
 }
+
+/// Draw the current screen and record what is clickable in `app.hits`.
+pub fn render(frame: &mut ratatui::Frame, app: &mut crate::tui::state::App) {
+    downloads::render(frame, app);
+}

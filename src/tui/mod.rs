@@ -6,7 +6,8 @@ pub mod format;
 pub mod runtime;
 pub mod screens;
 pub mod state;
-pub mod ui;
+pub mod theme;
+pub mod widgets;
 
 use crate::ipc::client::DaemonClient;
 use crate::ipc::protocol::DownloadStatus;
