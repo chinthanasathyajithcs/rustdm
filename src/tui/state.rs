@@ -65,6 +65,26 @@ impl Tab {
     }
 }
 
+/// The TUI's screens, in the order the header lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Downloads,
+    Settings,
+    Logs,
+}
+
+impl Screen {
+    pub const ALL: [Screen; 3] = [Screen::Downloads, Screen::Settings, Screen::Logs];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Screen::Downloads => "Downloads",
+            Screen::Settings => "Settings",
+            Screen::Logs => "Logs",
+        }
+    }
+}
+
 /// Toolbar buttons, in the order they are drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
@@ -110,6 +130,8 @@ pub enum Mode {
 /// Screen areas the last frame drew, so a mouse click can find what it hit.
 #[derive(Clone, Debug, Default)]
 pub struct HitMap {
+    /// The screen names in the header.
+    pub screens: Vec<(Rect, Screen)>,
     pub buttons: Vec<(Rect, Button)>,
     pub tabs: Vec<(Rect, Tab)>,
     /// One entry per table row on screen, with that row's download id.
@@ -130,6 +152,9 @@ pub struct App {
     pub speed_history: HashMap<String, VecDeque<u64>>,
     pub limits: Option<DaemonLimits>,
     pub connected: bool,
+    pub screen: Screen,
+    /// The Help overlay is drawn over the current screen.
+    pub help_open: bool,
     pub tab: Tab,
     pub selected: Option<String>,
     /// Index of the first visible table row.
@@ -147,6 +172,8 @@ impl Default for App {
             speed_history: HashMap::new(),
             limits: None,
             connected: false,
+            screen: Screen::Downloads,
+            help_open: false,
             tab: Tab::All,
             selected: None,
             table_offset: 0,
@@ -252,6 +279,9 @@ impl App {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use crate::ipc::protocol::SegmentProgress;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
     use std::path::PathBuf;
 
     pub(crate) fn summary(id: &str, status: DownloadStatus) -> DownloadSummary {
@@ -279,6 +309,66 @@ pub(crate) mod test_support {
             .collect();
         app.set_downloads(downloads);
         app
+    }
+
+    pub(crate) fn sample_app() -> App {
+        let mut app = App {
+            connected: true,
+            ..App::default()
+        };
+        app.set_downloads(vec![DownloadSummary {
+            id: "dl_1".to_string(),
+            url: "http://example.com/ubuntu.iso".to_string(),
+            destination: PathBuf::from("/downloads/ubuntu.iso"),
+            filename: "ubuntu.iso".to_string(),
+            status: DownloadStatus::Active,
+            downloaded_bytes: 40 * 1024 * 1024,
+            total_bytes: Some(100 * 1024 * 1024),
+            speed_bps: 2 * 1024 * 1024,
+            eta_secs: Some(30),
+            error_message: None,
+            max_bytes_per_sec: 0,
+        }]);
+        app.apply_tick(TelemetryTick {
+            id: "dl_1".to_string(),
+            downloaded_bytes: 40 * 1024 * 1024,
+            total_bytes: Some(100 * 1024 * 1024),
+            speed_bps: 2 * 1024 * 1024,
+            active_connections: 2,
+            segments: vec![SegmentProgress {
+                start: 0,
+                end: 40 * 1024 * 1024,
+                downloaded_bytes: 40 * 1024 * 1024,
+                state: "completed".to_string(),
+            }],
+            lanes: vec![
+                SegmentProgress {
+                    start: 0,
+                    end: 50 * 1024 * 1024,
+                    downloaded_bytes: 40 * 1024 * 1024,
+                    state: "active".to_string(),
+                },
+                SegmentProgress {
+                    start: 50 * 1024 * 1024,
+                    end: 100 * 1024 * 1024,
+                    downloaded_bytes: 0,
+                    state: "active".to_string(),
+                },
+            ],
+        });
+        app
+    }
+
+    pub(crate) fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
     }
 }
 

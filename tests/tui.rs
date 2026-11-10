@@ -196,6 +196,26 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
 }
 
 #[tokio::test]
+async fn esc_no_longer_quits_the_dashboard() {
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, _client) = serve().await;
+    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+
+    events.send(key(KeyCode::Esc)).await.unwrap();
+    events.send(key(KeyCode::Char('s'))).await.unwrap();
+    events.send(key(KeyCode::Esc)).await.unwrap();
+    events.send(key(KeyCode::Esc)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!dashboard.is_finished(), "Esc must not quit");
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("q quits")
+        .unwrap();
+}
+
+#[tokio::test]
 async fn the_dashboard_quits_when_its_event_stream_ends() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, _client) = serve().await;

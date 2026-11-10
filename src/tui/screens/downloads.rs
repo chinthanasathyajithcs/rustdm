@@ -2,9 +2,8 @@
 
 use crate::ipc::protocol::QueuePosition;
 use crate::tui::action::Action;
-use crate::tui::format::format_speed;
 use crate::tui::screens::hit;
-use crate::tui::state::{App, Button, HitMap, Mode, Tab};
+use crate::tui::state::{App, Button, Mode, Tab};
 use crate::tui::theme;
 use crate::tui::widgets::inspector::render_inspector;
 use crate::tui::widgets::table::render_table;
@@ -40,10 +39,6 @@ pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
 }
 
 fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Some(Action::Quit);
-    }
-
     if let Mode::ConfirmCancel(id) = &app.mode {
         let id = id.clone();
         app.mode = Mode::Browse;
@@ -75,7 +70,6 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
         KeyCode::Down if shift => move_in_queue(app, QueuePosition::Down),
         KeyCode::Char('K') => move_in_queue(app, QueuePosition::Up),
         KeyCode::Char('J') => move_in_queue(app, QueuePosition::Down),
-        KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_selection(-1);
             None
@@ -235,57 +229,21 @@ pub fn tabs_layout(app: &App, area: Rect) -> Vec<(Rect, Tab)> {
     tabs
 }
 
-/// Draw the whole dashboard and record what is clickable in `app.hits`.
-pub fn render(frame: &mut Frame, app: &mut App) {
-    let area = frame.area();
-    let inspector_height = INSPECTOR_HEIGHT.min(area.height.saturating_sub(4 + MIN_TABLE_HEIGHT));
-    let [header, toolbar, tabs, table, inspector, footer] = Layout::vertical([
-        Constraint::Length(1),
+/// Draw the Downloads screen into `area` and record its click targets.
+pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
+    let inspector_height = INSPECTOR_HEIGHT.min(area.height.saturating_sub(2 + MIN_TABLE_HEIGHT));
+    let [toolbar, tabs, table, inspector] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(MIN_TABLE_HEIGHT),
         Constraint::Length(inspector_height),
-        Constraint::Length(1),
     ])
     .areas(area);
 
-    let mut hits = HitMap::default();
-    render_header(frame, app, header);
-    hits.buttons = render_toolbar(frame, toolbar);
-    hits.tabs = render_tabs(frame, app, tabs);
-    hits.rows = render_table(frame, app, table);
+    app.hits.buttons = render_toolbar(frame, toolbar);
+    app.hits.tabs = render_tabs(frame, app, tabs);
+    app.hits.rows = render_table(frame, app, table);
     render_inspector(frame, app, inspector);
-    render_footer(frame, app, footer);
-    app.hits = hits;
-}
-
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let status = if !app.connected {
-        Span::styled("rdmd not connected", theme::ERROR)
-    } else {
-        let limits = match &app.limits {
-            Some(l) if l.max_bytes_per_sec > 0 => format!(
-                "{} at once · speed cap {}",
-                l.max_active,
-                format_speed(l.max_bytes_per_sec)
-            ),
-            Some(l) => format!("{} at once · no speed cap", l.max_active),
-            None => String::new(),
-        };
-        Span::styled(format!("rdmd connected  {limits}"), theme::MUTED)
-    };
-    let total_speed: u64 = app.downloads.iter().map(|d| d.speed_bps).sum();
-    let line = Line::from(vec![
-        Span::styled(" rustdm ", theme::BRAND),
-        Span::raw("  "),
-        status,
-        Span::raw("  "),
-        Span::styled(
-            format!("total {}", format_speed(total_speed)),
-            theme::ACCENT,
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_toolbar(frame: &mut Frame, area: Rect) -> Vec<(Rect, Button)> {
@@ -315,9 +273,11 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<(Rect, Tab)> {
     tabs
 }
 
-fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let line = match (&app.mode, &app.notice) {
-        (Mode::AddUrl(input), _) => {
+/// The footer line while the screen waits for input: the URL being typed or
+/// the cancel question. `None` while browsing.
+pub fn prompt_line(frame: &mut Frame, app: &App, area: Rect) -> Option<Line<'static>> {
+    let line = match &app.mode {
+        Mode::AddUrl(input) => {
             let prompt = "Add URL: ";
             let cursor_x = area.x + (prompt.len() + input.chars().count()) as u16;
             frame.set_cursor_position(Position::new(
@@ -325,18 +285,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 area.y,
             ));
             Line::from(vec![
-                Span::styled(
-                    prompt,
-                    theme::PROMPT,
-                ),
+                Span::styled(prompt, theme::PROMPT),
                 Span::raw(input.clone()),
-                Span::styled(
-                    "   Enter adds · Esc cancels",
-                    theme::DIM,
-                ),
+                Span::styled("   Enter adds · Esc cancels", theme::DIM),
             ])
         }
-        (Mode::ConfirmCancel(id), _) => {
+        Mode::ConfirmCancel(id) => {
             let name = app
                 .downloads
                 .iter()
@@ -344,43 +298,24 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|d| d.filename.as_str())
                 .unwrap_or("");
             Line::from(vec![
-                Span::styled(
-                    format!("Cancel {id} ({name})? "),
-                    theme::CONFIRM,
-                ),
-                Span::styled(
-                    "y cancels · any other key keeps it",
-                    theme::DIM,
-                ),
+                Span::styled(format!("Cancel {id} ({name})? "), theme::CONFIRM),
+                Span::styled("y cancels · any other key keeps it", theme::DIM),
             ])
         }
-        (Mode::Browse, Some(notice)) => {
-            let style = if notice.is_error {
-                theme::ERROR
-            } else {
-                theme::SUCCESS
-            };
-            Line::from(Span::styled(notice.text.clone(), style))
-        }
-        (Mode::Browse, None) => Line::from(Span::styled(
-            "a add · p pause · r resume · c cancel · x remove · ←/→ tabs · ↑/↓ select · ⇧↑/⇧↓ reorder · q quit",
-            theme::DIM,
-        )),
+        Mode::Browse => return None,
     };
-    frame.render_widget(Paragraph::new(line), area);
+    Some(line)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::protocol::DownloadStatus;
-    use crate::ipc::protocol::{DownloadSummary, SegmentProgress, TelemetryTick};
-    use crate::tui::state::test_support::app_with;
+    use crate::tui::state::test_support::{app_with, sample_app, screen_text};
     use crate::tui::state::{App, HitMap};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
-    use std::path::PathBuf;
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -458,10 +393,6 @@ mod tests {
             handle_event(&mut app, &key(KeyCode::Delete)),
             Some(Action::Remove("dl_1".to_string()))
         );
-        assert_eq!(
-            handle_event(&mut app, &key(KeyCode::Char('q'))),
-            Some(Action::Quit)
-        );
     }
 
     #[test]
@@ -515,6 +446,7 @@ mod tests {
                 (Rect::new(0, 5, 80, 1), "dl_1".to_string()),
                 (Rect::new(0, 6, 80, 1), "dl_2".to_string()),
             ],
+            ..HitMap::default()
         };
 
         handle_event(&mut app, &click(3, 6));
@@ -589,71 +521,13 @@ mod tests {
         assert!(narrow.iter().all(|(r, _)| r.right() <= 20));
     }
 
-    fn sample_app() -> App {
-        let mut app = App {
-            connected: true,
-            ..App::default()
-        };
-        app.set_downloads(vec![DownloadSummary {
-            id: "dl_1".to_string(),
-            url: "http://example.com/ubuntu.iso".to_string(),
-            destination: PathBuf::from("/downloads/ubuntu.iso"),
-            filename: "ubuntu.iso".to_string(),
-            status: DownloadStatus::Active,
-            downloaded_bytes: 40 * 1024 * 1024,
-            total_bytes: Some(100 * 1024 * 1024),
-            speed_bps: 2 * 1024 * 1024,
-            eta_secs: Some(30),
-            error_message: None,
-            max_bytes_per_sec: 0,
-        }]);
-        app.apply_tick(TelemetryTick {
-            id: "dl_1".to_string(),
-            downloaded_bytes: 40 * 1024 * 1024,
-            total_bytes: Some(100 * 1024 * 1024),
-            speed_bps: 2 * 1024 * 1024,
-            active_connections: 2,
-            segments: vec![SegmentProgress {
-                start: 0,
-                end: 40 * 1024 * 1024,
-                downloaded_bytes: 40 * 1024 * 1024,
-                state: "completed".to_string(),
-            }],
-            lanes: vec![
-                SegmentProgress {
-                    start: 0,
-                    end: 50 * 1024 * 1024,
-                    downloaded_bytes: 40 * 1024 * 1024,
-                    state: "active".to_string(),
-                },
-                SegmentProgress {
-                    start: 50 * 1024 * 1024,
-                    end: 100 * 1024 * 1024,
-                    downloaded_bytes: 0,
-                    state: "active".to_string(),
-                },
-            ],
-        });
-        app
-    }
-
-    fn screen_text(terminal: &Terminal<TestBackend>) -> String {
-        let buffer = terminal.backend().buffer();
-        let mut text = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                text.push_str(buffer[(x, y)].symbol());
-            }
-            text.push('\n');
-        }
-        text
-    }
-
     #[test]
     fn dashboard_shows_table_details_and_records_click_targets() {
         let mut app = sample_app();
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
-        terminal.draw(|f| render(f, &mut app)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
         let text = screen_text(&terminal);
 
         for expected in [
@@ -680,7 +554,9 @@ mod tests {
         let mut app = sample_app();
         for (w, h) in [(20, 5), (40, 10), (80, 12), (1, 1)] {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-            terminal.draw(|f| render(f, &mut app)).unwrap();
+            terminal
+                .draw(|f| crate::tui::screens::render(f, &mut app))
+                .unwrap();
         }
     }
 
@@ -689,7 +565,9 @@ mod tests {
         let mut app = sample_app();
         app.mode = Mode::AddUrl("http://example.com/a".to_string());
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|f| render(f, &mut app)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
         assert!(screen_text(&terminal).contains("Add URL: http://example.com/a"));
     }
 
@@ -700,7 +578,9 @@ mod tests {
         let name = app.downloads[0].filename.clone();
         app.mode = Mode::ConfirmCancel(id.clone());
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|f| render(f, &mut app)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
         let text = screen_text(&terminal);
         assert!(text.contains(&format!("Cancel {id} ({name})?")), "{text}");
         assert!(text.contains("y cancels"), "{text}");

@@ -10,6 +10,8 @@ pub const BRAND: Style = Style::new()
     .add_modifier(Modifier::BOLD);
 /// Highlights: total speed, the inspector border, the speed graph.
 pub const ACCENT: Style = Style::new().fg(Color::Cyan);
+/// The screen being shown, in the header.
+pub const CURRENT: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
 /// Labels and secondary text.
 pub const MUTED: Style = Style::new().fg(Color::Gray);
 /// Hints and borders that should recede.

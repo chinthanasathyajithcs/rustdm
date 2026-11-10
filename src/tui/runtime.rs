@@ -38,7 +38,7 @@ pub async fn run_app<B: Backend>(
         tokio::select! {
             event = events.recv() => {
                 let Some(event) = event else { break Ok(()) };
-                match screens::downloads::handle_event(&mut app, &event) {
+                match screens::handle_event(&mut app, &event) {
                     Some(Action::Quit) => break Ok(()),
                     Some(action) => {
                         let result = perform(&mut client, &action, downloads_dir).await;
