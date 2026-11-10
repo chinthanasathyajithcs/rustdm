@@ -4,6 +4,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
+use rustdm::daemon::queue_store::QueueStore;
 use rustdm::daemon::{DaemonCore, DaemonServer};
 use rustdm::ipc::client::{ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
@@ -357,6 +358,34 @@ async fn settings_saves_the_default_folder_to_the_daemon() {
     let text = screen_text(&terminal);
     assert!(text.contains("Defaults for new downloads saved"), "{text}");
     assert!(text.contains("from-settings"), "{text}");
+}
+
+#[tokio::test]
+async fn the_logs_screen_shows_the_daemon_log() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        data.path().join("rdmd.log"),
+        "rdmd started\nan older line\nthe newest log line\n",
+    )
+    .unwrap();
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let endpoint = IpcEndpoint::test_endpoint(&format!("tui_{id}"));
+    let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+    let server = DaemonServer::bind_with_core(&endpoint, core)
+        .await
+        .expect("bind daemon");
+    tokio::spawn(async move { server.run().await.unwrap() });
+    let (events, dashboard) = start_dashboard(&endpoint);
+
+    events.send(key(KeyCode::Char('l'))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+    let text = screen_text(&terminal);
+    assert!(text.contains("the newest log line"), "{text}");
 }
 
 #[tokio::test]

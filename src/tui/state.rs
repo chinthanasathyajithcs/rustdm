@@ -6,12 +6,16 @@ use crate::ipc::protocol::{
 };
 use crate::tui::daemon_link::{ActionError, Outcome};
 use crate::tui::dialogs::{Dialog, DialogTarget};
+use crate::tui::screens::logs::LogsState;
 use crate::tui::screens::settings::{SettingsField, SettingsState};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 
 /// Speed samples kept per download for the speed graph: about 30 s at 4 ticks a second.
 pub const SPEED_HISTORY_LEN: usize = 120;
+/// Notices kept for the Logs screen.
+pub const NOTICE_HISTORY: usize = 200;
 
 /// Status filters shown as tabs above the downloads table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,11 +166,16 @@ pub struct App {
     /// Open dialogs; the last one is on top and gets the keys.
     pub dialogs: Vec<Dialog>,
     pub settings: SettingsState,
+    pub logs: LogsState,
+    /// rdmd's log file, as its `ping` reports it.
+    pub log_path: Option<PathBuf>,
     pub tab: Tab,
     pub selected: Option<String>,
     /// Index of the first visible table row.
     pub table_offset: usize,
     pub notice: Option<Notice>,
+    /// Every notice shown, oldest first, up to `NOTICE_HISTORY`.
+    pub history: VecDeque<Notice>,
     pub hits: HitMap,
 }
 
@@ -183,10 +192,13 @@ impl Default for App {
             help_open: false,
             dialogs: Vec::new(),
             settings: SettingsState::default(),
+            logs: LogsState::default(),
+            log_path: None,
             tab: Tab::All,
             selected: None,
             table_offset: 0,
             notice: None,
+            history: VecDeque::new(),
             hits: HitMap::default(),
         }
     }
@@ -238,10 +250,15 @@ impl App {
     }
 
     pub fn notify(&mut self, text: impl Into<String>, is_error: bool) {
-        self.notice = Some(Notice {
+        let notice = Notice {
             text: text.into(),
             is_error,
-        });
+        };
+        if self.history.len() == NOTICE_HISTORY {
+            self.history.pop_front();
+        }
+        self.history.push_back(notice.clone());
+        self.notice = Some(notice);
     }
 
     pub fn select_tab(&mut self, tab: Tab) {

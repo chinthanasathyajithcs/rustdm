@@ -4,7 +4,8 @@ use crate::ipc::client::DaemonClient;
 use crate::ipc::transport::IpcEndpoint;
 use crate::tui::action::Action;
 use crate::tui::daemon_link::{listen_for_telemetry, perform, refresh};
-use crate::tui::state::App;
+use crate::tui::screens::logs;
+use crate::tui::state::{App, Screen};
 use crate::tui::{screens, TuiResult, REFRESH_INTERVAL};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
@@ -51,7 +52,12 @@ pub async fn run_app<B: Backend>(
                 }
             }
             Some(tick) = tick_rx.recv() => app.apply_tick(tick),
-            _ = refresh_timer.tick() => refresh(&mut client, endpoint, &mut app).await,
+            _ = refresh_timer.tick() => {
+                refresh(&mut client, endpoint, &mut app).await;
+                if app.screen == Screen::Logs {
+                    logs::reload(&mut app);
+                }
+            }
         }
     };
     telemetry.abort();

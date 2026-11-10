@@ -134,6 +134,9 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
 fn show(app: &mut App, screen: Screen) -> Option<Action> {
     app.screen = screen;
     app.help_open = false;
+    if screen == Screen::Logs {
+        logs::reload(app);
+    }
     None
 }
 
@@ -145,7 +148,7 @@ fn on_screen(app: &mut App, event: &Event) -> Option<Action> {
     match app.screen {
         Screen::Downloads => downloads::handle_event(app, event),
         Screen::Settings => settings::handle_event(app, event),
-        Screen::Logs => None,
+        Screen::Logs => logs::handle_event(app, event),
     }
 }
 

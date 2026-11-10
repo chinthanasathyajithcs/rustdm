@@ -44,6 +44,9 @@ const SETTINGS_KEYS: &[(&str, &str)] = &[
 ];
 
 const LOGS_KEYS: &[(&str, &str)] = &[
+    ("↑/↓", "Scroll"),
+    ("PgUp/PgDn", "Scroll a page"),
+    ("G", "Newest line"),
     ("Esc", "Back"),
     ("s", "Settings"),
     ("?", "Help"),

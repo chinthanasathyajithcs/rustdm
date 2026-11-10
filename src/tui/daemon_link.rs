@@ -81,6 +81,8 @@ pub(crate) async fn refresh(
         Ok(list) => {
             if !app.connected {
                 app.notice = None;
+                // Ask where the log is once per connection; an older rdmd doesn't say.
+                app.log_path = conn.ping().await.ok().and_then(|p| p.log_path);
             }
             app.connected = true;
             app.set_downloads(list);
