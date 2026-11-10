@@ -37,6 +37,7 @@ pub async fn run_app<B: Backend>(
         tokio::select! {
             event = events.recv() => {
                 let Some(event) = event else { break Ok(()) };
+                let typing = !app.dialogs.is_empty() || app.settings.is_editing();
                 match screens::handle_event(&mut app, &event) {
                     Some(Action::Quit) => break Ok(()),
                     Some(action) => {
@@ -45,6 +46,9 @@ pub async fn run_app<B: Backend>(
                         app.apply_outcome(result);
                         if stopped {
                             break Ok(());
+                        }
+                        if typing {
+                            drop_type_ahead(&mut events);
                         }
                         refresh(&mut client, endpoint, &mut app).await;
                     }
@@ -62,4 +66,12 @@ pub async fn run_app<B: Backend>(
     };
     telemetry.abort();
     result
+}
+
+/// Drop events that queued up while a dialog's or a field's submit was being
+/// carried out. Windows has no paste events, so a pasted list arrives as key
+/// presses with Enter between links; without this the letters after the first
+/// Enter would land on the screen below as shortcuts (`c` cancel, `d` delete).
+fn drop_type_ahead(events: &mut mpsc::Receiver<Event>) {
+    while events.try_recv().is_ok() {}
 }

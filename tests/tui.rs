@@ -303,6 +303,46 @@ async fn stopping_the_daemon_from_the_tui_pauses_downloads() {
     );
 }
 
+/// On Windows a paste arrives as key presses, so a second pasted link's letters
+/// must not reach the Downloads screen as shortcuts once the first one is added.
+#[tokio::test]
+async fn keys_typed_ahead_of_an_add_are_not_shortcuts() {
+    let mock = TestServer::start(
+        pattern_bytes(4 * 1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 64 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
+
+    let url = mock.url().join("typed.bin").unwrap().to_string();
+    events.send(key(KeyCode::Char('a'))).await.unwrap();
+    for c in url.chars() {
+        events.send(key(KeyCode::Char(c))).await.unwrap();
+    }
+    events.send(key(KeyCode::Enter)).await.unwrap();
+    // The rest of the "paste": pause, cancel, and delete the partial files.
+    for c in "pcd".chars() {
+        events.send(key(KeyCode::Char(c))).await.unwrap();
+    }
+    let list = wait_for(&mut client, "the link was never added", |list| {
+        list.iter().any(|d| d.downloaded_bytes > 0)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let status = client.status(&list[0].id).await.unwrap().status;
+    assert_eq!(status, DownloadStatus::Active, "type-ahead acted on it");
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+}
+
 #[tokio::test]
 async fn esc_no_longer_quits_the_dashboard() {
     let dir = tempfile::tempdir().unwrap();

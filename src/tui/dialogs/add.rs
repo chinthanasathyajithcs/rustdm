@@ -2,6 +2,7 @@
 //! and speed cap starting from the daemon's defaults.
 
 use super::{dialog_area, draw_box, put, render_buttons, DialogResult, DialogTarget};
+use crate::dirs::{full_folder, home_dir};
 use crate::engine::MAX_CONNECTIONS;
 use crate::ipc::protocol::{
     AddDownloadParams, DownloadDefaults, CODE_DESTINATION_EXISTS, CODE_INVALID_PATH,
@@ -245,11 +246,12 @@ impl AddDialog {
             return Err((AddField::Url, ONLY_HTTP.to_string()));
         }
         // The daemon runs in another folder, so send it a full path.
+        let home = home_dir();
         let destination = self
             .optional(AddField::Folder)
-            .map(std::path::absolute)
+            .map(|t| full_folder(t, home.as_deref()))
             .transpose()
-            .map_err(|e| (AddField::Folder, format!("Can't use this folder: {e}")))?;
+            .map_err(|e| (AddField::Folder, e))?;
         let connections = self
             .optional(AddField::Connections)
             .map(|t| parse_count(t, 1, MAX_CONNECTIONS))
@@ -502,6 +504,26 @@ mod tests {
             dialog.error(AddField::Connections),
             Some("Enter a whole number from 1 to 16")
         );
+    }
+
+    #[test]
+    fn a_tilde_folder_is_the_home_folder_and_a_relative_one_is_refused() {
+        let clear = Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let mut dialog = AddDialog::new(Some(&defaults()), Some("https://example.com/a"));
+        focus(&mut dialog, AddField::Folder);
+        dialog.handle_event(&clear);
+        type_text(&mut dialog, "Videos");
+        assert_eq!(press(&mut dialog, KeyCode::Enter), DialogResult::Used);
+        assert_eq!(
+            dialog.error(AddField::Folder),
+            Some("Enter a full path, such as ~/Downloads")
+        );
+
+        dialog.handle_event(&clear);
+        type_text(&mut dialog, "~/Videos");
+        let params = submitted(press(&mut dialog, KeyCode::Enter));
+        let home = crate::dirs::home_dir().expect("a home folder");
+        assert_eq!(params[0].destination, Some(home.join("Videos")));
     }
 
     #[test]

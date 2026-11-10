@@ -31,7 +31,9 @@ impl TextField {
     /// Edit the text for `key`. Returns false for keys a field doesn't use,
     /// such as Enter, Tab and Esc, so the dialog holding it can act on them.
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Windows reports AltGr as Ctrl+Alt; those keys are characters, not shortcuts.
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT);
         let len = self.text.chars().count();
         match key.code {
             KeyCode::Char('u') if ctrl => {
@@ -123,6 +125,21 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
     use ratatui::Terminal;
+
+    #[test]
+    fn altgr_characters_are_typed() {
+        // Windows reports AltGr as Ctrl+Alt, which is how `\`, `@` and `~` are typed on many layouts.
+        let mut field = TextField::new("C:");
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        for c in ['\\', '@', '~'] {
+            assert!(
+                field.handle_key(&KeyEvent::new(KeyCode::Char(c), altgr)),
+                "{c}"
+            );
+        }
+        assert_eq!(field.text(), "C:\\@~");
+        assert!(!field.handle_key(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
 
     fn press(field: &mut TextField, code: KeyCode) -> bool {
         field.handle_key(&KeyEvent::new(code, KeyModifiers::NONE))

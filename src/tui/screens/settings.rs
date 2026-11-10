@@ -2,6 +2,7 @@
 //! downloads, each field edited in place and saved straight to the daemon.
 
 use crate::daemon::core::MAX_ACTIVE_LIMIT;
+use crate::dirs::{full_folder, home_dir};
 use crate::engine::MAX_CONNECTIONS;
 use crate::ipc::protocol::{SetDefaultsParams, SetLimitsParams};
 use crate::tui::action::Action;
@@ -228,10 +229,7 @@ fn parse_field(field: SettingsField, text: &str) -> Result<Action, String> {
         }
         SettingsField::TotalSpeed => limits(None, Some(parse_speed(text)?)),
         SettingsField::Folder => {
-            if text.is_empty() {
-                return Err("Enter a folder".into());
-            }
-            let folder = std::path::absolute(text).map_err(|e| e.to_string())?;
+            let folder = full_folder(text, home_dir().as_deref())?;
             defaults(SetDefaultsParams {
                 folder: Some(folder),
                 ..Default::default()
@@ -537,6 +535,32 @@ mod tests {
         assert!(
             app.settings.editing.is_some(),
             "a click on the selected field edits it"
+        );
+    }
+
+    #[test]
+    fn a_tilde_folder_saves_under_the_home_folder_and_a_relative_one_is_refused() {
+        let mut app = settings_app();
+        send(&mut app, key(KeyCode::Down));
+        send(&mut app, key(KeyCode::Down));
+        send(&mut app, key(KeyCode::Enter));
+        send(&mut app, ctrl('u'));
+        type_text(&mut app, "Videos");
+        assert_eq!(send(&mut app, key(KeyCode::Enter)), None);
+        assert_eq!(
+            app.settings.error.as_deref(),
+            Some("Enter a full path, such as ~/Downloads")
+        );
+
+        send(&mut app, ctrl('u'));
+        type_text(&mut app, "~/Videos");
+        let home = crate::dirs::home_dir().expect("a home folder");
+        assert_eq!(
+            send(&mut app, key(KeyCode::Enter)),
+            Some(Action::SetDefaults(SetDefaultsParams {
+                folder: Some(home.join("Videos")),
+                ..Default::default()
+            }))
         );
     }
 
