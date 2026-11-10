@@ -7,7 +7,6 @@ use crate::ipc::transport::IpcEndpoint;
 use crate::tui::action::Action;
 use crate::tui::format::status_label;
 use crate::tui::state::App;
-use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -88,6 +87,8 @@ pub(crate) async fn refresh(
             if let Ok(limits) = conn.get_limits().await {
                 app.limits = Some(limits);
             }
+            // An rdmd from before defaults existed has none to report.
+            app.defaults = conn.get_defaults().await.ok();
         }
         Err(e) => {
             app.connected = false;
@@ -101,7 +102,6 @@ pub(crate) async fn refresh(
 pub(crate) async fn perform(
     client: &mut Option<DaemonClient>,
     action: &Action,
-    downloads_dir: &Path,
 ) -> Result<Outcome, ActionError> {
     let Some(conn) = client.as_mut() else {
         return Err(ClientError::NotRunning.into());
@@ -111,7 +111,8 @@ pub(crate) async fn perform(
             let s = conn
                 .add(AddDownloadParams {
                     url: url.clone(),
-                    destination: Some(downloads_dir.to_path_buf()),
+                    // The daemon fills in its default folder.
+                    destination: None,
                     filename: None,
                     connections: None,
                     max_bytes_per_sec: None,

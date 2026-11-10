@@ -265,3 +265,58 @@ async fn rdm_moves_and_caps_downloads_and_falls_back_to_plain_output() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_defaults_sets_and_prints() {
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+    let dest = downloads.path().to_string_lossy().into_owned();
+
+    tokio::task::block_in_place(|| {
+        rdm.ok(&["daemon", "start"]);
+        assert!(rdm.ok(&["defaults"]).contains("Connections: 8"));
+        let set = rdm.ok(&[
+            "defaults",
+            "--dir",
+            &dest,
+            "--connections",
+            "3",
+            "--speed",
+            "1M",
+        ]);
+        assert!(set.contains(&format!("Folder: {dest}")), "{set}");
+        assert!(set.contains("Connections: 3"), "{set}");
+        assert!(set.contains("1.0 MiB/s"), "{set}");
+        assert_eq!(rdm.ok(&["defaults"]), set);
+
+        let bad = rdm.run(&["defaults", "--connections", "40"]);
+        assert!(!bad.status.success());
+        assert!(
+            String::from_utf8_lossy(&bad.stderr).contains("connections: must be between 1 and 16")
+        );
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_add_without_dir_follows_the_default_folder() {
+    let body = pattern_bytes(256 * 1024);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+    let url = mock.url().to_string();
+    let dest = downloads.path().to_string_lossy().into_owned();
+
+    tokio::task::block_in_place(|| {
+        rdm.ok(&["daemon", "start"]);
+        rdm.ok(&["defaults", "--dir", &dest]);
+        let added = rdm.ok(&["add", &url, "--name", "follows.bin"]);
+        assert!(added.contains(&dest), "{added}");
+        rdm.wait_for_list("completed");
+    });
+    assert_eq!(
+        std::fs::read(downloads.path().join("follows.bin")).unwrap(),
+        body
+    );
+}

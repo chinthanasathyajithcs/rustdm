@@ -10,7 +10,6 @@ use ratatui::backend::Backend;
 use ratatui::crossterm::event::Event;
 use ratatui::Terminal;
 use std::io;
-use std::path::Path;
 use tokio::sync::mpsc;
 
 /// Run the dashboard on any ratatui backend, reading terminal events from `events`.
@@ -19,7 +18,6 @@ pub async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,
     mut events: mpsc::Receiver<Event>,
     endpoint: &IpcEndpoint,
-    downloads_dir: &Path,
 ) -> TuiResult<()> {
     let mut client = Some(DaemonClient::connect(endpoint).await?);
     let mut app = App::default();
@@ -41,7 +39,7 @@ pub async fn run_app<B: Backend>(
                 match screens::handle_event(&mut app, &event) {
                     Some(Action::Quit) => break Ok(()),
                     Some(action) => {
-                        let result = perform(&mut client, &action, downloads_dir).await;
+                        let result = perform(&mut client, &action).await;
                         app.apply_outcome(result);
                         refresh(&mut client, endpoint, &mut app).await;
                     }

@@ -24,7 +24,6 @@ use ratatui::prelude::CrosstermBackend;
 use ratatui::Terminal;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -40,7 +39,7 @@ pub type TuiResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Run the dashboard in the real terminal: raw mode, alternate screen, mouse
 /// capture and bracketed paste, all undone on exit or panic.
-pub async fn run_interactive(endpoint: &IpcEndpoint, downloads_dir: &Path) -> TuiResult<()> {
+pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
     install_restore_hook();
     let mut terminal = enter_terminal()?;
     let (tx, rx) = mpsc::channel(64);
@@ -53,7 +52,7 @@ pub async fn run_interactive(endpoint: &IpcEndpoint, downloads_dir: &Path) -> Tu
         }
     });
 
-    let result = run_app(&mut terminal, rx, endpoint, downloads_dir).await;
+    let result = run_app(&mut terminal, rx, endpoint).await;
     restore_terminal();
     let _ = terminal.show_cursor();
     result

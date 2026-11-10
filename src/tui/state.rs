@@ -1,7 +1,9 @@
 //! The TUI's state: what the daemon reported, what the user selected, and
 //! what the last frame drew.
 
-use crate::ipc::protocol::{DaemonLimits, DownloadStatus, DownloadSummary, TelemetryTick};
+use crate::ipc::protocol::{
+    DaemonLimits, DownloadDefaults, DownloadStatus, DownloadSummary, TelemetryTick,
+};
 use crate::tui::daemon_link::{ActionError, Outcome};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
@@ -151,6 +153,8 @@ pub struct App {
     pub ticks: HashMap<String, TelemetryTick>,
     pub speed_history: HashMap<String, VecDeque<u64>>,
     pub limits: Option<DaemonLimits>,
+    /// What new downloads start with, as the daemon reports it.
+    pub defaults: Option<DownloadDefaults>,
     pub connected: bool,
     pub screen: Screen,
     /// The Help overlay is drawn over the current screen.
@@ -171,6 +175,7 @@ impl Default for App {
             ticks: HashMap::new(),
             speed_history: HashMap::new(),
             limits: None,
+            defaults: None,
             connected: false,
             screen: Screen::Downloads,
             help_open: false,

@@ -5,7 +5,6 @@ use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::*;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -217,7 +216,11 @@ impl DaemonCore {
     pub fn add_download(&self, params: AddDownloadParams) -> Result<DownloadSummary, RpcError> {
         Url::parse(&params.url)
             .map_err(|e| RpcError::invalid_params(format!("Invalid URL: {}", e)))?;
-        let max_bytes_per_sec = params.max_bytes_per_sec.unwrap_or(0);
+        // Every field the client left out comes from the defaults.
+        let defaults = self.get_defaults();
+        let max_bytes_per_sec = params
+            .max_bytes_per_sec
+            .unwrap_or(defaults.max_bytes_per_sec);
         validate_speed(max_bytes_per_sec)?;
         if let Some(name) = &params.filename {
             if crate::template::sanitize_component(name).is_empty() {
@@ -246,12 +249,10 @@ impl DaemonCore {
 
             state.next_id += 1;
             let id = format!("dl_{}", state.next_id);
-            let directory = params
-                .destination
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let directory = params.destination.unwrap_or(defaults.folder);
             let connections = params
                 .connections
-                .unwrap_or(engine::DEFAULT_CONNECTIONS as usize)
+                .unwrap_or(defaults.connections as usize)
                 .clamp(1, MAX_CONNECTIONS) as u32;
 
             let task = Arc::new(Mutex::new(TaskRecord::new(

@@ -8,7 +8,8 @@ use rustdm::engine::{
 };
 use rustdm::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
-    AddDownloadParams, DaemonLimits, DownloadSummary, QueuePosition, SetLimitsParams,
+    AddDownloadParams, DaemonLimits, DownloadDefaults, DownloadSummary, QueuePosition,
+    SetDefaultsParams, SetLimitsParams,
 };
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::tui::format::{
@@ -68,14 +69,15 @@ enum Commands {
     /// Add a download to the background daemon, starting the daemon if needed
     Add {
         url: String,
-        /// Folder to save into (default: your Downloads folder)
+        /// Folder to save into (default: the folder `rdm defaults` shows)
         #[arg(long)]
         dir: Option<PathBuf>,
         /// File name to save as (default: taken from the server)
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value_t = 8)]
-        connections: usize,
+        /// Connections for this download (default: the number `rdm defaults` shows)
+        #[arg(long)]
+        connections: Option<usize>,
         /// Speed cap for this download alone, such as 500K or 2M
         #[arg(long, value_parser = parse_speed)]
         max_speed: Option<u64>,
@@ -113,6 +115,18 @@ enum Commands {
         /// Combined speed cap such as 500K, 2M or 1.5MiB (K = 1024 bytes); 0 or "off" removes it
         #[arg(long, value_parser = parse_speed)]
         max_speed: Option<u64>,
+    },
+    /// Show or change the folder, connections and speed cap new downloads start with
+    Defaults {
+        /// Folder new downloads save into
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Connections each new download opens, 1 to 16
+        #[arg(long)]
+        connections: Option<u32>,
+        /// Speed cap for each new download such as 500K or 2M; 0 or "off" removes it
+        #[arg(long, value_parser = parse_speed)]
+        speed: Option<u64>,
     },
     /// Open the interactive dashboard (what plain `rdm` does)
     Tui {
@@ -213,7 +227,7 @@ async fn run(cli: Cli) -> CliResult {
                 url,
                 destination: dir,
                 filename: name,
-                connections: Some(connections),
+                connections,
                 max_bytes_per_sec: max_speed,
             };
             add(&endpoint, params).await
@@ -256,6 +270,11 @@ async fn run(cli: Cli) -> CliResult {
             max_active,
             max_speed,
         } => limits(&endpoint, max_active, max_speed).await,
+        Commands::Defaults {
+            dir,
+            connections,
+            speed,
+        } => defaults(&endpoint, dir, connections, speed).await,
         Commands::Tui { plain } => tui(&endpoint, plain).await,
         Commands::Daemon { action } => match action {
             DaemonAction::Start => daemon_start(&endpoint).await,
@@ -278,7 +297,7 @@ async fn tui(endpoint: &IpcEndpoint, plain: bool) -> CliResult {
     }
     // Start the daemon before taking over the screen, so startup errors print normally.
     start_daemon(endpoint).await?;
-    run_interactive(endpoint, &default_downloads_dir()).await
+    run_interactive(endpoint).await
 }
 
 async fn download_foreground(url: &str, out: String, connections: u32) -> CliResult {
@@ -396,18 +415,18 @@ async fn start_daemon(endpoint: &IpcEndpoint) -> Result<DaemonClient, ClientErro
 
 async fn add(endpoint: &IpcEndpoint, params: AddDownloadParams) -> CliResult {
     url::Url::parse(&params.url)?;
-    // The daemon runs in another directory, so send it an absolute path.
-    let dir = std::path::absolute(
-        params
-            .destination
-            .clone()
-            .unwrap_or_else(default_downloads_dir),
-    )?;
+    // The daemon runs in another directory, so send it an absolute path. With
+    // no --dir the daemon uses its default folder.
+    let destination = params
+        .destination
+        .clone()
+        .map(std::path::absolute)
+        .transpose()?;
 
     let summary = start_daemon(endpoint)
         .await?
         .add(AddDownloadParams {
-            destination: Some(dir.clone()),
+            destination,
             ..params
         })
         .await?;
@@ -415,8 +434,30 @@ async fn add(endpoint: &IpcEndpoint, params: AddDownloadParams) -> CliResult {
         "Added {} ({}, saving to {})",
         summary.id,
         status_label(summary.status),
-        dir.display()
+        summary.destination.display()
     );
+    Ok(())
+}
+
+async fn defaults(
+    endpoint: &IpcEndpoint,
+    dir: Option<PathBuf>,
+    connections: Option<u32>,
+    speed: Option<u64>,
+) -> CliResult {
+    let mut client = DaemonClient::connect(endpoint).await?;
+    let defaults = if dir.is_none() && connections.is_none() && speed.is_none() {
+        client.get_defaults().await?
+    } else {
+        client
+            .set_defaults(SetDefaultsParams {
+                folder: dir.map(std::path::absolute).transpose()?,
+                connections,
+                max_bytes_per_sec: speed,
+            })
+            .await?
+    };
+    println!("{}", format_defaults(&defaults));
     Ok(())
 }
 
@@ -532,6 +573,15 @@ fn format_limits(limits: &DaemonLimits) -> String {
     )
 }
 
+fn format_defaults(defaults: &DownloadDefaults) -> String {
+    format!(
+        "Folder: {}\nConnections: {}\nSpeed cap per download: {}",
+        defaults.folder.display(),
+        defaults.connections,
+        format_speed_cap(defaults.max_bytes_per_sec)
+    )
+}
+
 fn format_uptime(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 {
@@ -589,6 +639,18 @@ mod tests {
         assert_eq!(
             progress_line(3 * MIB, None, MIB),
             "[rdm] 3.0 MiB  1.0 MiB/s"
+        );
+    }
+
+    #[test]
+    fn defaults_print_folder_connections_and_speed_in_words() {
+        assert_eq!(
+            format_defaults(&DownloadDefaults {
+                folder: "/dl".into(),
+                connections: 8,
+                max_bytes_per_sec: 0
+            }),
+            "Folder: /dl\nConnections: 8\nSpeed cap per download: unlimited"
         );
     }
 }

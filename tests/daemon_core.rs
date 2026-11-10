@@ -3,8 +3,9 @@ use rustdm::daemon::{DaemonCore, DaemonServer};
 use rustdm::dirs::default_downloads_dir;
 use rustdm::ipc::client::DaemonClient;
 use rustdm::ipc::protocol::{
-    AddDownloadParams, DownloadIdParam, DownloadStatus, DownloadSummary, PingResult, RpcId,
-    RpcMessage, RpcRequest, SetDefaultsParams, CODE_DOWNLOAD_NOT_FOUND, CODE_INVALID_PARAMS,
+    AddDownloadParams, CancelDownloadParams, DownloadIdParam, DownloadStatus, DownloadSummary,
+    PingResult, RpcId, RpcMessage, RpcRequest, SetDefaultsParams, CODE_DOWNLOAD_NOT_FOUND,
+    CODE_INVALID_PARAMS,
 };
 use rustdm::ipc::transport::{IpcConnection, IpcEndpoint};
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
@@ -485,4 +486,74 @@ async fn defaults_can_be_read_and_changed_over_ipc() {
         .await
         .unwrap_err();
     assert_eq!(err.to_string(), "connections: must be between 1 and 16");
+}
+
+async fn throttled_server() -> TestServer {
+    TestServer::start(
+        pattern_bytes(1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 32 * 1024,
+        },
+    )
+    .await
+}
+
+fn add_without_options(url: String) -> AddDownloadParams {
+    AddDownloadParams {
+        url,
+        destination: None,
+        filename: None,
+        connections: None,
+        max_bytes_per_sec: None,
+    }
+}
+
+#[tokio::test]
+async fn add_without_a_destination_uses_the_default_folder() {
+    let mock = throttled_server().await;
+    let folder = tempfile::tempdir().unwrap();
+    let core = DaemonCore::new();
+    core.set_defaults(SetDefaultsParams {
+        folder: Some(folder.path().to_path_buf()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let summary = core
+        .add_download(add_without_options(mock.url().to_string()))
+        .unwrap();
+    assert_eq!(summary.destination, folder.path());
+    core.cancel_download(CancelDownloadParams {
+        id: summary.id,
+        delete_partial: true,
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn add_takes_connections_and_speed_from_the_defaults() {
+    let mock = throttled_server().await;
+    let folder = tempfile::tempdir().unwrap();
+    let core = DaemonCore::new();
+    core.set_defaults(SetDefaultsParams {
+        folder: Some(folder.path().to_path_buf()),
+        connections: Some(3),
+        max_bytes_per_sec: Some(64 * 1024),
+    })
+    .unwrap();
+
+    let summary = core
+        .add_download(add_without_options(mock.url().to_string()))
+        .unwrap();
+    assert_eq!(summary.max_bytes_per_sec, 64 * 1024);
+    let connections = core.state.lock().unwrap().downloads[&summary.id]
+        .lock()
+        .unwrap()
+        .connections;
+    assert_eq!(connections, 3);
+    core.cancel_download(CancelDownloadParams {
+        id: summary.id,
+        delete_partial: true,
+    })
+    .unwrap();
 }

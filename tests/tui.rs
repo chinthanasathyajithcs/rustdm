@@ -6,7 +6,9 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use rustdm::daemon::{DaemonCore, DaemonServer};
 use rustdm::ipc::client::DaemonClient;
-use rustdm::ipc::protocol::{AddDownloadParams, DownloadStatus, DownloadSummary, SetLimitsParams};
+use rustdm::ipc::protocol::{
+    AddDownloadParams, DownloadStatus, DownloadSummary, SetDefaultsParams, SetLimitsParams,
+};
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
 use rustdm::tui::{run_app, run_plain};
@@ -17,6 +19,19 @@ use tokio::sync::mpsc;
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A daemon whose default folder is `folder`, so no test writes to the real Downloads.
+async fn serve_into(folder: &Path) -> (IpcEndpoint, DaemonClient) {
+    let (endpoint, mut client) = serve().await;
+    client
+        .set_defaults(SetDefaultsParams {
+            folder: Some(folder.to_path_buf()),
+            ..Default::default()
+        })
+        .await
+        .expect("set defaults");
+    (endpoint, client)
+}
 
 async fn serve() -> (IpcEndpoint, DaemonClient) {
     let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -77,17 +92,15 @@ fn screen_text(terminal: &Terminal<TestBackend>) -> String {
 /// Start the dashboard in the background; it returns its terminal when it quits.
 fn start_dashboard(
     endpoint: &IpcEndpoint,
-    downloads_dir: &Path,
 ) -> (
     mpsc::Sender<Event>,
     tokio::task::JoinHandle<Terminal<TestBackend>>,
 ) {
     let (events_tx, events_rx) = mpsc::channel(64);
     let endpoint = endpoint.clone();
-    let dir = downloads_dir.to_path_buf();
     let dashboard = tokio::spawn(async move {
         let mut terminal = Terminal::new(TestBackend::new(140, 36)).unwrap();
-        run_app(&mut terminal, events_rx, &endpoint, &dir)
+        run_app(&mut terminal, events_rx, &endpoint)
             .await
             .expect("dashboard");
         terminal
@@ -105,8 +118,8 @@ async fn the_dashboard_adds_pauses_and_shows_a_download() {
     )
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, mut client) = serve().await;
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
 
     // Press "a", paste the URL, and confirm with Enter.
     let url = mock.url().join("from-tui.bin").unwrap().to_string();
@@ -149,7 +162,7 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
     )
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, mut client) = serve().await;
+    let (endpoint, mut client) = serve_into(dir.path()).await;
     client
         .set_limits(SetLimitsParams {
             max_active: Some(1),
@@ -169,7 +182,7 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
     })
     .await;
 
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (events, dashboard) = start_dashboard(&endpoint);
     // dl_1 is selected first; move it below dl_2.
     events.send(shift(KeyCode::Down)).await.unwrap();
     let list = wait_for(&mut client, "the dashboard never moved it", |list| {
@@ -198,8 +211,8 @@ async fn the_dashboard_reorders_the_queue_and_resumes_downloads() {
 #[tokio::test]
 async fn esc_no_longer_quits_the_dashboard() {
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, _client) = serve().await;
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (endpoint, _client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
 
     events.send(key(KeyCode::Esc)).await.unwrap();
     events.send(key(KeyCode::Char('s'))).await.unwrap();
@@ -218,8 +231,8 @@ async fn esc_no_longer_quits_the_dashboard() {
 #[tokio::test]
 async fn the_dashboard_quits_when_its_event_stream_ends() {
     let dir = tempfile::tempdir().unwrap();
-    let (endpoint, _client) = serve().await;
-    let (events, dashboard) = start_dashboard(&endpoint, dir.path());
+    let (endpoint, _client) = serve_into(dir.path()).await;
+    let (events, dashboard) = start_dashboard(&endpoint);
     drop(events);
     let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
         .await
