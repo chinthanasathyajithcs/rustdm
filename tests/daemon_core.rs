@@ -1,7 +1,10 @@
-use rustdm::daemon::DaemonServer;
+use rustdm::daemon::queue_store::QueueStore;
+use rustdm::daemon::{DaemonCore, DaemonServer};
+use rustdm::dirs::default_downloads_dir;
+use rustdm::ipc::client::DaemonClient;
 use rustdm::ipc::protocol::{
     AddDownloadParams, DownloadIdParam, DownloadStatus, DownloadSummary, PingResult, RpcId,
-    RpcMessage, RpcRequest, CODE_DOWNLOAD_NOT_FOUND,
+    RpcMessage, RpcRequest, SetDefaultsParams, CODE_DOWNLOAD_NOT_FOUND, CODE_INVALID_PARAMS,
 };
 use rustdm::ipc::transport::{IpcConnection, IpcEndpoint};
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
@@ -340,4 +343,146 @@ async fn test_daemon_telemetry_streaming() {
         got_tick,
         "expected at least one telemetry.tick notification"
     );
+}
+
+#[test]
+fn defaults_start_as_the_downloads_folder_and_eight_connections() {
+    let defaults = DaemonCore::new().get_defaults();
+    assert_eq!(defaults.folder, default_downloads_dir());
+    assert_eq!(defaults.connections, 8);
+    assert_eq!(defaults.max_bytes_per_sec, 0);
+}
+
+#[test]
+fn set_defaults_changes_only_the_fields_given() {
+    let core = DaemonCore::new();
+    let dir = tempfile::tempdir().unwrap();
+    let after = core
+        .set_defaults(SetDefaultsParams {
+            folder: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(after.folder, dir.path());
+    assert_eq!(after.connections, 8);
+
+    let after = core
+        .set_defaults(SetDefaultsParams {
+            connections: Some(4),
+            max_bytes_per_sec: Some(2 * 1024 * 1024),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(after.folder, dir.path(), "folder kept");
+    assert_eq!(after.connections, 4);
+    assert_eq!(after.max_bytes_per_sec, 2 * 1024 * 1024);
+    assert_eq!(core.get_defaults(), after);
+}
+
+fn rejection(core: &DaemonCore, params: SetDefaultsParams) -> String {
+    let err = core.set_defaults(params).expect_err("must be rejected");
+    assert_eq!(err.code, CODE_INVALID_PARAMS);
+    err.message
+}
+
+#[test]
+fn bad_defaults_are_rejected_with_the_field_named() {
+    let core = DaemonCore::new();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let set = |folder: Option<std::path::PathBuf>, connections: Option<u32>, speed: Option<u64>| {
+        SetDefaultsParams {
+            folder,
+            connections,
+            max_bytes_per_sec: speed,
+        }
+    };
+
+    for n in [0, 17] {
+        assert_eq!(
+            rejection(&core, set(None, Some(n), None)),
+            "connections: must be between 1 and 16"
+        );
+    }
+    assert_eq!(
+        rejection(&core, set(Some("relative/dir".into()), None, None)),
+        "folder: must be a full path"
+    );
+    assert_eq!(
+        rejection(&core, set(Some(file), None, None)),
+        "folder: is a file, not a folder"
+    );
+    assert!(rejection(&core, set(None, None, Some(100))).starts_with("speed: "));
+    assert_eq!(core.get_defaults().connections, 8, "nothing was changed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_written_is_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(locked.join("probe"), b"").is_ok() {
+        return; // Running as root: permissions are not enforced.
+    }
+    let message = rejection(
+        &DaemonCore::new(),
+        SetDefaultsParams {
+            folder: Some(locked.clone()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        message.starts_with("folder: can't write there ("),
+        "{message}"
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn defaults_survive_a_daemon_restart() {
+    let data = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let wanted = {
+        let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+        core.set_defaults(SetDefaultsParams {
+            folder: Some(downloads.path().to_path_buf()),
+            connections: Some(3),
+            max_bytes_per_sec: Some(1024 * 1024),
+        })
+        .unwrap()
+    };
+    let core = DaemonCore::with_store(QueueStore::in_dir(data.path())).unwrap();
+    assert_eq!(core.get_defaults(), wanted);
+}
+
+#[tokio::test]
+async fn defaults_can_be_read_and_changed_over_ipc() {
+    let endpoint = next_test_endpoint();
+    let server = DaemonServer::bind_with_core(&endpoint, DaemonCore::new())
+        .await
+        .unwrap();
+    tokio::spawn(async move { server.run().await.unwrap() });
+    let mut client = DaemonClient::connect(&endpoint).await.unwrap();
+
+    assert_eq!(client.get_defaults().await.unwrap().connections, 8);
+    let changed = client
+        .set_defaults(SetDefaultsParams {
+            connections: Some(2),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(changed.connections, 2);
+    let err = client
+        .set_defaults(SetDefaultsParams {
+            connections: Some(99),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_string(), "connections: must be between 1 and 16");
 }

@@ -49,6 +49,10 @@ impl DaemonCore {
             "daemon.set_limits" => {
                 respond(id, parse_params(params).and_then(|p| self.set_limits(p)))
             }
+            "daemon.get_defaults" => respond(id, Ok(self.get_defaults())),
+            "daemon.set_defaults" => {
+                respond(id, parse_params(params).and_then(|p| self.set_defaults(p)))
+            }
             "download.add" => respond(id, parse_params(params).and_then(|p| self.add_download(p))),
             "download.pause" => respond(
                 id,

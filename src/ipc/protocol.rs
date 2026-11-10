@@ -480,6 +480,38 @@ pub struct SetLimitsParams {
     pub max_bytes_per_sec: Option<u64>,
 }
 
+/// Defaults for new downloads as the daemon saves them. `None` means the
+/// built-in default: the user's Downloads folder, and the engine's connections.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
+    /// Speed cap for each new download; 0 means none.
+    #[serde(default)]
+    pub max_bytes_per_sec: u64,
+}
+
+/// Defaults for new downloads with the built-in values filled in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadDefaults {
+    pub folder: PathBuf,
+    pub connections: u32,
+    pub max_bytes_per_sec: u64,
+}
+
+/// Fields left out keep their current value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetDefaultsParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes_per_sec: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -877,5 +909,16 @@ mod tests {
 
         assert_eq!(parsed_lf, req);
         assert_eq!(parsed_crlf, req);
+    }
+
+    #[test]
+    fn defaults_left_out_mean_unchanged_or_built_in() {
+        let unchanged = SetDefaultsParams::default();
+        assert_eq!(serde_json::to_string(&unchanged).unwrap(), "{}");
+        let saved: SavedDefaults = serde_json::from_str("{}").unwrap();
+        assert_eq!(saved, SavedDefaults::default());
+        assert_eq!(saved.folder, None);
+        assert_eq!(saved.connections, None);
+        assert_eq!(saved.max_bytes_per_sec, 0);
     }
 }

@@ -184,6 +184,18 @@ impl DaemonClient {
             .await
     }
 
+    pub async fn get_defaults(&mut self) -> Result<DownloadDefaults, ClientError> {
+        self.call("daemon.get_defaults", None).await
+    }
+
+    pub async fn set_defaults(
+        &mut self,
+        params: SetDefaultsParams,
+    ) -> Result<DownloadDefaults, ClientError> {
+        self.call("daemon.set_defaults", Some(serde_json::to_value(params)?))
+            .await
+    }
+
     pub async fn subscribe_telemetry(&mut self) -> Result<(), ClientError> {
         self.call::<Value>("subscribe.telemetry", None).await?;
         Ok(())

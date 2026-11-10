@@ -1,6 +1,6 @@
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::task::TaskRecord;
-use crate::daemon::{fair_share, queue_order};
+use crate::daemon::{defaults, fair_share, queue_order};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::*;
@@ -31,6 +31,8 @@ pub struct DaemonState {
     pub start_time: Instant,
     pub is_shutting_down: bool,
     pub limits: DaemonLimits,
+    /// Defaults for new downloads, as saved.
+    pub defaults: SavedDefaults,
 }
 
 impl DaemonState {
@@ -120,6 +122,11 @@ impl DaemonCore {
                 max_bytes_per_sec: 0,
             });
 
+        let defaults = snapshot
+            .as_ref()
+            .map(|s| s.defaults.clone())
+            .unwrap_or_default();
+
         let mut downloads = HashMap::new();
         let mut order = Vec::new();
         let mut next_id = 0;
@@ -143,6 +150,7 @@ impl DaemonCore {
                 start_time: Instant::now(),
                 is_shutting_down: false,
                 limits,
+                defaults,
             })),
             client: build_client(),
             telemetry_tx,
@@ -442,6 +450,22 @@ impl DaemonCore {
         self.state.lock().unwrap().limits.clone()
     }
 
+    /// Defaults for new downloads, with the built-in values filled in.
+    pub fn get_defaults(&self) -> DownloadDefaults {
+        defaults::resolve(&self.state.lock().unwrap().defaults)
+    }
+
+    /// Change the defaults for new downloads; fields left out are kept.
+    pub fn set_defaults(&self, params: SetDefaultsParams) -> Result<DownloadDefaults, RpcError> {
+        let resolved = {
+            let mut state = self.state.lock().unwrap();
+            state.defaults = defaults::updated(&state.defaults, params, validate_speed)?;
+            defaults::resolve(&state.defaults)
+        };
+        self.persist();
+        Ok(resolved)
+    }
+
     /// Change the queue limits. When `max_active` drops below the number running,
     /// the downloads furthest down the queue are stopped and queued again; they
     /// resume from their state files once a slot is free.
@@ -711,6 +735,7 @@ impl DaemonCore {
             version: QUEUE_VERSION,
             next_id: state.next_id,
             limits: state.limits.clone(),
+            defaults: state.defaults.clone(),
             downloads,
         }
     }
