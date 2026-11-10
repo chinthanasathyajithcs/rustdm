@@ -1,7 +1,7 @@
 //! The Add dialog: one or more links, with folder, file name, connections
 //! and speed cap starting from the daemon's defaults.
 
-use super::{centered, draw_box, DialogResult, DialogTarget};
+use super::{centered, draw_box, put, render_buttons, DialogResult, DialogTarget};
 use crate::engine::MAX_CONNECTIONS;
 use crate::ipc::protocol::{
     AddDownloadParams, DownloadDefaults, CODE_DESTINATION_EXISTS, CODE_INVALID_PATH,
@@ -15,7 +15,6 @@ use crate::tui::widgets::text_field::TextField;
 use crate::units::{parse_count, parse_speed};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -328,7 +327,16 @@ impl AddDialog {
             let indent = Span::raw(" ".repeat(LABEL_WIDTH as usize));
             put(frame, inner, row + 1, Line::from(vec![indent, under]));
         }
-        hits.extend(render_buttons(frame, inner, DIALOG_HEIGHT - 3));
+        hits.extend(render_buttons(
+            frame,
+            inner,
+            DIALOG_HEIGHT - 3,
+            inner.x + LABEL_WIDTH,
+            &[
+                ("[ Enter Add ]", KeyCode::Enter, theme::BUTTON_ADD),
+                ("[ Esc Cancel ]", KeyCode::Esc, theme::BUTTON),
+            ],
+        ));
         hits
     }
 
@@ -366,37 +374,6 @@ impl AddDialog {
             _ => self.fields[field as usize].render(frame, value, focused),
         }
         Some(value)
-    }
-}
-
-/// "[ Enter Add ]  [ Esc Cancel ]" on `row`, each acting as its key.
-fn render_buttons(frame: &mut Frame, inner: Rect, row: u16) -> Vec<(Rect, DialogTarget)> {
-    let mut hits = Vec::new();
-    if row >= inner.height {
-        return hits;
-    }
-    let mut x = inner.x + LABEL_WIDTH;
-    for (label, code, style) in [
-        ("[ Enter Add ]", KeyCode::Enter, theme::BUTTON_ADD),
-        ("[ Esc Cancel ]", KeyCode::Esc, theme::BUTTON),
-    ] {
-        let width = label.len() as u16;
-        if x + width > inner.right() {
-            break;
-        }
-        let rect = Rect::new(x, inner.y + row, width, 1);
-        frame.render_widget(Paragraph::new(label).style(style), rect);
-        hits.push((rect, DialogTarget::Key(code)));
-        x += width + 2;
-    }
-    hits
-}
-
-/// Draw `line` on `row` of `inner`, if that row exists.
-fn put(frame: &mut Frame, inner: Rect, row: u16, line: Line) {
-    if row < inner.height {
-        let rect = Rect::new(inner.x, inner.y + row, inner.width, 1);
-        frame.render_widget(Paragraph::new(line).style(Style::new()), rect);
     }
 }
 
@@ -536,7 +513,7 @@ mod tests {
         let mut dialog = AddDialog::new(Some(&defaults()), None);
         type_text(&mut dialog, "https://example.com/typed.iso");
         submitted(press(&mut dialog, KeyCode::Enter));
-        app.dialogs.push(Dialog::Add(dialog));
+        app.dialogs.push(Dialog::Add(Box::new(dialog)));
 
         app.apply_outcome(Err(ActionError::from(ClientError::NotRunning)));
         let Some(Dialog::Add(dialog)) = app.dialogs.last() else {
@@ -557,7 +534,7 @@ mod tests {
         let mut app = App::default();
         let mut dialog = AddDialog::new(Some(&defaults()), Some("https://example.com/a"));
         submitted(press(&mut dialog, KeyCode::Enter));
-        app.dialogs.push(Dialog::Add(dialog));
+        app.dialogs.push(Dialog::Add(Box::new(dialog)));
         app.apply_outcome(Ok(crate::tui::daemon_link::Outcome {
             message: "Added dl_1 (queued)".into(),
             select: Some("dl_1".into()),

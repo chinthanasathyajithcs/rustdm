@@ -40,7 +40,11 @@ pub async fn run_app<B: Backend>(
                     Some(Action::Quit) => break Ok(()),
                     Some(action) => {
                         let result = perform(&mut client, &action).await;
+                        let stopped = action == Action::StopDaemon && result.is_ok();
                         app.apply_outcome(result);
+                        if stopped {
+                            break Ok(());
+                        }
                         refresh(&mut client, endpoint, &mut app).await;
                     }
                     None => {}

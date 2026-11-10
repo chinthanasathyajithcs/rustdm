@@ -18,10 +18,12 @@ const DOWNLOADS_KEYS: &[(&str, &str)] = &[
     ("r", "Resume"),
     ("c", "Cancel"),
     ("x", "Remove"),
+    ("v", "Speed cap"),
     ("s", "Settings"),
     ("l", "Logs"),
     ("?", "Help"),
     ("q", "Quit"),
+    ("Q", "Stop rdmd"),
     ("←/→", "Tabs"),
     ("↑/↓", "Select"),
     ("⇧↑/⇧↓", "Reorder"),
@@ -39,6 +41,7 @@ const LOGS_KEYS: &[(&str, &str)] = &[
     ("s", "Settings"),
     ("?", "Help"),
     ("q", "Quit"),
+    ("Q", "Stop rdmd"),
 ];
 
 /// Every key for `screen`, most useful first.

@@ -3,9 +3,11 @@
 use crate::ipc::protocol::QueuePosition;
 use crate::tui::action::Action;
 use crate::tui::dialogs::add::AddDialog;
+use crate::tui::dialogs::confirm::ConfirmDialog;
+use crate::tui::dialogs::speed::SpeedDialog;
 use crate::tui::dialogs::Dialog;
 use crate::tui::screens::hit;
-use crate::tui::state::{App, Button, Mode, Tab};
+use crate::tui::state::{App, Button, Tab};
 use crate::tui::theme;
 use crate::tui::widgets::inspector::render_inspector;
 use crate::tui::widgets::table::render_table;
@@ -13,7 +15,6 @@ use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
@@ -28,7 +29,6 @@ pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
         Event::Mouse(mouse) => handle_mouse(app, mouse),
         Event::Paste(text) => {
             // A paste while browsing is almost always a link to add.
-            app.mode = Mode::Browse;
             open_add_dialog(app, Some(text));
             None
         }
@@ -37,12 +37,6 @@ pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
 }
 
 fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
-    if let Mode::ConfirmCancel(id) = &app.mode {
-        let id = id.clone();
-        app.mode = Mode::Browse;
-        return (key.code == KeyCode::Char('y')).then_some(Action::Cancel(id));
-    }
-
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Up if shift => move_in_queue(app, QueuePosition::Up),
@@ -90,20 +84,12 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('r') => press(app, Button::Resume),
         KeyCode::Char('c') => press(app, Button::Cancel),
         KeyCode::Char('x') | KeyCode::Delete => press(app, Button::Remove),
+        KeyCode::Char('v') => press(app, Button::Speed),
         _ => None,
     }
 }
 
 fn handle_mouse(app: &mut App, mouse: &MouseEvent) -> Option<Action> {
-    match app.mode {
-        Mode::ConfirmCancel(_) => {
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                app.mode = Mode::Browse;
-            }
-            return None;
-        }
-        Mode::Browse => {}
-    }
     let at = Position::new(mouse.column, mouse.row);
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -141,35 +127,37 @@ fn move_in_queue(app: &mut App, position: QueuePosition) -> Option<Action> {
 
 fn open_add_dialog(app: &mut App, paste: Option<&str>) {
     let dialog = AddDialog::new(app.defaults.as_ref(), paste);
-    app.dialogs.push(Dialog::Add(dialog));
+    app.dialogs.push(Dialog::Add(Box::new(dialog)));
 }
 
 /// Run a toolbar button. Buttons that act on a download need one selected.
 fn press(app: &mut App, button: Button) -> Option<Action> {
-    let make: fn(String) -> Action = match button {
+    match button {
         Button::Add => {
             open_add_dialog(app, None);
             return None;
         }
         Button::Quit => return Some(Action::Quit),
+        _ => {}
+    }
+    let Some(d) = app.selected_summary().cloned() else {
+        app.notify("Select a download first", true);
+        return None;
+    };
+    match button {
+        Button::Pause => Some(Action::Pause(d.id)),
+        Button::Resume => Some(Action::Resume(d.id)),
+        Button::Remove => Some(Action::Remove(d.id)),
         Button::Cancel => {
             // Cancelling stops the download for good unless resumed, so ask first.
-            match app.selected_summary() {
-                Some(d) => app.mode = Mode::ConfirmCancel(d.id.clone()),
-                None => app.notify("Select a download first", true),
-            }
-            return None;
-        }
-        Button::Pause => Action::Pause,
-        Button::Resume => Action::Resume,
-        Button::Remove => Action::Remove,
-    };
-    match app.selected_summary() {
-        Some(d) => Some(make(d.id.clone())),
-        None => {
-            app.notify("Select a download first", true);
+            app.dialogs.push(Dialog::Confirm(ConfirmDialog::cancel(&d)));
             None
         }
+        Button::Speed => {
+            app.dialogs.push(Dialog::Speed(SpeedDialog::new(&d)));
+            None
+        }
+        Button::Add | Button::Quit => None,
     }
 }
 /// Height of the details pane when the window is tall enough.
@@ -254,27 +242,6 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<(Rect, Tab)> {
         frame.render_widget(Paragraph::new(tab_label(app, *tab)).style(style), *rect);
     }
     tabs
-}
-
-/// The footer line while the screen waits for an answer to the cancel
-/// question. `None` while browsing.
-pub fn prompt_line(app: &App) -> Option<Line<'static>> {
-    let line = match &app.mode {
-        Mode::ConfirmCancel(id) => {
-            let name = app
-                .downloads
-                .iter()
-                .find(|d| &d.id == id)
-                .map(|d| d.filename.as_str())
-                .unwrap_or("");
-            Line::from(vec![
-                Span::styled(format!("Cancel {id} ({name})? "), theme::CONFIRM),
-                Span::styled("y cancels · any other key keeps it", theme::DIM),
-            ])
-        }
-        Mode::Browse => return None,
-    };
-    Some(line)
 }
 
 #[cfg(test)]
@@ -376,7 +343,7 @@ mod tests {
     fn add_dialog_urls(app: &App) -> Vec<String> {
         match app.dialogs.last() {
             Some(Dialog::Add(add)) => add.urls(),
-            None => panic!("no dialog is open"),
+            other => panic!("expected the Add dialog, got {other:?}"),
         }
     }
 
@@ -421,13 +388,13 @@ mod tests {
 
         handle_event(&mut app, &click(3, 6));
         assert_eq!(app.selected.as_deref(), Some("dl_2"));
-        // The Cancel button asks first; "y" confirms.
+        // The Cancel button asks first.
         assert_eq!(handle_event(&mut app, &click(2, 1)), None);
-        assert_eq!(app.mode, Mode::ConfirmCancel("dl_2".to_string()));
-        assert_eq!(
-            handle_event(&mut app, &key(KeyCode::Char('y'))),
-            Some(Action::Cancel("dl_2".to_string()))
-        );
+        let Some(Dialog::Confirm(question)) = app.dialogs.last() else {
+            panic!("Cancel did not ask");
+        };
+        assert_eq!(question.question(), "Cancel dl_2 (dl_2.bin)?");
+        app.dialogs.clear();
         handle_event(&mut app, &click(12, 2));
         assert_eq!(app.tab, Tab::Queued);
         assert_eq!(
@@ -452,32 +419,6 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some("dl_2"));
         handle_event(&mut app, &scroll(MouseEventKind::ScrollUp));
         assert_eq!(app.selected.as_deref(), Some("dl_1"));
-    }
-
-    #[test]
-    fn cancel_asks_first_and_only_y_confirms() {
-        use DownloadStatus::*;
-        let mut app = app_with(&[Active]);
-        assert_eq!(handle_event(&mut app, &key(KeyCode::Char('c'))), None);
-        assert_eq!(app.mode, Mode::ConfirmCancel("dl_1".to_string()));
-        assert_eq!(
-            handle_event(&mut app, &key(KeyCode::Char('y'))),
-            Some(Action::Cancel("dl_1".to_string()))
-        );
-        assert_eq!(app.mode, Mode::Browse);
-    }
-
-    #[test]
-    fn any_other_key_or_a_click_backs_out_of_cancelling() {
-        use DownloadStatus::*;
-        let mut app = app_with(&[Active]);
-        handle_event(&mut app, &key(KeyCode::Char('c')));
-        assert_eq!(handle_event(&mut app, &key(KeyCode::Char('n'))), None);
-        assert_eq!(app.mode, Mode::Browse);
-
-        handle_event(&mut app, &key(KeyCode::Char('c')));
-        assert_eq!(handle_event(&mut app, &click(0, 0)), None);
-        assert_eq!(app.mode, Mode::Browse);
     }
 
     #[test]
@@ -533,10 +474,10 @@ mod tests {
     #[test]
     fn the_add_dialog_draws_over_the_screen() {
         let mut app = sample_app();
-        app.dialogs.push(Dialog::Add(AddDialog::new(
+        app.dialogs.push(Dialog::Add(Box::new(AddDialog::new(
             None,
             Some("http://example.com/a"),
-        )));
+        ))));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
             .draw(|f| crate::tui::screens::render(f, &mut app))
@@ -545,20 +486,5 @@ mod tests {
         assert!(text.contains("Add a download"), "{text}");
         assert!(text.contains("http://example.com/a"), "{text}");
         assert!(!app.hits.dialog.is_empty());
-    }
-
-    #[test]
-    fn cancelling_asks_in_the_footer() {
-        let mut app = sample_app();
-        let id = app.downloads[0].id.clone();
-        let name = app.downloads[0].filename.clone();
-        app.mode = Mode::ConfirmCancel(id.clone());
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal
-            .draw(|f| crate::tui::screens::render(f, &mut app))
-            .unwrap();
-        let text = screen_text(&terminal);
-        assert!(text.contains(&format!("Cancel {id} ({name})?")), "{text}");
-        assert!(text.contains("y cancels"), "{text}");
     }
 }

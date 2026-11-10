@@ -5,7 +5,7 @@ use crate::ipc::client::{ClientError, DaemonClient};
 use crate::ipc::protocol::{AddDownloadParams, DownloadSummary, QueuePosition, TelemetryTick};
 use crate::ipc::transport::IpcEndpoint;
 use crate::tui::action::Action;
-use crate::tui::format::status_label;
+use crate::tui::format::{format_speed_cap, status_label};
 use crate::tui::state::App;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -110,7 +110,22 @@ pub(crate) async fn perform(
         Action::Add(downloads) => return add_each(conn, downloads).await,
         Action::Pause(id) => conn.pause(id).await?,
         Action::Resume(id) => conn.resume(id).await?,
-        Action::Cancel(id) => conn.cancel(id, false).await?,
+        Action::Cancel { id, delete_files } => conn.cancel(id, *delete_files).await?,
+        Action::SetSpeed {
+            id,
+            max_bytes_per_sec,
+        } => {
+            let s = conn.set_download_speed(id, *max_bytes_per_sec).await?;
+            return Ok(message(format!(
+                "Speed cap for {}: {}",
+                s.id,
+                format_speed_cap(s.max_bytes_per_sec)
+            )));
+        }
+        Action::StopDaemon => {
+            conn.shutdown().await?;
+            return Ok(message("rdmd stopped".to_string()));
+        }
         Action::Remove(id) => {
             let s = conn.remove(id).await?;
             return Ok(message(format!("Removed {}", s.id)));

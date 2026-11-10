@@ -8,9 +8,10 @@ pub mod logs;
 pub mod settings;
 
 use crate::tui::action::Action;
-use crate::tui::dialogs::DialogResult;
+use crate::tui::dialogs::confirm::ConfirmDialog;
+use crate::tui::dialogs::{Dialog, DialogResult};
 use crate::tui::format::format_speed;
-use crate::tui::state::{App, Mode, Screen};
+use crate::tui::state::{App, Screen, Tab};
 use crate::tui::theme;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -87,12 +88,15 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
     if is_ctrl_c(key) {
         return Some(Action::Quit);
     }
-    // While the screen is asking for input, keys belong to it.
-    if app.mode != Mode::Browse {
-        return downloads::handle_event(app, &Event::Key(*key));
-    }
     match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('Q') => {
+            let active = app.count(Tab::Active);
+            app.help_open = false;
+            app.dialogs
+                .push(Dialog::Confirm(ConfirmDialog::stop_daemon(active)));
+            None
+        }
         KeyCode::Char('?') => {
             app.help_open = !app.help_open;
             None
@@ -214,13 +218,8 @@ fn daemon_status(app: &App) -> Vec<Span<'static>> {
 /// The footer: a prompt while one is open, else the latest notice, else the
 /// keys for the current screen that fit.
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let prompt = match app.screen {
-        Screen::Downloads => downloads::prompt_line(app),
-        _ => None,
-    };
-    let line = match (prompt, &app.notice) {
-        (Some(line), _) => line,
-        (None, Some(notice)) => {
+    let line = match &app.notice {
+        Some(notice) => {
             let style = if notice.is_error {
                 theme::ERROR
             } else {
@@ -228,7 +227,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             };
             Line::from(Span::styled(notice.text.clone(), style))
         }
-        (None, None) => Line::from(Span::styled(
+        None => Line::from(Span::styled(
             keys_that_fit(help::keys(app.screen), area.width as usize),
             theme::DIM,
         )),
@@ -263,7 +262,7 @@ mod tests {
     use crate::ipc::protocol::DownloadStatus;
     use crate::tui::action::Action;
     use crate::tui::dialogs::add::{AddDialog, AddField};
-    use crate::tui::dialogs::{Dialog, DialogTarget};
+    use crate::tui::dialogs::DialogTarget;
     use crate::tui::state::test_support::{app_with, sample_app, screen_text};
     use crate::tui::state::{App, Screen};
     use ratatui::backend::TestBackend;
@@ -392,10 +391,10 @@ mod tests {
     #[test]
     fn clicking_the_add_button_of_the_dialog_submits() {
         let mut app = App::default();
-        app.dialogs.push(Dialog::Add(AddDialog::new(
+        app.dialogs.push(Dialog::Add(Box::new(AddDialog::new(
             None,
             Some("https://example.com/a"),
-        )));
+        ))));
         draw(&mut app, 100, 30);
         let (button, _) = *app
             .hits

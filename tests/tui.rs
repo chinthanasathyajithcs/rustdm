@@ -5,7 +5,7 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use rustdm::daemon::{DaemonCore, DaemonServer};
-use rustdm::ipc::client::DaemonClient;
+use rustdm::ipc::client::{ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
     AddDownloadParams, DownloadStatus, DownloadSummary, SetDefaultsParams, SetLimitsParams,
 };
@@ -244,6 +244,62 @@ async fn the_add_dialog_adds_with_the_daemon_defaults() {
         .await
         .expect("dashboard did not quit")
         .unwrap();
+}
+
+#[tokio::test]
+async fn stopping_the_daemon_from_the_tui_pauses_downloads() {
+    let mock = TestServer::start(
+        pattern_bytes(4 * 1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 64 * 1024,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let endpoint = IpcEndpoint::test_endpoint(&format!("tui_{id}"));
+    let core = DaemonCore::new();
+    let server = DaemonServer::bind_with_core(&endpoint, core.clone())
+        .await
+        .expect("bind daemon");
+    let daemon = tokio::spawn(async move { server.run().await.unwrap() });
+    let mut client = DaemonClient::connect(&endpoint).await.expect("connect");
+    let added = client
+        .add(add_params(&mock, "slow.bin", dir.path()))
+        .await
+        .unwrap();
+    wait_for(&mut client, "the download never started", |list| {
+        list[0].downloaded_bytes > 0
+    })
+    .await;
+
+    let (events, dashboard) = start_dashboard(&endpoint);
+    events
+        .send(Event::Key(KeyEvent::new(
+            KeyCode::Char('Q'),
+            KeyModifiers::SHIFT,
+        )))
+        .await
+        .unwrap();
+    events.send(key(KeyCode::Char('y'))).await.unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("the dashboard quits after stopping rdmd")
+        .unwrap();
+    tokio::time::timeout(WAIT_TIMEOUT, daemon)
+        .await
+        .expect("rdmd stopped")
+        .unwrap();
+
+    assert!(matches!(
+        DaemonClient::connect(&endpoint).await,
+        Err(ClientError::NotRunning)
+    ));
+    let status = core.get_status(&added.id).unwrap().status;
+    assert!(
+        !matches!(status, DownloadStatus::Active | DownloadStatus::Completed),
+        "{status:?}"
+    );
 }
 
 #[tokio::test]

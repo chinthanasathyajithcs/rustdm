@@ -96,16 +96,18 @@ pub enum Button {
     Resume,
     Cancel,
     Remove,
+    Speed,
     Quit,
 }
 
 impl Button {
-    pub const ALL: [Button; 6] = [
+    pub const ALL: [Button; 7] = [
         Button::Add,
         Button::Pause,
         Button::Resume,
         Button::Cancel,
         Button::Remove,
+        Button::Speed,
         Button::Quit,
     ];
 
@@ -116,16 +118,10 @@ impl Button {
             Button::Resume => "> Resume",
             Button::Cancel => "x Cancel",
             Button::Remove => "- Remove",
+            Button::Speed => "~ Speed",
             Button::Quit => "Quit",
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Browse,
-    /// Waiting for `y` to cancel this download.
-    ConfirmCancel(String),
 }
 
 /// Screen areas the last frame drew, so a mouse click can find what it hit.
@@ -166,7 +162,6 @@ pub struct App {
     pub selected: Option<String>,
     /// Index of the first visible table row.
     pub table_offset: usize,
-    pub mode: Mode,
     pub notice: Option<Notice>,
     pub hits: HitMap,
 }
@@ -186,7 +181,6 @@ impl Default for App {
             tab: Tab::All,
             selected: None,
             table_offset: 0,
-            mode: Mode::Browse,
             notice: None,
             hits: HitMap::default(),
         }
