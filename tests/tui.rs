@@ -323,6 +323,43 @@ async fn esc_no_longer_quits_the_dashboard() {
 }
 
 #[tokio::test]
+async fn settings_saves_the_default_folder_to_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let (endpoint, mut client) = serve_into(dir.path()).await;
+    let new_folder = dir.path().join("from-settings");
+    let (events, dashboard) = start_dashboard(&endpoint);
+    // Let the first refresh load the defaults, so editing starts from them.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    events.send(key(KeyCode::Char('s'))).await.unwrap();
+    events.send(key(KeyCode::Down)).await.unwrap();
+    events.send(key(KeyCode::Down)).await.unwrap();
+    events.send(key(KeyCode::Enter)).await.unwrap();
+    let clear = Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    events.send(clear).await.unwrap();
+    events
+        .send(Event::Paste(new_folder.display().to_string()))
+        .await
+        .unwrap();
+    events.send(key(KeyCode::Enter)).await.unwrap();
+
+    let start = Instant::now();
+    while client.get_defaults().await.unwrap().folder != new_folder {
+        assert!(start.elapsed() < WAIT_TIMEOUT, "the folder was never saved");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+    let text = screen_text(&terminal);
+    assert!(text.contains("Defaults for new downloads saved"), "{text}");
+    assert!(text.contains("from-settings"), "{text}");
+}
+
+#[tokio::test]
 async fn the_dashboard_quits_when_its_event_stream_ends() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, _client) = serve_into(dir.path()).await;

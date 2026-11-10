@@ -38,6 +38,12 @@ pub fn handle_event(app: &mut App, event: &Event) -> Option<Action> {
     if !app.dialogs.is_empty() {
         return dialog_event(app, event);
     }
+    if typing_in_settings(app, event) {
+        return match event {
+            Event::Key(key) if is_ctrl_c(key) => Some(Action::Quit),
+            _ => settings::handle_event(app, event),
+        };
+    }
     match event {
         // Windows also reports key releases; act on presses only.
         Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
@@ -78,6 +84,14 @@ fn dialog_event(app: &mut App, event: &Event) -> Option<Action> {
         }
         DialogResult::Submit(action) => Some(action),
     }
+}
+
+/// A Settings field is being edited, so keys and pastes are text, not shortcuts.
+fn typing_in_settings(app: &App, event: &Event) -> bool {
+    app.screen == Screen::Settings
+        && !app.help_open
+        && app.settings.is_editing()
+        && matches!(event, Event::Key(_) | Event::Paste(_))
 }
 
 fn is_ctrl_c(key: &KeyEvent) -> bool {
@@ -130,7 +144,8 @@ fn on_screen(app: &mut App, event: &Event) -> Option<Action> {
     }
     match app.screen {
         Screen::Downloads => downloads::handle_event(app, event),
-        Screen::Settings | Screen::Logs => None,
+        Screen::Settings => settings::handle_event(app, event),
+        Screen::Logs => None,
     }
 }
 

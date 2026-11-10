@@ -33,8 +33,15 @@ const DOWNLOADS_KEYS: &[(&str, &str)] = &[
     ("Ctrl+C", "Quit"),
 ];
 
-const SETTINGS_KEYS: &[(&str, &str)] =
-    &[("Esc", "Back"), ("l", "Logs"), ("?", "Help"), ("q", "Quit")];
+const SETTINGS_KEYS: &[(&str, &str)] = &[
+    ("↑/↓", "Select"),
+    ("Enter", "Edit or save"),
+    ("Esc", "Back"),
+    ("l", "Logs"),
+    ("?", "Help"),
+    ("q", "Quit"),
+    ("Q", "Stop rdmd"),
+];
 
 const LOGS_KEYS: &[(&str, &str)] = &[
     ("Esc", "Back"),

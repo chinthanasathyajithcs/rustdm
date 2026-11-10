@@ -122,6 +122,14 @@ pub(crate) async fn perform(
                 format_speed_cap(s.max_bytes_per_sec)
             )));
         }
+        Action::SetLimits(params) => {
+            conn.set_limits(params.clone()).await?;
+            return Ok(message("Limits saved".to_string()));
+        }
+        Action::SetDefaults(params) => {
+            conn.set_defaults(params.clone()).await?;
+            return Ok(message("Defaults for new downloads saved".to_string()));
+        }
         Action::StopDaemon => {
             conn.shutdown().await?;
             return Ok(message("rdmd stopped".to_string()));

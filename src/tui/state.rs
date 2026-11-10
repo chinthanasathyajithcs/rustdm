@@ -6,6 +6,7 @@ use crate::ipc::protocol::{
 };
 use crate::tui::daemon_link::{ActionError, Outcome};
 use crate::tui::dialogs::{Dialog, DialogTarget};
+use crate::tui::screens::settings::{SettingsField, SettingsState};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
 
@@ -135,6 +136,8 @@ pub struct HitMap {
     pub rows: Vec<(Rect, String)>,
     /// Fields and buttons of the top dialog.
     pub dialog: Vec<(Rect, DialogTarget)>,
+    /// One row per field on the Settings screen.
+    pub settings: Vec<(Rect, SettingsField)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +161,7 @@ pub struct App {
     pub help_open: bool,
     /// Open dialogs; the last one is on top and gets the keys.
     pub dialogs: Vec<Dialog>,
+    pub settings: SettingsState,
     pub tab: Tab,
     pub selected: Option<String>,
     /// Index of the first visible table row.
@@ -178,6 +182,7 @@ impl Default for App {
             screen: Screen::Downloads,
             help_open: false,
             dialogs: Vec::new(),
+            settings: SettingsState::default(),
             tab: Tab::All,
             selected: None,
             table_offset: 0,
@@ -264,7 +269,7 @@ impl App {
 
     /// Show the result of an action: select what it names and report it.
     /// A dialog waiting on the action closes when it worked, and shows the
-    /// error and stays open when it didn't.
+    /// error and stays open when it didn't. A Settings save works the same way.
     pub fn apply_outcome(&mut self, result: Result<Outcome, ActionError>) {
         let waiting = self.dialogs.last().is_some_and(Dialog::is_pending);
         match result {
@@ -273,9 +278,12 @@ impl App {
                     dialog.set_error(&e);
                 }
             }
+            Err(e) if self.settings.pending => self.settings.set_error(&e),
             Ok(outcome) => {
                 if waiting {
                     self.dialogs.pop();
+                } else if self.settings.pending {
+                    self.settings.saved();
                 }
                 if let Some(id) = outcome.select {
                     self.selected = Some(id);

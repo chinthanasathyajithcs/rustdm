@@ -1,6 +1,6 @@
 //! What the TUI asks for: a daemon call, or quitting.
 
-use crate::ipc::protocol::{AddDownloadParams, QueuePosition};
+use crate::ipc::protocol::{AddDownloadParams, QueuePosition, SetDefaultsParams, SetLimitsParams};
 
 /// Something the dashboard asks the daemon to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +19,10 @@ pub enum Action {
         id: String,
         max_bytes_per_sec: u64,
     },
+    /// Change the daemon's limits; fields left out keep their value.
+    SetLimits(SetLimitsParams),
+    /// Change the defaults for new downloads; fields left out keep their value.
+    SetDefaults(SetDefaultsParams),
     /// Stop rdmd, which pauses active downloads until it starts again.
     StopDaemon,
     Remove(String),
