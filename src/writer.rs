@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// On NTFS, writing past the end of the data already written makes Windows
 /// fill everything before it with zeros first. With several connections, the
@@ -48,6 +49,12 @@ fn mark_sparse(file: &File) {
 pub struct PartFile {
     pub file: File,
     pub path: PathBuf,
+    /// Held for each write. Connections writing into one file at once make
+    /// the kernel spin on the file's own lock: measured on a 1 GiB download
+    /// to tmpfs with 8 connections, 4.7-6.6 s of system CPU and 0.75-2.0 s
+    /// wall without this, 1.3 s and a steady 0.8 s with it. Taking turns here
+    /// costs nothing when the disk is the limit.
+    write_lock: Mutex<()>,
 }
 
 impl PartFile {
@@ -67,6 +74,7 @@ impl PartFile {
         Ok(PartFile {
             file,
             path: part_path.to_path_buf(),
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -76,10 +84,14 @@ impl PartFile {
         Ok(PartFile {
             file,
             path: part_path.to_path_buf(),
+            write_lock: Mutex::new(()),
         })
     }
 
+    /// Write all of `data` at `offset`, one write at a time per file.
     pub fn write_at(&self, mut offset: u64, mut data: &[u8]) -> io::Result<()> {
+        // A panic mid-write leaves nothing for the lock to protect.
+        let _turn = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
@@ -147,6 +159,34 @@ mod tests {
         let part = PartFile::create(&path, Some(8 * 1024 * 1024)).unwrap();
         part.write_at(8 * 1024 * 1024 - 4, b"tail").unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn writes_from_many_threads_at_once_all_land_in_place() {
+        const PIECE: usize = 256 * 1024;
+        const THREADS: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.part");
+        let part =
+            std::sync::Arc::new(PartFile::create(&path, Some((PIECE * THREADS) as u64)).unwrap());
+        let writers: Vec<_> = (0..THREADS)
+            .map(|i| {
+                let part = std::sync::Arc::clone(&part);
+                std::thread::spawn(move || {
+                    for chunk in 0..PIECE / 4096 {
+                        let offset = i * PIECE + chunk * 4096;
+                        part.write_at(offset as u64, &[i as u8 + 1; 4096]).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let written = std::fs::read(&path).unwrap();
+        for (i, piece) in written.chunks(PIECE).enumerate() {
+            assert!(piece.iter().all(|&b| b == i as u8 + 1), "piece {i}");
+        }
     }
 
     #[cfg(windows)]
