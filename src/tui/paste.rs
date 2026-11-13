@@ -33,6 +33,42 @@ pub fn continues_burst(event: &Event) -> bool {
     !matches!(typed(event), Typed::No)
 }
 
+/// Ctrl+V or Shift+Insert, pressed. A terminal that pastes by itself never
+/// passes these on; the old Windows console does, so rdm reads the clipboard.
+pub fn is_paste_shortcut(event: &Event) -> bool {
+    let Event::Key(KeyEvent {
+        code,
+        modifiers,
+        kind,
+        ..
+    }) = event
+    else {
+        return false;
+    };
+    if *kind == KeyEventKind::Release {
+        return false;
+    }
+    let held = *modifiers - KeyModifiers::SHIFT;
+    match code {
+        // Not Ctrl+Alt: Windows reports AltGr that way, and AltGr+V types a character.
+        KeyCode::Char('v' | 'V') => held == KeyModifiers::CONTROL,
+        KeyCode::Insert => *modifiers == KeyModifiers::SHIFT,
+        _ => false,
+    }
+}
+
+/// `event`, or a paste of the clipboard's text when `event` is the paste
+/// shortcut and the clipboard holds some.
+pub fn expand_paste_shortcut(event: Event, clipboard: impl FnOnce() -> Option<String>) -> Event {
+    if !is_paste_shortcut(&event) {
+        return event;
+    }
+    match clipboard() {
+        Some(text) if !text.is_empty() => Event::Paste(text),
+        _ => event,
+    }
+}
+
 /// Typed keys seen in a row, kept as they came in case they aren't a paste.
 #[derive(Default)]
 struct Run {
@@ -167,6 +203,64 @@ mod tests {
             !continues_burst(&moved),
             "mouse motion can't hold keys back"
         );
+    }
+
+    fn ctrl_v() -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn ctrl_v_and_shift_insert_are_the_paste_shortcut() {
+        assert!(is_paste_shortcut(&ctrl_v()));
+        let upper = Event::Key(KeyEvent::new(
+            KeyCode::Char('V'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert!(is_paste_shortcut(&upper));
+        let shift_insert = Event::Key(KeyEvent::new(KeyCode::Insert, KeyModifiers::SHIFT));
+        assert!(is_paste_shortcut(&shift_insert));
+
+        assert!(
+            !is_paste_shortcut(&press(KeyCode::Char('v'))),
+            "plain v types v"
+        );
+        let let_go = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ));
+        assert!(!is_paste_shortcut(&let_go), "only the press pastes");
+        // Windows reports AltGr as Ctrl+Alt: AltGr+V is a character, not paste.
+        let altgr_v = Event::Key(KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert!(!is_paste_shortcut(&altgr_v));
+    }
+
+    #[test]
+    fn the_paste_shortcut_becomes_a_paste_of_the_clipboard_text() {
+        let links = "https://a/1\r\nhttps://a/2";
+        assert_eq!(
+            expand_paste_shortcut(ctrl_v(), || Some(links.to_string())),
+            Event::Paste(links.into())
+        );
+    }
+
+    #[test]
+    fn with_no_text_on_the_clipboard_the_shortcut_stays_a_key() {
+        assert_eq!(expand_paste_shortcut(ctrl_v(), || None), ctrl_v());
+        assert_eq!(
+            expand_paste_shortcut(ctrl_v(), || Some(String::new())),
+            ctrl_v()
+        );
+    }
+
+    #[test]
+    fn other_events_never_read_the_clipboard() {
+        let typed = press(KeyCode::Char('a'));
+        let result = expand_paste_shortcut(typed.clone(), || panic!("read the clipboard"));
+        assert_eq!(result, typed);
     }
 
     #[test]

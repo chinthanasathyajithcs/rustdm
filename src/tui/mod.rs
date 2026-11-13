@@ -1,6 +1,8 @@
 //! Interactive terminal dashboard (`rdm tui`) and its plain-text fallback.
 
 pub mod action;
+#[cfg(windows)]
+mod clipboard;
 pub mod daemon_link;
 pub mod dialogs;
 pub mod format;
@@ -73,7 +75,8 @@ const MAX_BATCH_TIME: Duration = Duration::from_millis(50);
 
 /// Windows terminals send no paste events, so gather a burst of typed keys
 /// that arrive together; the first other event (a shortcut, the mouse, a
-/// resize) ends the batch at once.
+/// resize) ends the batch at once. Windows Terminal pastes Ctrl+V as such a
+/// burst, but the old console hands Ctrl+V to rdm, so that reads the clipboard.
 #[cfg(windows)]
 fn read_batch() -> io::Result<Vec<event::Event>> {
     let started = std::time::Instant::now();
@@ -84,7 +87,10 @@ fn read_batch() -> io::Result<Vec<event::Event>> {
     {
         batch.push(event::read()?);
     }
-    Ok(paste::coalesce_paste(batch))
+    Ok(paste::coalesce_paste(batch)
+        .into_iter()
+        .map(|event| paste::expand_paste_shortcut(event, clipboard::read_text))
+        .collect())
 }
 
 /// Elsewhere the terminal reports a paste as one event (bracketed paste).
