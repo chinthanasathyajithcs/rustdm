@@ -269,6 +269,13 @@ impl TaskRecord {
                     self.error_message = Some(format!("link expired or removed (HTTP {status})"));
                 }
             }
+            // Stopped during the server check, before any file existed: the
+            // stop that was asked for, not a failure. Settles like any stop.
+            Err(Error::Cancelled) => {
+                if !stopped_by_request {
+                    self.status = DownloadStatus::Paused;
+                }
+            }
             Err(e) if cancelled => self.error_message = Some(e.to_string()),
             Err(e) => self.fail_or_retry(e),
         }
@@ -467,6 +474,29 @@ mod tests {
         rec.measure(t0 + Duration::from_secs(1));
         assert_eq!(rec.speed_bps, 1000);
         assert_eq!(rec.eta_secs, Some(9));
+    }
+
+    #[test]
+    fn a_stop_during_the_server_check_keeps_the_status_it_was_given() {
+        // Stopped before any file exists, the engine reports Cancelled as an error.
+        for status in [
+            DownloadStatus::Paused,
+            DownloadStatus::Queued,
+            DownloadStatus::Cancelled,
+        ] {
+            let mut rec = record(status);
+            rec.apply_outcome(Err(Error::Cancelled));
+            assert_eq!(rec.status, status);
+            assert_eq!(rec.error_message, None, "{status:?}");
+            assert_eq!(rec.retry_at, None, "{status:?}");
+        }
+
+        // A running download being paused settles as paused, as it does when
+        // the engine stops after the check.
+        let mut rec = record(DownloadStatus::Pausing);
+        rec.apply_outcome(Err(Error::Cancelled));
+        assert_eq!(rec.status, DownloadStatus::Paused);
+        assert_eq!(rec.error_message, None);
     }
 
     #[test]

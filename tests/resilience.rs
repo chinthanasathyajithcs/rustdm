@@ -325,3 +325,84 @@ async fn resume_still_refuses_a_file_that_really_changed() {
     let err = resume(&build_client(), &state_p, None).await.unwrap_err();
     assert!(matches!(err, rustdm::error::Error::FileChanged), "{err:?}");
 }
+
+/// A server that accepts connections and never answers: the case where a
+/// download's host has gone away mid-way. Connections stay open until the test ends.
+async fn silent_server() -> url::Url {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    url::Url::parse(&format!("http://{addr}/silent.bin")).unwrap()
+}
+
+/// Longest a cancel may take to stop the engine.
+const PROMPT_STOP: Duration = Duration::from_secs(2);
+
+#[tokio::test]
+async fn cancelling_while_the_server_never_answers_stops_a_new_download_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let req = DownloadRequest {
+        url: silent_server().await,
+        template: "{downloads}/{name}".to_string(),
+        file_name: None,
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 4,
+        progress: Arc::new(Progress::new()),
+        cancel: Some(cancel_rx),
+    };
+    let running = tokio::spawn(async move { download(&build_client(), req).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let started = Instant::now();
+    cancel_tx.send(true).unwrap();
+    let result = tokio::time::timeout(PROMPT_STOP, running)
+        .await
+        .expect("the cancel waited on the silent server")
+        .unwrap();
+    assert!(
+        matches!(result, Err(rustdm::error::Error::Cancelled)),
+        "{result:?}"
+    );
+    assert!(started.elapsed() < PROMPT_STOP);
+}
+
+#[tokio::test]
+async fn cancelling_while_the_server_never_answers_stops_a_resume_at_once() {
+    let body = pattern_bytes(256 * KIB);
+    let srv = TestServer::start(body.clone(), Mode::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state_p = paused_download(&srv, dir.path(), &body, 64 * KIB, body.len() as u64);
+    let silent = silent_server().await;
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let resuming = {
+        let state_p = state_p.clone();
+        tokio::spawn(async move {
+            rustdm::engine::resume_with_options(
+                &build_client(),
+                &state_p,
+                Some(silent),
+                None,
+                Some(cancel_rx),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    cancel_tx.send(true).unwrap();
+    let result = tokio::time::timeout(PROMPT_STOP, resuming)
+        .await
+        .expect("the cancel waited on the silent server")
+        .unwrap();
+    assert!(
+        matches!(result, Err(rustdm::error::Error::Cancelled)),
+        "{result:?}"
+    );
+    assert!(state_p.exists(), "the paused download is left as it was");
+}

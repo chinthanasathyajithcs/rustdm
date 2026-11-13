@@ -1,3 +1,4 @@
+use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::error::Error;
 use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
 use reqwest::header::{
@@ -5,6 +6,7 @@ use reqwest::header::{
     RANGE, RETRY_AFTER,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Validator {
@@ -33,22 +35,32 @@ pub fn parse_content_range_total(value: &str) -> Option<u64> {
 }
 
 pub async fn probe(client: &reqwest::Client, url: &url::Url) -> Result<Probe, Error> {
+    probe_with_cancel(client, url, None).await
+}
+
+/// `probe`, stopping with `Error::Cancelled` as soon as `cancel` turns true. A
+/// server that has gone silent would otherwise hold a pause or cancel for
+/// every attempt's connection timeout and the waits between them.
+pub async fn probe_with_cancel(
+    client: &reqwest::Client,
+    url: &url::Url,
+    cancel: Option<&watch::Receiver<bool>>,
+) -> Result<Probe, Error> {
     let mut attempt = 0u32;
     let res = loop {
-        let response = match client
+        let request = client
             .get(url.clone())
             .header(RANGE, "bytes=0-0")
             .header(ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-        {
+            .send();
+        let response = match or_cancel(request, cancel).await? {
             Ok(r) => r,
             Err(e) => {
                 attempt += 1;
                 if attempt >= MAX_SEGMENT_ATTEMPTS {
                     return Err(Error::Http(e));
                 }
-                tokio::time::sleep(backoff_delay(attempt, fastrand::f64())).await;
+                sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
                 continue;
             }
         };
@@ -67,7 +79,7 @@ pub async fn probe(client: &reqwest::Client, url: &url::Url) -> Result<Probe, Er
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after_secs)
                 .unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
-            tokio::time::sleep(delay).await;
+            sleep_or_cancel(delay, cancel).await?;
             continue;
         }
 
