@@ -1,12 +1,12 @@
 //! Defaults for new downloads: resolving the built-in values and checking
 //! what a client asks to change.
 
+use crate::daemon::folder_check;
 use crate::dirs::default_downloads_dir;
 use crate::engine::{DEFAULT_CONNECTIONS, MAX_CONNECTIONS};
 use crate::ipc::protocol::{
     DownloadDefaults, RpcError, SavedDefaults, SetDefaultsParams, CODE_INVALID_PARAMS,
 };
-use std::path::Path;
 
 /// What `RpcError::invalid_params` puts before its detail.
 const INVALID_PARAMS_PREFIX: &str = "Invalid params: ";
@@ -26,8 +26,8 @@ pub fn resolve(saved: &SavedDefaults) -> DownloadDefaults {
     }
 }
 
-/// `saved` with the fields `params` gives, after checking each of them.
-/// `check_speed` is the daemon's own speed rule.
+/// `saved` with the fields `params` gives, after checking each of them except
+/// the folder (see `check_folder`). `check_speed` is the daemon's own speed rule.
 pub fn updated(
     saved: &SavedDefaults,
     params: SetDefaultsParams,
@@ -40,9 +40,6 @@ pub fn updated(
                 format!("must be between 1 and {MAX_CONNECTIONS}"),
             ));
         }
-    }
-    if let Some(folder) = &params.folder {
-        check_folder(folder)?;
     }
     if let Some(bps) = params.max_bytes_per_sec {
         check_speed(bps).map_err(|e| {
@@ -60,20 +57,11 @@ pub fn updated(
     })
 }
 
-/// A default folder must be a full path. If it exists it must be a folder the
-/// daemon can write in; a missing one is created when a download needs it.
-fn check_folder(folder: &Path) -> Result<(), RpcError> {
-    if !folder.is_absolute() {
-        return Err(field_error("folder", "must be a full path"));
+/// Check the folder `params` asks for, if any. It touches the disk, so the
+/// daemon runs it before taking its state lock.
+pub fn check_folder(params: &SetDefaultsParams) -> Result<(), RpcError> {
+    match &params.folder {
+        Some(folder) => folder_check::check_folder(folder).map_err(|e| field_error("folder", e)),
+        None => Ok(()),
     }
-    if !folder.exists() {
-        return Ok(());
-    }
-    if !folder.is_dir() {
-        return Err(field_error("folder", "is a file, not a folder"));
-    }
-    let probe = folder.join(format!(".rdm-write-test-{}", std::process::id()));
-    std::fs::write(&probe, b"")
-        .and_then(|()| std::fs::remove_file(&probe))
-        .map_err(|e| field_error("folder", format!("can't write there ({e})")))
 }

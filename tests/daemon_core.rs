@@ -5,7 +5,7 @@ use rustdm::ipc::client::DaemonClient;
 use rustdm::ipc::protocol::{
     AddDownloadParams, CancelDownloadParams, DownloadIdParam, DownloadStatus, DownloadSummary,
     PingResult, RpcId, RpcMessage, RpcRequest, SetDefaultsParams, CODE_DOWNLOAD_NOT_FOUND,
-    CODE_INVALID_PARAMS,
+    CODE_INVALID_PARAMS, CODE_INVALID_PATH, CODE_PERMISSION_DENIED,
 };
 use rustdm::ipc::transport::{IpcConnection, IpcEndpoint};
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
@@ -441,6 +441,98 @@ fn a_folder_that_cannot_be_written_is_rejected() {
         "{message}"
     );
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_folder_inside_one_that_cannot_be_written_is_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(locked.join("probe"), b"").is_ok() {
+        return; // Running as root: permissions are not enforced.
+    }
+    let message = rejection(
+        &DaemonCore::new(),
+        SetDefaultsParams {
+            folder: Some(locked.join("not made yet")),
+            ..Default::default()
+        },
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        message.starts_with("folder: can't write there ("),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_default_folder_inside_a_file_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let message = rejection(
+        &DaemonCore::new(),
+        SetDefaultsParams {
+            folder: Some(file.join("sub")),
+            ..Default::default()
+        },
+    );
+    assert_eq!(message, "folder: is a file, not a folder");
+}
+
+fn add_to(
+    core: &DaemonCore,
+    destination: std::path::PathBuf,
+) -> Result<DownloadSummary, rustdm::ipc::protocol::RpcError> {
+    core.add_download(AddDownloadParams {
+        url: "http://127.0.0.1:9/a.bin".into(),
+        destination: Some(destination),
+        filename: None,
+        connections: None,
+        max_bytes_per_sec: None,
+    })
+}
+
+#[tokio::test]
+async fn adding_into_a_file_or_a_relative_folder_is_refused_as_a_bad_path() {
+    let core = DaemonCore::new();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+
+    for bad in [file.clone(), file.join("sub"), "relative/dir".into()] {
+        let err = add_to(&core, bad.clone()).expect_err("must be refused");
+        assert_eq!(err.code, CODE_INVALID_PATH, "{bad:?}: {}", err.message);
+    }
+    assert!(core.list_downloads().is_empty(), "nothing was queued");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn adding_into_a_folder_that_cannot_be_written_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let core = DaemonCore::new();
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(locked.join("probe"), b"").is_ok() {
+        return; // Running as root: permissions are not enforced.
+    }
+    let result = add_to(&core, locked.join("new"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = result.expect_err("must be refused");
+    assert_eq!(err.code, CODE_PERMISSION_DENIED, "{}", err.message);
+}
+
+#[tokio::test]
+async fn adding_into_a_folder_that_does_not_exist_yet_is_allowed() {
+    let core = DaemonCore::new();
+    let dir = tempfile::tempdir().unwrap();
+    add_to(&core, dir.path().join("made").join("later")).expect("queued");
 }
 
 #[test]
