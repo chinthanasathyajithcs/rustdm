@@ -182,6 +182,9 @@ impl AddDialog {
             KeyCode::Enter => return self.submit(),
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(AddField::ALL.len() - 1),
+            // The list has no cursor, so moving one leaves it as it is.
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End
+                if self.focus == AddField::Url && !self.urls.is_empty() => {}
             _ if self.focus == AddField::Url && !self.urls.is_empty() => {
                 // Editing a list of links starts over with one typed link.
                 let mut fresh = TextField::default();
@@ -477,6 +480,30 @@ mod tests {
         let urls: Vec<_> = params.iter().map(|p| p.url.as_str()).collect();
         assert_eq!(urls, vec!["https://a/1", "https://a/2"]);
         assert!(params.iter().all(|p| p.filename.is_none()));
+    }
+
+    #[test]
+    fn cursor_keys_keep_a_pasted_list_of_links() {
+        let mut dialog = AddDialog::new(Some(&defaults()), Some("https://a/1\nhttps://a/2"));
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End] {
+            press(&mut dialog, code);
+            assert_eq!(
+                dialog.urls(),
+                vec!["https://a/1", "https://a/2"],
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_or_deleting_on_a_list_of_links_starts_over() {
+        let mut dialog = AddDialog::new(Some(&defaults()), Some("https://a/1\nhttps://a/2"));
+        type_text(&mut dialog, "h");
+        assert_eq!(dialog.urls(), vec!["h"]);
+
+        let mut dialog = AddDialog::new(Some(&defaults()), Some("https://a/1\nhttps://a/2"));
+        press(&mut dialog, KeyCode::Backspace);
+        assert!(dialog.urls().is_empty());
     }
 
     #[test]

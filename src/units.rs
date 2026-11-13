@@ -21,8 +21,9 @@ pub fn parse_speed(raw: &str) -> Result<u64, String> {
         "" | "b" => 1,
         "k" | "kb" | "kib" => 1024,
         "m" | "mb" | "mib" => 1024 * 1024,
-        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
-        other => return Err(format!("unknown speed unit '{other}'; use K, M or G")),
+        "g" | "gb" | "gib" => 1 << 30,
+        "t" | "tb" | "tib" => 1 << 40,
+        other => return Err(format!("unknown speed unit '{other}'; use K, M, G or T")),
     };
     Ok((value * multiplier as f64) as u64)
 }
@@ -49,6 +50,13 @@ mod tests {
         assert_eq!(parse_speed("off"), Ok(0));
         assert!(parse_speed("fast").is_err());
         assert!(parse_speed("10X").is_err());
+    }
+
+    #[test]
+    fn speeds_accept_tebibytes_as_shown_for_very_high_caps() {
+        assert_eq!(parse_speed("2T"), Ok(2 << 40));
+        assert_eq!(parse_speed("1.5 TiB/s"), Ok(3 << 39));
+        assert_eq!(parse_speed("1tb"), Ok(1 << 40));
     }
 
     #[test]

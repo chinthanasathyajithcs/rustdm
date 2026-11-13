@@ -195,7 +195,9 @@ async fn one_crawling_connection_does_not_hold_up_the_end_of_the_download() {
 async fn connections_that_turn_out_slow_one_after_another_are_overtaken_quickly() {
     let body = pattern_bytes(32 * MIB);
     // Every third connection crawls, the split-off pieces' connections included. All
-    // fast, eight connections would need one second.
+    // fast, eight connections would need one second. Left alone, one crawler's 4 MiB
+    // piece takes 32 s, so 4 s still catches a missed takeover while leaving room for
+    // slow CI runners (Windows once took 2.9 s).
     let srv = TestServer::start(
         body.clone(),
         Mode::SlowEvery {
@@ -218,7 +220,7 @@ async fn connections_that_turn_out_slow_one_after_another_are_overtaken_quickly(
         .unwrap();
     assert_eq!(std::fs::read(completed_path(outcome)).unwrap(), body);
     assert!(
-        started.elapsed() < Duration::from_millis(2800),
+        started.elapsed() < Duration::from_secs(4),
         "took {:?}",
         started.elapsed()
     );

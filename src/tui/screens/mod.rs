@@ -253,25 +253,41 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// "a Add · p Pause · …", as many entries as fit in `width` columns.
+/// Keys that always end the footer: Help lists the rest, and Quit is how out.
+const PINNED_KEYS: [&str; 2] = ["?", "q"];
+
+/// "a Add · p Pause · … · ? Help · q Quit": as many entries as fit in `width`
+/// columns, always ending with Help and Quit.
 fn keys_that_fit(keys: &[(&str, &str)], width: usize) -> String {
+    let entry = |(key, does): &(&str, &str)| format!("{key} {does}");
+    let pinned: Vec<String> = PINNED_KEYS
+        .iter()
+        .filter_map(|pin| keys.iter().find(|(key, _)| key == pin).map(entry))
+        .collect();
+    let pinned = pinned.join(SEPARATOR);
+    let separator = SEPARATOR.chars().count();
+    let room = width.saturating_sub(pinned.chars().count() + separator);
+
     let mut text = String::new();
-    for (key, does) in keys {
-        let entry = format!("{key} {does}");
-        let extra = if text.is_empty() {
-            0
-        } else {
-            SEPARATOR.chars().count()
-        };
-        if text.chars().count() + extra + entry.chars().count() > width {
+    for e in keys
+        .iter()
+        .filter(|(key, _)| !PINNED_KEYS.contains(key))
+        .map(entry)
+    {
+        let extra = if text.is_empty() { 0 } else { separator };
+        if text.chars().count() + extra + e.chars().count() > room {
             break;
         }
         if !text.is_empty() {
             text.push_str(SEPARATOR);
         }
-        text.push_str(&entry);
+        text.push_str(&e);
     }
-    text
+    match (text.is_empty(), pinned.is_empty()) {
+        (_, true) => text,
+        (true, false) => pinned,
+        (false, false) => format!("{text}{SEPARATOR}{pinned}"),
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +322,99 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
         screen_text(&terminal)
+    }
+
+    /// The spec's two reference sizes: the smallest that must be fully usable,
+    /// and a common larger one.
+    const REFERENCE_SIZES: [(u16, u16); 2] = [(80, 24), (120, 40)];
+
+    /// Each screen, Help, and each dialog, with text that must show whole.
+    fn rendering_cases() -> Vec<(&'static str, App, Vec<&'static str>)> {
+        use crate::tui::dialogs::confirm::ConfirmDialog;
+        use crate::tui::dialogs::speed::SpeedDialog;
+        use crate::tui::dialogs::Dialog;
+
+        let on = |screen: Screen| {
+            let mut app = sample_app();
+            app.screen = screen;
+            app
+        };
+        let with_help = |screen: Screen| {
+            let mut app = on(screen);
+            app.help_open = true;
+            app
+        };
+        let with_dialog = |dialog: Dialog| {
+            let mut app = sample_app();
+            app.dialogs.push(dialog);
+            app
+        };
+        let summary = sample_app().downloads[0].clone();
+        vec![
+            (
+                "downloads",
+                on(Screen::Downloads),
+                vec!["ubuntu.iso", "q Quit"],
+            ),
+            (
+                "settings",
+                on(Screen::Settings),
+                vec!["Downloads at once", "Speed cap per download"],
+            ),
+            ("logs", on(Screen::Logs), vec![" Log ", " Notices "]),
+            (
+                "downloads help",
+                with_help(Screen::Downloads),
+                vec!["Add", "Ctrl+C"],
+            ),
+            (
+                "settings help",
+                with_help(Screen::Settings),
+                vec!["Edit or save"],
+            ),
+            (
+                "add dialog",
+                with_dialog(Dialog::Add(Box::new(AddDialog::new(None, None)))),
+                vec!["Add a download", "URL", "Speed cap", "[ Enter Add ]"],
+            ),
+            (
+                "cancel dialog",
+                with_dialog(Dialog::Confirm(ConfirmDialog::cancel(&summary))),
+                vec!["Cancel dl_1 (ubuntu.iso)?", "n Keep it"],
+            ),
+            (
+                "stop dialog",
+                with_dialog(Dialog::Confirm(ConfirmDialog::stop_daemon(1))),
+                vec!["1 download will"],
+            ),
+            (
+                "speed dialog",
+                with_dialog(Dialog::Speed(SpeedDialog::new(&summary))),
+                vec!["[ Enter Save ]", "[ Esc Cancel ]"],
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_screen_and_dialog_shows_whole_at_the_reference_sizes() {
+        for (width, height) in REFERENCE_SIZES {
+            for (name, mut app, wanted) in rendering_cases() {
+                let text = draw(&mut app, width, height);
+                for line in text.lines() {
+                    assert_eq!(
+                        line.chars().count(),
+                        width as usize,
+                        "{name} at {width}×{height} has a line of the wrong width:\n{line}"
+                    );
+                }
+                for piece in wanted {
+                    assert!(
+                        text.contains(piece),
+                        "{name} at {width}×{height} is missing {piece:?}:\n{text}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -422,6 +531,23 @@ mod tests {
             .expect("Add button");
         let action = handle_event(&mut app, &click(button.x, button.y));
         assert!(matches!(action, Some(Action::Add(_))), "{action:?}");
+    }
+
+    #[test]
+    fn help_and_quit_always_end_the_footer() {
+        for width in [60, 80, 120] {
+            for screen in Screen::ALL {
+                let mut app = sample_app();
+                app.screen = screen;
+                let text = draw(&mut app, width, 24);
+                let footer = text.lines().last().unwrap().trim_end();
+                assert!(
+                    footer.ends_with("? Help · q Quit"),
+                    "{screen:?} at {width}: {footer:?}"
+                );
+                assert_eq!(footer.matches("q Quit").count(), 1, "{footer:?}");
+            }
+        }
     }
 
     #[test]

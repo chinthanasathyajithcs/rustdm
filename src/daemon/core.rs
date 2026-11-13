@@ -1,3 +1,4 @@
+use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::task::TaskRecord;
 use crate::daemon::{defaults, fair_share, queue_order};
@@ -64,6 +65,18 @@ fn rebalance_shares(state: &DaemonState, now: Instant) {
     for (task, share) in running.iter().zip(shares) {
         task.lock().unwrap().share_limiter.set_bytes_per_sec(share);
     }
+}
+
+/// A download's folder must be usable before it is queued, so a bad one is
+/// reported to the client (under the Add dialog's Folder field) instead of
+/// failing later in the table.
+fn check_download_folder(folder: &std::path::Path) -> Result<(), RpcError> {
+    folder_check::check_folder(folder).map_err(|problem| match problem {
+        FolderProblem::CantWrite(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            RpcError::permission_denied(folder)
+        }
+        other => RpcError::invalid_path(folder, &other.to_string()),
+    })
 }
 
 /// A speed cap must be 0 (none) or at least `MIN_BYTES_PER_SEC`.
@@ -241,6 +254,9 @@ impl DaemonCore {
             }
         }
 
+        let directory = params.destination.unwrap_or(defaults.folder);
+        check_download_folder(&directory)?;
+
         let task = {
             let mut state = self.state.lock().unwrap();
             if state.is_shutting_down {
@@ -260,7 +276,6 @@ impl DaemonCore {
 
             state.next_id += 1;
             let id = format!("dl_{}", state.next_id);
-            let directory = params.destination.unwrap_or(defaults.folder);
             let connections = params
                 .connections
                 .unwrap_or(defaults.connections as usize)
@@ -469,6 +484,7 @@ impl DaemonCore {
 
     /// Change the defaults for new downloads; fields left out are kept.
     pub fn set_defaults(&self, params: SetDefaultsParams) -> Result<DownloadDefaults, RpcError> {
+        defaults::check_folder(&params)?;
         let resolved = {
             let mut state = self.state.lock().unwrap();
             state.defaults = defaults::updated(&state.defaults, params, validate_speed)?;

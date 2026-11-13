@@ -10,10 +10,12 @@ use ratatui::Frame;
 
 /// Width of the progress bar in the table's PROGRESS column.
 pub const TABLE_BAR_WIDTH: usize = 10;
-/// Below this many columns the ETA column is left out.
-const ETA_MIN_WIDTH: u16 = 80;
-/// Below this many columns the SPEED column is left out too.
-const SPEED_MIN_WIDTH: u16 = 64;
+/// The shorter bar used when a full one would push SPEED out.
+const NARROW_BAR_WIDTH: usize = 6;
+/// Fewest cells the NAME column gets before another column is dropped.
+const NAME_MIN_WIDTH: u16 = 12;
+/// Space ratatui leaves between columns.
+const COLUMN_GAP: u16 = 1;
 
 /// The table's columns, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,26 +42,31 @@ impl Column {
         }
     }
 
-    fn width(self) -> Constraint {
+    /// Cells this column needs to show its widest value whole; NAME takes
+    /// whatever is left.
+    fn width(self, bar_width: usize) -> u16 {
         match self {
-            Column::Id => Constraint::Length(6),
-            Column::Name => Constraint::Min(12),
-            Column::Status => Constraint::Length(9),
-            Column::Progress => Constraint::Length(TABLE_BAR_WIDTH as u16 + 5),
-            Column::Size => Constraint::Length(21),
-            Column::Speed => Constraint::Length(12),
-            Column::Eta => Constraint::Length(8),
+            Column::Id => 6,
+            Column::Name => NAME_MIN_WIDTH,
+            Column::Status => 9,
+            // The bar, a space and "100%".
+            Column::Progress => bar_width as u16 + 5,
+            // "1023.9 MiB / 1023.9 MiB"
+            Column::Size => 23,
+            // "1023.9 KiB/s"
+            Column::Speed => 12,
+            Column::Eta => 8,
         }
     }
 
-    fn cell(self, d: &DownloadSummary) -> Cell<'static> {
+    fn cell(self, d: &DownloadSummary, bar_width: usize) -> Cell<'static> {
         match self {
             Column::Id => Cell::from(d.id.clone()),
             Column::Name => Cell::from(d.filename.clone()),
             Column::Status => {
                 Cell::from(status_label(d.status)).style(theme::status_style(d.status))
             }
-            Column::Progress => Cell::from(progress_bar(fraction_done(d), TABLE_BAR_WIDTH)),
+            Column::Progress => Cell::from(progress_bar(fraction_done(d), bar_width)),
             Column::Size => Cell::from(size_text(d)),
             Column::Speed => Cell::from(format_speed(d.speed_bps)),
             Column::Eta => Cell::from(format_eta(d.eta_secs)),
@@ -67,17 +74,58 @@ impl Column {
     }
 }
 
-/// The columns that fit a table `width` columns wide: ETA goes first, then SPEED.
-pub fn table_columns(width: u16) -> Vec<Column> {
+/// Which columns the table shows, and how wide its progress bars are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableLayout {
+    pub columns: Vec<Column>,
+    pub bar_width: usize,
+}
+
+impl TableLayout {
+    fn new(columns: &[Column], bar_width: usize) -> Self {
+        Self {
+            columns: columns.to_vec(),
+            bar_width,
+        }
+    }
+
+    /// Cells needed to show every column whole.
+    fn needed(&self) -> u16 {
+        let cells: u16 = self.columns.iter().map(|c| c.width(self.bar_width)).sum();
+        cells + COLUMN_GAP * (self.columns.len() as u16 - 1)
+    }
+
+    fn constraints(&self) -> Vec<Constraint> {
+        self.columns
+            .iter()
+            .map(|c| match c {
+                Column::Name => Constraint::Min(NAME_MIN_WIDTH),
+                other => Constraint::Length(other.width(self.bar_width)),
+            })
+            .collect()
+    }
+}
+
+/// The fullest layout that fits `width` cells without cutting a value short:
+/// ETA goes first (the inspector shows it), then the bar shortens, then SPEED
+/// and SIZE go. Narrower than the last, NAME is squeezed.
+pub fn table_layout(width: u16) -> TableLayout {
     use Column::*;
-    [Id, Name, Status, Progress, Size, Speed, Eta]
+    let candidates = [
+        TableLayout::new(
+            &[Id, Name, Status, Progress, Size, Speed, Eta],
+            TABLE_BAR_WIDTH,
+        ),
+        TableLayout::new(&[Id, Name, Status, Progress, Size, Speed], TABLE_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress, Size, Speed], NARROW_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress, Size], NARROW_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress], NARROW_BAR_WIDTH),
+    ];
+    let narrowest = candidates[candidates.len() - 1].clone();
+    candidates
         .into_iter()
-        .filter(|c| match c {
-            Eta => width >= ETA_MIN_WIDTH,
-            Speed => width >= SPEED_MIN_WIDTH,
-            _ => true,
-        })
-        .collect()
+        .find(|layout| layout.needed() <= width)
+        .unwrap_or(narrowest)
 }
 
 /// "██████░░░░ 60%" for a known size, or blanks while unknown.
@@ -142,11 +190,11 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
         .take(body_rows)
         .copied()
         .collect();
-    let columns = table_columns(area.width);
+    let layout = table_layout(inner.width);
     let rows: Vec<Row> = shown
         .iter()
         .map(|d| {
-            let row = Row::new(columns.iter().map(|c| c.cell(d)));
+            let row = Row::new(layout.columns.iter().map(|c| c.cell(d, layout.bar_width)));
             if app.selected.as_deref() == Some(d.id.as_str()) {
                 row.style(theme::SELECTED_ROW)
             } else {
@@ -165,9 +213,13 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
         })
         .collect();
 
-    let header = Row::new(columns.iter().map(|c| c.header())).style(theme::TABLE_HEADER);
-    let widths: Vec<Constraint> = columns.iter().map(|c| c.width()).collect();
-    frame.render_widget(Table::new(rows, widths).header(header), inner);
+    let header = Row::new(layout.columns.iter().map(|c| c.header())).style(theme::TABLE_HEADER);
+    frame.render_widget(
+        Table::new(rows, layout.constraints())
+            .header(header)
+            .column_spacing(COLUMN_GAP),
+        inner,
+    );
     app.table_offset = offset;
     hits
 }
@@ -189,30 +241,40 @@ mod tests {
     }
 
     #[test]
-    fn eta_drops_below_80_columns_and_speed_below_64() {
-        assert!(table_columns(80).contains(&Column::Eta));
-        assert!(!table_columns(79).contains(&Column::Eta));
-        assert!(table_columns(79).contains(&Column::Speed));
-        assert!(table_columns(64).contains(&Column::Speed));
-        assert!(!table_columns(63).contains(&Column::Speed));
-        assert!(table_columns(40).contains(&Column::Name));
+    fn columns_drop_eta_first_then_speed_then_size_as_the_table_narrows() {
+        let has = |width: u16, column: Column| table_layout(width).columns.contains(&column);
+        assert!(has(91, Column::Eta));
+        assert!(!has(90, Column::Eta));
+        assert!(has(78, Column::Speed), "an 80-column terminal keeps SPEED");
+        assert!(!has(77, Column::Speed));
+        assert!(has(65, Column::Size));
+        assert!(!has(64, Column::Size));
+        assert!(has(20, Column::Name) && has(20, Column::Progress));
+        assert_eq!(table_layout(91).bar_width, TABLE_BAR_WIDTH);
+        assert!(table_layout(78).bar_width < TABLE_BAR_WIDTH);
+    }
 
-        let mut app = sample_app();
-        let header = |text: String| {
-            text.lines()
-                .find(|l| l.contains("NAME"))
-                .unwrap()
-                .to_string()
-        };
-        let wide = header(draw(&mut app, 120, 30));
-        assert!(wide.contains("SPEED") && wide.contains("ETA"), "{wide}");
-        let medium = header(draw(&mut app, 70, 30));
-        assert!(
-            medium.contains("SPEED") && !medium.contains("ETA"),
-            "{medium}"
-        );
-        let narrow = header(draw(&mut app, 60, 30));
-        assert!(!narrow.contains("SPEED"), "{narrow}");
+    #[test]
+    fn every_cell_shows_whole_at_any_width() {
+        for width in [140, 100, 92, 91, 85, 80, 70, 66, 60, 50] {
+            let mut app = sample_app();
+            let text = draw(&mut app, width, 30);
+            let header = text.lines().find(|l| l.contains("NAME")).unwrap();
+            let row = text.lines().find(|l| l.contains("dl_1")).unwrap();
+            let mut wanted = vec!["ubuntu.iso", "active", " 40%"];
+            if header.contains("SIZE") {
+                wanted.push("40.0 MiB / 100.0 MiB");
+            }
+            if header.contains("SPEED") {
+                wanted.push("2.0 MiB/s");
+            }
+            if header.contains("ETA") {
+                wanted.push("30s");
+            }
+            for piece in wanted {
+                assert!(row.contains(piece), "{piece:?} cut at {width}:\n{text}");
+            }
+        }
     }
 
     #[test]

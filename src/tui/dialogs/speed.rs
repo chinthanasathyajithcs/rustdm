@@ -219,7 +219,7 @@ mod tests {
         let dialog = speed_dialog(&app);
         assert_eq!(
             dialog.error(),
-            Some("unknown speed unit 'mib/sx'; use K, M or G")
+            Some("unknown speed unit 'mib/sx'; use K, M, G or T")
         );
         assert!(!dialog.is_pending());
     }

@@ -1,10 +1,13 @@
 //! Interactive terminal dashboard (`rdm tui`) and its plain-text fallback.
 
 pub mod action;
+#[cfg(windows)]
+mod clipboard;
 pub mod daemon_link;
 pub mod dialogs;
 pub mod format;
 pub mod open_folder;
+pub mod paste;
 pub mod runtime;
 pub mod screens;
 pub mod state;
@@ -47,9 +50,11 @@ pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
     let (tx, rx) = mpsc::channel(64);
     // crossterm's reader blocks, so it gets its own thread. It ends with the process.
     std::thread::spawn(move || {
-        while let Ok(event) = event::read() {
-            if tx.blocking_send(event).is_err() {
-                break;
+        while let Ok(batch) = read_batch() {
+            for event in batch {
+                if tx.blocking_send(event).is_err() {
+                    return;
+                }
             }
         }
     });
@@ -58,6 +63,40 @@ pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
     restore_terminal();
     let _ = terminal.show_cursor();
     result
+}
+
+/// Longest pause between events that still counts as one burst. Pasted keys
+/// arrive together; typed ones are tens of milliseconds apart.
+#[cfg(windows)]
+const BURST_GAP: Duration = Duration::from_millis(2);
+/// Longest a batch is gathered, so nothing waits long behind a burst.
+#[cfg(windows)]
+const MAX_BATCH_TIME: Duration = Duration::from_millis(50);
+
+/// Windows terminals send no paste events, so gather a burst of typed keys
+/// that arrive together; the first other event (a shortcut, the mouse, a
+/// resize) ends the batch at once. Windows Terminal pastes Ctrl+V as such a
+/// burst, but the old console hands Ctrl+V to rdm, so that reads the clipboard.
+#[cfg(windows)]
+fn read_batch() -> io::Result<Vec<event::Event>> {
+    let started = std::time::Instant::now();
+    let mut batch = vec![event::read()?];
+    while batch.last().is_some_and(paste::continues_burst)
+        && started.elapsed() < MAX_BATCH_TIME
+        && event::poll(BURST_GAP)?
+    {
+        batch.push(event::read()?);
+    }
+    Ok(paste::coalesce_paste(batch)
+        .into_iter()
+        .map(|event| paste::expand_paste_shortcut(event, clipboard::read_text))
+        .collect())
+}
+
+/// Elsewhere the terminal reports a paste as one event (bracketed paste).
+#[cfg(not(windows))]
+fn read_batch() -> io::Result<Vec<event::Event>> {
+    Ok(vec![event::read()?])
 }
 
 fn enter_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {

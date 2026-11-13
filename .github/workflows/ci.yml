@@ -38,6 +38,22 @@ jobs:
       - name: Run tests
         run: cargo test --features testing
 
+      # A build to try by hand: rdm.exe needs rdmd.exe in the same folder.
+      - name: Build Windows programs
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release --bins
+
+      - name: Upload Windows programs
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdm-windows
+          path: |
+            target/release/rdm.exe
+            target/release/rdmd.exe
+          if-no-files-found: error
+          retention-days: 14
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest

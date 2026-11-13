@@ -127,16 +127,18 @@ fn move_in_queue(app: &mut App, position: QueuePosition) -> Option<Action> {
 }
 
 /// The selected download's file: `destination` is the file once the download
-/// has started, and the folder it goes in before that.
+/// has started (it ends in the file name), and the folder it goes in before
+/// that, which may not exist yet.
 fn open_selected_folder(app: &mut App) -> Option<Action> {
     let Some(d) = app.selected_summary() else {
         app.notify("Select a download first", true);
         return None;
     };
-    let path = if d.destination.is_dir() {
-        d.destination.join(&d.filename)
-    } else {
+    let is_file = d.destination.file_name() == Some(std::ffi::OsStr::new(&d.filename));
+    let path = if is_file {
         d.destination.clone()
+    } else {
+        d.destination.join(&d.filename)
     };
     Some(Action::OpenFolder(path))
 }
@@ -384,6 +386,17 @@ mod tests {
             handle_event(&mut app, &key(KeyCode::Char('o'))),
             Some(Action::OpenFolder(folder.path().join("dl_1.bin"))),
             "before it starts, the destination is its folder"
+        );
+
+        let mut waiting = app.downloads[0].clone();
+        waiting.destination = folder.path().join("not made yet");
+        app.set_downloads(vec![waiting]);
+        assert_eq!(
+            handle_event(&mut app, &key(KeyCode::Char('o'))),
+            Some(Action::OpenFolder(
+                folder.path().join("not made yet").join("dl_1.bin")
+            )),
+            "a folder that doesn't exist yet is still the folder, not the file"
         );
     }
 

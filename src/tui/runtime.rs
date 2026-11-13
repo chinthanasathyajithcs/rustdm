@@ -69,9 +69,10 @@ pub async fn run_app<B: Backend>(
 }
 
 /// Drop events that queued up while a dialog's or a field's submit was being
-/// carried out. Windows has no paste events, so a pasted list arrives as key
-/// presses with Enter between links; without this the letters after the first
-/// Enter would land on the screen below as shortcuts (`c` cancel, `d` delete).
+/// carried out. Windows has no paste events; the reader turns a burst of key
+/// presses into one paste (see `paste`), but if part of one still arrives as
+/// keys after an Enter, the letters would otherwise land on the screen below
+/// as shortcuts (`c` cancel, `d` delete).
 fn drop_type_ahead(events: &mut mpsc::Receiver<Event>) {
     while events.try_recv().is_ok() {}
 }
