@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// The program and arguments that show `path` in the file manager: selecting
@@ -29,8 +29,24 @@ pub fn open_command(path: &Path, file_exists: bool) -> (OsString, Vec<OsString>)
 
 /// Show `path` in the file manager without waiting for it.
 pub fn open_folder(path: &Path) -> io::Result<()> {
-    let (command, args) = open_command(path, path.is_file());
+    let shown = path_to_show(path);
+    let (command, args) = open_command(&shown, shown.is_file());
     spawn_detached(command, args)
+}
+
+/// `path` if its folder exists. Otherwise the first folder on the way to it
+/// that is missing, so the one above that (which exists) is opened: a queued
+/// download's folder is only made when it starts, and Explorer opens Documents
+/// for a folder that doesn't exist.
+fn path_to_show(path: &Path) -> PathBuf {
+    let mut shown = path;
+    while let Some(parent) = shown.parent() {
+        if parent.as_os_str().is_empty() || parent.is_dir() {
+            break;
+        }
+        shown = parent;
+    }
+    shown.to_path_buf()
 }
 
 /// Start `command` with no terminal input or output. A thread reaps it when it
@@ -111,6 +127,20 @@ mod tests {
         let (command, args) = open_command(Path::new("/home/me/Downloads/a.iso"), false);
         assert_eq!(command, "xdg-open");
         assert_eq!(strings(&args), vec!["/home/me/Downloads"]);
+    }
+
+    #[test]
+    fn the_path_shown_is_the_nearest_folder_that_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.iso");
+        assert_eq!(path_to_show(&file), file, "its folder exists");
+
+        let deep = dir.path().join("new").join("deeper").join("a.iso");
+        assert_eq!(
+            path_to_show(&deep),
+            dir.path().join("new"),
+            "the first missing folder, so its parent (which exists) is opened"
+        );
     }
 
     #[test]
