@@ -5,7 +5,7 @@ use rustdm::ipc::client::DaemonClient;
 use rustdm::ipc::protocol::{
     AddDownloadParams, CancelDownloadParams, DownloadIdParam, DownloadStatus, DownloadSummary,
     PingResult, RpcId, RpcMessage, RpcRequest, SetDefaultsParams, CODE_DOWNLOAD_NOT_FOUND,
-    CODE_INVALID_PARAMS, CODE_INVALID_PATH, CODE_PERMISSION_DENIED,
+    CODE_INVALID_PARAMS, CODE_INVALID_PATH,
 };
 use rustdm::ipc::transport::{IpcConnection, IpcEndpoint};
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
@@ -525,7 +525,12 @@ async fn adding_into_a_folder_that_cannot_be_written_is_refused() {
     let result = add_to(&core, locked.join("new"));
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     let err = result.expect_err("must be refused");
-    assert_eq!(err.code, CODE_PERMISSION_DENIED, "{}", err.message);
+    assert_eq!(
+        err.code,
+        rustdm::ipc::protocol::CODE_PERMISSION_DENIED,
+        "{}",
+        err.message
+    );
 }
 
 #[tokio::test]
