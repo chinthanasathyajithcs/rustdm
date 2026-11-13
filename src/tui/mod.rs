@@ -5,6 +5,7 @@ pub mod daemon_link;
 pub mod dialogs;
 pub mod format;
 pub mod open_folder;
+pub mod paste;
 pub mod runtime;
 pub mod screens;
 pub mod state;
@@ -47,9 +48,11 @@ pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
     let (tx, rx) = mpsc::channel(64);
     // crossterm's reader blocks, so it gets its own thread. It ends with the process.
     std::thread::spawn(move || {
-        while let Ok(event) = event::read() {
-            if tx.blocking_send(event).is_err() {
-                break;
+        while let Ok(batch) = read_batch() {
+            for event in paste::coalesce_paste(batch) {
+                if tx.blocking_send(event).is_err() {
+                    return;
+                }
             }
         }
     });
@@ -58,6 +61,21 @@ pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
     restore_terminal();
     let _ = terminal.show_cursor();
     result
+}
+
+/// Longest pause between events that still counts as one burst. Pasted keys
+/// arrive together; typed ones are tens of milliseconds apart.
+const BURST_GAP: Duration = Duration::from_millis(2);
+/// Most events gathered into one batch, so a long paste can't stall the screen.
+const MAX_BATCH: usize = 64 * 1024;
+
+/// The next event, and any that follow it within `BURST_GAP` of each other.
+fn read_batch() -> io::Result<Vec<event::Event>> {
+    let mut batch = vec![event::read()?];
+    while batch.len() < MAX_BATCH && event::poll(BURST_GAP)? {
+        batch.push(event::read()?);
+    }
+    Ok(batch)
 }
 
 fn enter_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
