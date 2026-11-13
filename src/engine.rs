@@ -223,7 +223,7 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
 }
 
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
-    let probe_result = probe::probe(client, &req.url).await?;
+    let probe_result = probe::probe_with_cancel(client, &req.url, req.cancel.as_ref()).await?;
     let final_path = resolve_output(&req, &probe_result);
     *req.progress.output.lock().unwrap() = Some(final_path.clone());
     let part_p = part_path(&final_path);
@@ -365,7 +365,7 @@ pub async fn resume_with_options(
         url::Url::parse(&state.url).map_err(|e| Error::Protocol(e.to_string()))?
     };
 
-    let probe_result = probe::probe(client, &target_url).await?;
+    let probe_result = probe::probe_with_cancel(client, &target_url, cancel.as_ref()).await?;
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
 
     // Without range support or a known size, the only way on is from byte 0.
