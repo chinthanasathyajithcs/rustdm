@@ -49,7 +49,7 @@ pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
     // crossterm's reader blocks, so it gets its own thread. It ends with the process.
     std::thread::spawn(move || {
         while let Ok(batch) = read_batch() {
-            for event in paste::coalesce_paste(batch) {
+            for event in batch {
                 if tx.blocking_send(event).is_err() {
                     return;
                 }
@@ -65,17 +65,32 @@ pub async fn run_interactive(endpoint: &IpcEndpoint) -> TuiResult<()> {
 
 /// Longest pause between events that still counts as one burst. Pasted keys
 /// arrive together; typed ones are tens of milliseconds apart.
+#[cfg(windows)]
 const BURST_GAP: Duration = Duration::from_millis(2);
-/// Most events gathered into one batch, so a long paste can't stall the screen.
-const MAX_BATCH: usize = 64 * 1024;
+/// Longest a batch is gathered, so nothing waits long behind a burst.
+#[cfg(windows)]
+const MAX_BATCH_TIME: Duration = Duration::from_millis(50);
 
-/// The next event, and any that follow it within `BURST_GAP` of each other.
+/// Windows terminals send no paste events, so gather a burst of typed keys
+/// that arrive together; the first other event (a shortcut, the mouse, a
+/// resize) ends the batch at once.
+#[cfg(windows)]
 fn read_batch() -> io::Result<Vec<event::Event>> {
+    let started = std::time::Instant::now();
     let mut batch = vec![event::read()?];
-    while batch.len() < MAX_BATCH && event::poll(BURST_GAP)? {
+    while batch.last().is_some_and(paste::continues_burst)
+        && started.elapsed() < MAX_BATCH_TIME
+        && event::poll(BURST_GAP)?
+    {
         batch.push(event::read()?);
     }
-    Ok(batch)
+    Ok(paste::coalesce_paste(batch))
+}
+
+/// Elsewhere the terminal reports a paste as one event (bracketed paste).
+#[cfg(not(windows))]
+fn read_batch() -> io::Result<Vec<event::Event>> {
+    Ok(vec![event::read()?])
 }
 
 fn enter_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {

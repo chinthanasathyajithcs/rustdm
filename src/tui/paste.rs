@@ -27,6 +27,12 @@ pub fn coalesce_paste(batch: Vec<Event>) -> Vec<Event> {
     out
 }
 
+/// Whether `event` could be part of a paste. Anything else (a shortcut, the
+/// mouse, a resize) ends the batch being gathered, so it is never held back.
+pub fn continues_burst(event: &Event) -> bool {
+    !matches!(typed(event), Typed::No)
+}
+
 /// Typed keys seen in a row, kept as they came in case they aren't a paste.
 #[derive(Default)]
 struct Run {
@@ -139,6 +145,27 @@ mod tests {
         assert_eq!(
             coalesce_paste(batch),
             vec![Event::Paste("https://A@".into())]
+        );
+    }
+
+    #[test]
+    fn only_typed_keys_keep_a_burst_going() {
+        assert!(continues_burst(&press(KeyCode::Char('a'))));
+        assert!(continues_burst(&release(KeyCode::Char('a'))));
+        assert!(continues_burst(&press(KeyCode::Enter)));
+        let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!continues_burst(&ctrl_c), "Ctrl+C is handled at once");
+        assert!(!continues_burst(&press(KeyCode::Esc)));
+        assert!(!continues_burst(&Event::Resize(80, 24)));
+        let moved = Event::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            !continues_burst(&moved),
+            "mouse motion can't hold keys back"
         );
     }
 
