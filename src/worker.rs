@@ -3,7 +3,7 @@ use crate::engine::Progress;
 use crate::error::Error;
 use crate::probe::Validator;
 use crate::ranges::ByteRange;
-use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
+use crate::retry::{backoff_delay, retry_after_secs, RetryCause, MAX_SEGMENT_ATTEMPTS};
 use crate::scheduler::{Crew, Lane};
 use crate::writer::PartFile;
 use reqwest::header::{ACCEPT_ENCODING, CONTENT_RANGE, IF_RANGE, RANGE, RETRY_AFTER};
@@ -97,14 +97,16 @@ pub async fn fetch_lane(
 
         let res = match or_cancel(req_builder.send(), cancel).await? {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
                 attempt += 1;
                 if attempt >= MAX_SEGMENT_ATTEMPTS {
                     return Err(Error::Protocol(format!(
                         "connection failed after {MAX_SEGMENT_ATTEMPTS} attempts"
                     )));
                 }
-                sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
+                let wait = backoff_delay(attempt, fastrand::f64());
+                progress.note_retry(RetryCause::of_failed_request(&e), wait);
+                sleep_or_cancel(wait, cancel).await?;
                 continue;
             }
         };
@@ -142,6 +144,12 @@ pub async fn fetch_lane(
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after_secs)
                 .unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
+            progress.note_retry(
+                RetryCause::Busy {
+                    status: status_code,
+                },
+                delay,
+            );
             sleep_or_cancel(delay, cancel).await?;
             continue;
         }
@@ -153,7 +161,14 @@ pub async fn fetch_lane(
                     "expected 206 Partial Content, received status {status_code}"
                 )));
             }
-            sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
+            let wait = backoff_delay(attempt, fastrand::f64());
+            progress.note_retry(
+                RetryCause::Unexpected {
+                    status: status_code,
+                },
+                wait,
+            );
+            sleep_or_cancel(wait, cancel).await?;
             continue;
         }
 
@@ -172,7 +187,9 @@ pub async fn fetch_lane(
             if attempt >= MAX_SEGMENT_ATTEMPTS {
                 return Err(Error::Protocol("wrong Content-Range".to_string()));
             }
-            sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
+            let wait = backoff_delay(attempt, fastrand::f64());
+            progress.note_retry(RetryCause::WrongPart, wait);
+            sleep_or_cancel(wait, cancel).await?;
             continue;
         }
 
@@ -234,6 +251,7 @@ pub async fn fetch_lane(
             // It was making progress: reconnect at once, with a fresh set of attempts.
             if current_offset > offset_at_start {
                 attempt = 0;
+                progress.note_retry(RetryCause::Dropped, std::time::Duration::ZERO);
                 continue;
             }
             attempt += 1;
@@ -242,7 +260,9 @@ pub async fn fetch_lane(
                     "short body or connection drop reached max attempts ({MAX_SEGMENT_ATTEMPTS})"
                 )));
             }
-            sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
+            let wait = backoff_delay(attempt, fastrand::f64());
+            progress.note_retry(RetryCause::Dropped, wait);
+            sleep_or_cancel(wait, cancel).await?;
             continue;
         }
     }

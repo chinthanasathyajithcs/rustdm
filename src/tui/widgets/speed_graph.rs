@@ -36,7 +36,7 @@ pub fn render_speed(frame: &mut Frame, app: &App, d: &DownloadSummary, area: Rec
     frame.render_widget(
         Sparkline::default()
             .data(&history[start..])
-            .style(theme::ACCENT),
+            .style(theme::GRAPH),
         graph,
     );
 }

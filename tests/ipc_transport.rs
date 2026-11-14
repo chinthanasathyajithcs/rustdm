@@ -81,6 +81,7 @@ async fn test_split_full_duplex_streaming() {
                 active_connections: 2,
                 segments: Vec::new(),
                 lanes: Vec::new(),
+                stall: None,
             };
             let notif =
                 RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));

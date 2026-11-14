@@ -406,3 +406,77 @@ async fn cancelling_while_the_server_never_answers_stops_a_resume_at_once() {
     );
     assert!(state_p.exists(), "the paused download is left as it was");
 }
+
+fn last_retry(progress: &Progress) -> Option<rustdm::retry::RetryCause> {
+    progress.last_retry.lock().unwrap().map(|note| note.cause)
+}
+
+#[tokio::test]
+async fn a_busy_server_is_noted_as_the_reason_for_waiting() {
+    let body = pattern_bytes(64 * KIB);
+    let srv = TestServer::start(
+        body.clone(),
+        Mode::FailThenOk {
+            status: 503,
+            times: 1,
+            retry_after: None,
+        },
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(&srv, "busy.bin", "{downloads}/{name}", dir.path());
+    let progress = Arc::clone(&req.progress);
+
+    download(&build_client(), req).await.unwrap();
+    assert_eq!(
+        last_retry(&progress),
+        Some(rustdm::retry::RetryCause::Busy { status: 503 })
+    );
+}
+
+#[tokio::test]
+async fn a_connection_that_went_silent_is_noted_as_dropped() {
+    let body = pattern_bytes(256 * KIB);
+    let srv = TestServer::start(body.clone(), Mode::Stall { after: 96 * KIB }).await;
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(&srv, "stall.bin", "{downloads}/{name}", dir.path());
+    let progress = Arc::clone(&req.progress);
+
+    tokio::time::timeout(Duration::from_secs(20), download(&impatient_client(), req))
+        .await
+        .expect("the download hung on a silent connection")
+        .unwrap();
+    assert_eq!(
+        last_retry(&progress),
+        Some(rustdm::retry::RetryCause::Dropped)
+    );
+}
+
+#[tokio::test]
+async fn a_server_that_never_answers_is_noted_as_not_answering() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let progress = Arc::new(Progress::new());
+    let req = DownloadRequest {
+        url: silent_server().await,
+        template: "{downloads}/{name}".to_string(),
+        file_name: None,
+        downloads_dir: dir.path().to_path_buf(),
+        connections: 1,
+        progress: Arc::clone(&progress),
+        cancel: Some(cancel_rx),
+    };
+    let running = tokio::spawn(async move { download(&impatient_client(), req).await });
+
+    // The probe's first attempt times out after 300 ms, then waits to try again.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while last_retry(&progress).is_none() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    cancel_tx.send(true).unwrap();
+    let _ = running.await;
+    assert_eq!(
+        last_retry(&progress),
+        Some(rustdm::retry::RetryCause::NoAnswer)
+    );
+}

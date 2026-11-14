@@ -1,10 +1,12 @@
 //! The downloads table, and the progress bar and size text it shares.
 
 use crate::ipc::protocol::DownloadSummary;
-use crate::tui::format::{format_bytes, format_eta, format_speed, fraction_done, status_label};
+use crate::tui::format::{format_bytes, format_eta, format_speed, fraction_done, status_span};
 use crate::tui::state::App;
 use crate::tui::theme;
 use ratatui::layout::{Constraint, Rect};
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
 
@@ -59,14 +61,16 @@ impl Column {
         }
     }
 
-    fn cell(self, d: &DownloadSummary, bar_width: usize) -> Cell<'static> {
+    fn cell(self, d: &DownloadSummary, bar_width: usize, stalled: bool) -> Cell<'static> {
         match self {
             Column::Id => Cell::from(d.id.clone()),
             Column::Name => Cell::from(d.filename.clone()),
-            Column::Status => {
-                Cell::from(status_label(d.status)).style(theme::status_style(d.status))
-            }
-            Column::Progress => Cell::from(progress_bar(fraction_done(d), bar_width)),
+            Column::Status => Cell::from(status_span(d.status, stalled)),
+            Column::Progress => Cell::from(Line::from(progress_spans(
+                fraction_done(d),
+                bar_width,
+                theme::BAR,
+            ))),
             Column::Size => Cell::from(size_text(d)),
             Column::Speed => Cell::from(format_speed(d.speed_bps)),
             Column::Eta => Cell::from(format_eta(d.eta_secs)),
@@ -130,18 +134,26 @@ pub fn table_layout(width: u16) -> TableLayout {
 
 /// "██████░░░░ 60%" for a known size, or blanks while unknown.
 pub fn progress_bar(fraction: Option<f64>, width: usize) -> String {
-    match fraction {
-        Some(f) => {
-            let filled = ((f * width as f64).round() as usize).min(width);
-            format!(
-                "{}{} {:>3.0}%",
-                "█".repeat(filled),
-                "░".repeat(width - filled),
-                f * 100.0
-            )
-        }
-        None => format!("{} ?", "░".repeat(width)),
-    }
+    progress_spans(fraction, width, Style::new())
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect()
+}
+
+/// `progress_bar` in colour: the filled part in `fill`, the rest as a faint track.
+pub fn progress_spans(fraction: Option<f64>, width: usize, fill: Style) -> Vec<Span<'static>> {
+    let (filled, label) = match fraction {
+        Some(f) => (
+            ((f * width as f64).round() as usize).min(width),
+            format!(" {:>3.0}%", f * 100.0),
+        ),
+        None => (0, " ?".to_string()),
+    };
+    vec![
+        Span::styled("█".repeat(filled), fill),
+        Span::styled("░".repeat(width - filled), theme::BAR_TRACK),
+        Span::raw(label),
+    ]
 }
 
 pub fn size_text(d: &DownloadSummary) -> String {
@@ -159,7 +171,7 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
     let block = Block::new()
         .borders(Borders::ALL)
         .title(" Downloads ")
-        .border_style(theme::DIM);
+        .border_style(theme::FRAME);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -194,7 +206,13 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
     let rows: Vec<Row> = shown
         .iter()
         .map(|d| {
-            let row = Row::new(layout.columns.iter().map(|c| c.cell(d, layout.bar_width)));
+            let stalled = app.stall_of(d).is_some();
+            let row = Row::new(
+                layout
+                    .columns
+                    .iter()
+                    .map(|c| c.cell(d, layout.bar_width, stalled)),
+            );
             if app.selected.as_deref() == Some(d.id.as_str()) {
                 row.style(theme::SELECTED_ROW)
             } else {
@@ -275,6 +293,34 @@ mod tests {
                 assert!(row.contains(piece), "{piece:?} cut at {width}:\n{text}");
             }
         }
+    }
+
+    #[test]
+    fn progress_bars_draw_the_filled_part_in_the_accent_and_the_rest_as_a_track() {
+        let mut app = sample_app();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (0..buffer.area.height)
+            .find(|&y| buffer[(1, y)].symbol() == "d" && buffer[(4, y)].symbol() == "1")
+            .unwrap();
+        let cells: Vec<_> = (0..buffer.area.width).map(|x| &buffer[(x, y)]).collect();
+        let filled = cells.iter().find(|c| c.symbol() == "█").unwrap();
+        let empty = cells.iter().find(|c| c.symbol() == "░").unwrap();
+        assert_eq!(filled.fg, theme::palette::AMBER);
+        assert_eq!(empty.fg, theme::palette::TRACK);
+    }
+
+    #[test]
+    fn a_stalled_download_says_so_in_the_status_column() {
+        let mut app = sample_app();
+        app.ticks.get_mut("dl_1").unwrap().stall = Some("no data for 42s".to_string());
+        let text = draw(&mut app, 80, 24);
+        let row = text.lines().find(|l| l.contains("dl_1")).unwrap();
+        assert!(row.contains("stalled"), "{text}");
+        assert!(!row.contains("active"), "{text}");
     }
 
     #[test]

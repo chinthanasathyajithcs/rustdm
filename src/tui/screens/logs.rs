@@ -149,7 +149,7 @@ fn render_notices(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::new()
         .borders(Borders::ALL)
         .title(" Notices ")
-        .border_style(theme::DIM);
+        .border_style(theme::FRAME);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if app.history.is_empty() {

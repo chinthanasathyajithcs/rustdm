@@ -9,6 +9,7 @@ pub mod queue_store;
 pub mod server;
 pub mod service;
 pub mod speed;
+pub mod stall;
 pub mod task;
 
 pub use core::{DaemonCore, DaemonState};

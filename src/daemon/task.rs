@@ -58,6 +58,8 @@ pub struct TaskRecord {
     pub share_limiter: Arc<RateLimiter>,
     /// When the current engine run started.
     pub run_started: Instant,
+    /// When new data last arrived, or the current run started.
+    pub moved_at: Instant,
     /// An engine task is running for this download.
     pub running: bool,
     /// Paused by daemon shutdown rather than by the user, so it is queued again on restart.
@@ -105,6 +107,7 @@ impl TaskRecord {
             speed_limiter,
             share_limiter,
             run_started: Instant::now(),
+            moved_at: Instant::now(),
             running: false,
             resume_after_restart: false,
             delete_on_stop: false,
@@ -308,6 +311,7 @@ impl TaskRecord {
     pub fn begin_run(&mut self) {
         self.speed.reset();
         self.run_started = Instant::now();
+        self.moved_at = self.run_started;
         self.bytes_at_start = self.downloaded_bytes;
         self.retry_at = None;
     }
@@ -321,6 +325,9 @@ impl TaskRecord {
     /// Returns the byte count.
     pub fn measure(&mut self, now: Instant) -> u64 {
         let bytes = self.progress.downloaded.load(Ordering::Relaxed);
+        if bytes != self.downloaded_bytes {
+            self.moved_at = now;
+        }
         self.downloaded_bytes = bytes;
         self.speed_bps = self.speed.record(now, bytes);
         self.eta_secs = match self.total_bytes {
@@ -329,6 +336,17 @@ impl TaskRecord {
             _ => None,
         };
         bytes
+    }
+}
+
+impl TaskRecord {
+    /// Why this active download has had no new data for a while, if it hasn't.
+    pub fn stall(&self, now: Instant) -> Option<String> {
+        if self.status != DownloadStatus::Active {
+            return None;
+        }
+        let retry = *self.progress.last_retry.lock().unwrap();
+        crate::daemon::stall::describe(self.moved_at, retry, now)
     }
 }
 
@@ -359,6 +377,29 @@ mod tests {
         );
         rec.status = status;
         rec
+    }
+
+    #[test]
+    fn an_active_download_without_new_data_says_it_has_stalled() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.begin_run();
+        let started = rec.moved_at;
+        rec.measure(started + Duration::from_secs(6));
+        assert_eq!(
+            rec.stall(started + Duration::from_secs(6)).as_deref(),
+            Some("no data for 6s")
+        );
+
+        rec.progress.downloaded.store(4096, Ordering::Relaxed);
+        rec.measure(started + Duration::from_secs(7));
+        assert_eq!(rec.stall(started + Duration::from_secs(8)), None);
+    }
+
+    #[test]
+    fn only_an_active_download_can_be_stalled() {
+        let mut rec = record(DownloadStatus::Paused);
+        rec.begin_run();
+        assert_eq!(rec.stall(rec.moved_at + Duration::from_secs(60)), None);
     }
 
     #[test]

@@ -225,6 +225,14 @@ impl App {
         self.visible().into_iter().find(|d| &d.id == id)
     }
 
+    /// Why `d` has had no new data for a while, while it is active.
+    pub fn stall_of(&self, d: &DownloadSummary) -> Option<&str> {
+        if d.status != DownloadStatus::Active {
+            return None;
+        }
+        self.ticks.get(&d.id)?.stall.as_deref()
+    }
+
     pub fn selected_index(&self) -> Option<usize> {
         let id = self.selected.as_ref()?;
         self.visible().iter().position(|d| &d.id == id)
@@ -394,6 +402,7 @@ pub(crate) mod test_support {
                     state: "active".to_string(),
                 },
             ],
+            stall: None,
         });
         app
     }
@@ -429,6 +438,23 @@ mod tests {
     }
 
     #[test]
+    fn only_an_active_download_reports_a_stall() {
+        let mut app = sample_app();
+        let reason = "no data for 42s: server busy (HTTP 503), retrying in 8s";
+        app.ticks.get_mut("dl_1").unwrap().stall = Some(reason.to_string());
+        assert_eq!(app.stall_of(&app.downloads[0]), Some(reason));
+
+        let mut paused = app.downloads[0].clone();
+        paused.status = DownloadStatus::Paused;
+        app.downloads = vec![paused];
+        assert_eq!(
+            app.stall_of(&app.downloads[0]),
+            None,
+            "an old tick is ignored"
+        );
+    }
+
+    #[test]
     fn speed_history_is_capped() {
         let mut app = App::default();
         for i in 0..(SPEED_HISTORY_LEN as u64 + 5) {
@@ -440,6 +466,7 @@ mod tests {
                 active_connections: 1,
                 segments: Vec::new(),
                 lanes: Vec::new(),
+                stall: None,
             });
         }
         let history = &app.speed_history["dl_1"];

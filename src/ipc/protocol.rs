@@ -577,6 +577,10 @@ pub struct TelemetryTick {
     /// `start`, and `state` is "active" or "done".
     #[serde(default)]
     pub lanes: Vec<SegmentProgress>,
+    /// Why an active download has had no new data for a while, such as
+    /// "no data for 42s: server busy (HTTP 503), retrying in 8s".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,6 +771,7 @@ mod tests {
                 state: "active".to_string(),
             }],
             lanes: Vec::new(),
+            stall: None,
         };
         let notif =
             RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));

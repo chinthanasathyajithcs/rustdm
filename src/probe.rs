@@ -1,6 +1,7 @@
 use crate::cancel::{or_cancel, sleep_or_cancel};
+use crate::engine::Progress;
 use crate::error::Error;
-use crate::retry::{backoff_delay, retry_after_secs, MAX_SEGMENT_ATTEMPTS};
+use crate::retry::{backoff_delay, retry_after_secs, RetryCause, MAX_SEGMENT_ATTEMPTS};
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED,
     RANGE, RETRY_AFTER,
@@ -46,6 +47,21 @@ pub async fn probe_with_cancel(
     url: &url::Url,
     cancel: Option<&watch::Receiver<bool>>,
 ) -> Result<Probe, Error> {
+    probe_for(client, url, cancel, None).await
+}
+
+/// `probe_with_cancel`, noting on `progress` why each failed attempt is retried.
+pub async fn probe_for(
+    client: &reqwest::Client,
+    url: &url::Url,
+    cancel: Option<&watch::Receiver<bool>>,
+    progress: Option<&Progress>,
+) -> Result<Probe, Error> {
+    let note = |cause, wait| {
+        if let Some(p) = progress {
+            p.note_retry(cause, wait);
+        }
+    };
     let mut attempt = 0u32;
     let res = loop {
         let request = client
@@ -60,7 +76,9 @@ pub async fn probe_with_cancel(
                 if attempt >= MAX_SEGMENT_ATTEMPTS {
                     return Err(Error::Http(e));
                 }
-                sleep_or_cancel(backoff_delay(attempt, fastrand::f64()), cancel).await?;
+                let wait = backoff_delay(attempt, fastrand::f64());
+                note(RetryCause::of_failed_request(&e), wait);
+                sleep_or_cancel(wait, cancel).await?;
                 continue;
             }
         };
@@ -79,6 +97,12 @@ pub async fn probe_with_cancel(
                 .and_then(|v| v.to_str().ok())
                 .and_then(retry_after_secs)
                 .unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
+            note(
+                RetryCause::Busy {
+                    status: status_code,
+                },
+                delay,
+            );
             sleep_or_cancel(delay, cancel).await?;
             continue;
         }
