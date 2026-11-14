@@ -32,7 +32,8 @@ pub fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::new()
         .borders(Borders::ALL)
         .title(format!(" {} ", d.filename))
-        .border_style(theme::ACCENT);
+        .title_style(theme::PANEL_TITLE)
+        .border_style(theme::PANEL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

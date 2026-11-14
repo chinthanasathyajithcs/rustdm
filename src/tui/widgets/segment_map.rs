@@ -57,6 +57,23 @@ pub fn segment_cells(
     map
 }
 
+/// "Segments  █ done  ▒ partial  ▌ connection  ░ missing", each mark in its map colour.
+fn legend() -> Line<'static> {
+    let mut spans = vec![Span::styled("Segments", theme::MUTED)];
+    for (mark, style, name) in [
+        ("█", theme::SEGMENT_DONE, "done"),
+        ("▒", theme::SEGMENT_PARTIAL, "partial"),
+        ("▌", theme::SEGMENT_CURSOR, "connection"),
+        // The missing mark is drawn faint on the map; the legend needs it visible.
+        ("░", theme::DIM, "missing"),
+    ] {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(mark, style));
+        spans.push(Span::styled(format!(" {name}"), theme::MUTED));
+    }
+    Line::from(spans)
+}
+
 pub fn render_segment_map(
     frame: &mut Frame,
     d: &DownloadSummary,
@@ -68,10 +85,7 @@ pub fn render_segment_map(
     }
     let rows = (area.height - 1) as usize;
     let width = area.width as usize;
-    let title = Line::from(Span::styled(
-        "Segments  █ done  ▒ partial  ▌ connection  ░ missing",
-        theme::MUTED,
-    ));
+    let title = legend();
 
     let total = d
         .total_bytes
@@ -105,10 +119,10 @@ pub fn render_segment_map(
         let spans: Vec<Span> = row
             .iter()
             .map(|cell| match cell {
-                MapCell::Done => Span::styled("█", theme::SUCCESS),
-                MapCell::Partial => Span::styled("▒", theme::ACCENT),
-                MapCell::Cursor => Span::styled("▌", theme::WORKING),
-                MapCell::Empty => Span::styled("░", theme::DIM),
+                MapCell::Done => Span::styled("█", theme::SEGMENT_DONE),
+                MapCell::Partial => Span::styled("▒", theme::SEGMENT_PARTIAL),
+                MapCell::Cursor => Span::styled("▌", theme::SEGMENT_CURSOR),
+                MapCell::Empty => Span::styled("░", theme::SEGMENT_MISSING),
             })
             .collect();
         lines.push(Line::from(spans));

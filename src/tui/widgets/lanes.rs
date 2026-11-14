@@ -3,7 +3,7 @@
 use crate::ipc::protocol::TelemetryTick;
 use crate::tui::format::format_bytes;
 use crate::tui::theme;
-use crate::tui::widgets::table::progress_bar;
+use crate::tui::widgets::table::progress_spans;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -33,15 +33,14 @@ pub fn render_lanes(frame: &mut Frame, tick: Option<&TelemetryTick>, area: Rect)
         } else {
             theme::SUCCESS
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("#{:<3}", i + 1), theme::MUTED),
-            Span::styled(progress_bar(fraction, bar_width), style),
-            Span::raw(format!(
-                "  {} of {}",
-                format_bytes(lane.downloaded_bytes),
-                format_bytes(len)
-            )),
-        ]));
+        let mut spans = vec![Span::styled(format!("#{:<3}", i + 1), theme::MUTED)];
+        spans.extend(progress_spans(fraction, bar_width, style));
+        spans.push(Span::raw(format!(
+            "  {} of {}",
+            format_bytes(lane.downloaded_bytes),
+            format_bytes(len)
+        )));
+        lines.push(Line::from(spans));
     }
     if t.lanes.len() > MAX_LANE_LINES {
         lines.push(Line::from(Span::styled(

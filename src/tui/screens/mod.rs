@@ -245,12 +245,28 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             };
             Line::from(Span::styled(notice.text.clone(), style))
         }
-        None => Line::from(Span::styled(
-            keys_that_fit(help::keys(app.screen), area.width as usize),
-            theme::DIM,
-        )),
+        None => Line::from(footer_spans(&keys_that_fit(
+            help::keys(app.screen),
+            area.width as usize,
+        ))),
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// "a Add · p Pause" with each key picked out from what it does.
+fn footer_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, entry) in text.split(SEPARATOR).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(SEPARATOR, theme::DIM));
+        }
+        let (key, does) = entry.split_once(' ').unwrap_or((entry, ""));
+        spans.push(Span::styled(key.to_string(), theme::KEY));
+        if !does.is_empty() {
+            spans.push(Span::styled(format!(" {does}"), theme::DIM));
+        }
+    }
+    spans
 }
 
 /// Keys that always end the footer: Help lists the rest, and Quit is how out.
@@ -299,6 +315,19 @@ mod tests {
     use crate::tui::dialogs::DialogTarget;
     use crate::tui::state::test_support::{app_with, sample_app, screen_text};
     use crate::tui::state::{App, Screen};
+
+    #[test]
+    fn footer_keys_stand_out_from_what_they_do() {
+        let spans = footer_spans("a Add · v Speed cap · ? Help");
+        let keys: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.style == theme::KEY)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(keys, ["a", "v", "?"]);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "a Add · v Speed cap · ? Help");
+    }
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,

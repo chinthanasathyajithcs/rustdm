@@ -260,7 +260,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) -> Vec<(Rect, Tab)> {
     let tabs = tabs_layout(app, area);
     for (rect, tab) in &tabs {
         let style = if *tab == app.tab {
-            theme::BRAND
+            theme::TAB_SELECTED
         } else {
             theme::MUTED
         };
