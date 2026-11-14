@@ -111,8 +111,8 @@ impl TableLayout {
 }
 
 /// The fullest layout that fits `width` cells without cutting a value short:
-/// ETA goes first (the inspector shows it), then the bar shortens, then SPEED
-/// and SIZE go. Narrower than the last, NAME is squeezed.
+/// ETA goes first, then SIZE (the details pane shows both), then the bar
+/// shortens, then SPEED goes. Narrower than the last, NAME is squeezed.
 pub fn table_layout(width: u16) -> TableLayout {
     use Column::*;
     let candidates = [
@@ -121,8 +121,8 @@ pub fn table_layout(width: u16) -> TableLayout {
             TABLE_BAR_WIDTH,
         ),
         TableLayout::new(&[Id, Name, Status, Progress, Size, Speed], TABLE_BAR_WIDTH),
-        TableLayout::new(&[Id, Name, Status, Progress, Size, Speed], NARROW_BAR_WIDTH),
-        TableLayout::new(&[Id, Name, Status, Progress, Size], NARROW_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress, Speed], TABLE_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress, Speed], NARROW_BAR_WIDTH),
         TableLayout::new(&[Id, Name, Status, Progress], NARROW_BAR_WIDTH),
     ];
     let narrowest = candidates[candidates.len() - 1].clone();
@@ -259,17 +259,31 @@ mod tests {
     }
 
     #[test]
-    fn columns_drop_eta_first_then_speed_then_size_as_the_table_narrows() {
+    fn columns_drop_eta_first_then_size_then_the_bar_shortens_then_speed_goes() {
         let has = |width: u16, column: Column| table_layout(width).columns.contains(&column);
         assert!(has(91, Column::Eta));
         assert!(!has(90, Column::Eta));
-        assert!(has(78, Column::Speed), "an 80-column terminal keeps SPEED");
-        assert!(!has(77, Column::Speed));
-        assert!(has(65, Column::Size));
-        assert!(!has(64, Column::Size));
+        assert!(has(82, Column::Size));
+        assert!(!has(81, Column::Size));
+        assert_eq!(table_layout(58).bar_width, TABLE_BAR_WIDTH);
+        assert!(table_layout(57).bar_width < TABLE_BAR_WIDTH);
+        assert!(has(54, Column::Speed));
+        assert!(!has(53, Column::Speed));
         assert!(has(20, Column::Name) && has(20, Column::Progress));
-        assert_eq!(table_layout(91).bar_width, TABLE_BAR_WIDTH);
-        assert!(table_layout(78).bar_width < TABLE_BAR_WIDTH);
+    }
+
+    #[test]
+    fn an_80_column_terminal_keeps_the_full_bar_and_gives_name_the_room() {
+        // 80 columns leave 78 inside the border.
+        let layout = table_layout(78);
+        assert_eq!(layout.bar_width, TABLE_BAR_WIDTH);
+        assert!(layout.columns.contains(&Column::Speed));
+        assert!(
+            !layout.columns.contains(&Column::Size),
+            "the details pane shows the size"
+        );
+        let name_cells = 78 - layout.needed() + NAME_MIN_WIDTH;
+        assert!(name_cells >= 30, "NAME gets {name_cells} cells");
     }
 
     #[test]
