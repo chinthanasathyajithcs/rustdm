@@ -42,6 +42,14 @@ pub fn check_folder(folder: &Path) -> Result<(), FolderProblem> {
 /// Create and remove an empty file in `folder`. Each probe has its own name,
 /// so two checks running at once never remove each other's file.
 fn probe_write(folder: &Path) -> io::Result<()> {
+    probe_write_with(folder, |probe| std::fs::remove_file(probe))
+}
+
+/// `probe_write`, removing the probe file with `remove`. Creating the file is
+/// the test; a file that can't be removed straight away (an antivirus or sync
+/// client holding it on Windows) leaves the folder writable, so that is only
+/// logged.
+fn probe_write_with(folder: &Path, remove: impl Fn(&Path) -> io::Result<()>) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let probe = folder.join(format!(".rdm-write-test-{}-{n}", std::process::id()));
@@ -49,5 +57,31 @@ fn probe_write(folder: &Path) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(&probe)?;
-    std::fs::remove_file(&probe)
+    if let Err(e) = remove(&probe) {
+        tracing::warn!(
+            "Could not remove the write test file {}: {e}",
+            probe.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_file_that_cannot_be_removed_still_counts_as_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = |_: &Path| Err(io::Error::new(io::ErrorKind::PermissionDenied, "in use"));
+        assert!(probe_write_with(dir.path(), held).is_ok());
+    }
+
+    #[test]
+    fn a_folder_that_cannot_take_a_new_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        // Creating inside a folder that isn't there fails like a refused write.
+        assert!(probe_write_with(&missing, |p| std::fs::remove_file(p)).is_err());
+    }
 }
