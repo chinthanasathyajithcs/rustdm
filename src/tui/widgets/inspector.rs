@@ -174,9 +174,10 @@ mod tests {
             "the cap outranks connections: {medium}"
         );
 
-        // At 80 the table has no ETA column, so ETA must stay here.
+        // At 80 the table has no ETA or SIZE column, so both must stay here.
         let narrow = status_line(80);
         assert!(narrow.contains("ETA 30s"), "{narrow}");
+        assert!(narrow.contains("Size 40.0 MiB / 100.0 MiB"), "{narrow}");
         assert!(
             !narrow.contains("Connec"),
             "nothing is cut halfway: {narrow}"
