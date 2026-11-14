@@ -1,4 +1,6 @@
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
+use crate::tui::theme;
+use ratatui::text::Span;
 
 pub fn status_label(status: DownloadStatus) -> &'static str {
     match status {
@@ -10,6 +12,16 @@ pub fn status_label(status: DownloadStatus) -> &'static str {
         DownloadStatus::Completed => "completed",
         DownloadStatus::Failed => "failed",
         DownloadStatus::Cancelled => "cancelled",
+    }
+}
+
+/// The status word for a download, in its colour: "stalled" for an active
+/// download that has had no data for a while.
+pub fn status_span(status: DownloadStatus, stalled: bool) -> Span<'static> {
+    if stalled && status == DownloadStatus::Active {
+        Span::styled("stalled", theme::STALLED)
+    } else {
+        Span::styled(status_label(status), theme::status_style(status))
     }
 }
 

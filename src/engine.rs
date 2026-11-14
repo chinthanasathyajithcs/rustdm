@@ -3,6 +3,7 @@ use crate::error::Error;
 use crate::limiter::{throttle_all, RateLimiter};
 use crate::probe::{self, Probe};
 use crate::ranges::{ByteRange, RangeSet};
+use crate::retry::{RetryCause, RetryNote};
 use crate::scheduler::{pick_victim, steal, Crew, Lane};
 use crate::state::{self, part_path, State, STATE_VERSION};
 use crate::template::{self, Tokens};
@@ -30,6 +31,8 @@ pub struct Progress {
     pub download_limiter: Option<Arc<RateLimiter>>,
     /// The connection lanes of a multi-connection download, once it has started.
     pub lanes: Mutex<Option<SharedLanes>>,
+    /// The latest reason a connection had to try again, if any.
+    pub last_retry: Mutex<Option<RetryNote>>,
 }
 
 type SharedLanes = Arc<std::sync::RwLock<Vec<crate::scheduler::Lane>>>;
@@ -53,6 +56,7 @@ impl Progress {
             rate_limiter: None,
             download_limiter: None,
             lanes: Mutex::new(None),
+            last_retry: Mutex::new(None),
         }
     }
 
@@ -80,6 +84,16 @@ impl Progress {
     ) -> Result<(), Error> {
         let limiters = [&self.rate_limiter, &self.download_limiter];
         throttle_all(limiters.into_iter().flatten().map(|l| &**l), bytes, cancel).await
+    }
+
+    /// Record that a connection hit `cause` and will try again after `wait`.
+    pub fn note_retry(&self, cause: RetryCause, wait: Duration) {
+        let at = Instant::now();
+        *self.last_retry.lock().unwrap() = Some(RetryNote {
+            cause,
+            at,
+            next_at: at + wait,
+        });
     }
 
     /// Current position of every connection lane; empty for single-connection downloads.
@@ -223,7 +237,8 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
 }
 
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
-    let probe_result = probe::probe_with_cancel(client, &req.url, req.cancel.as_ref()).await?;
+    let probe_result =
+        probe::probe_for(client, &req.url, req.cancel.as_ref(), Some(&req.progress)).await?;
     let final_path = resolve_output(&req, &probe_result);
     *req.progress.output.lock().unwrap() = Some(final_path.clone());
     let part_p = part_path(&final_path);
@@ -365,8 +380,9 @@ pub async fn resume_with_options(
         url::Url::parse(&state.url).map_err(|e| Error::Protocol(e.to_string()))?
     };
 
-    let probe_result = probe::probe_with_cancel(client, &target_url, cancel.as_ref()).await?;
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
+    let probe_result =
+        probe::probe_for(client, &target_url, cancel.as_ref(), Some(&progress)).await?;
 
     // Without range support or a known size, the only way on is from byte 0.
     if !probe_result.ranges_supported || state.total == 0 {

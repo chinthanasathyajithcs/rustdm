@@ -38,6 +38,9 @@ pub const PROMPT: Style = Style::new().fg(Color::Green).add_modifier(Modifier::B
 /// A question that needs an answer before anything else happens.
 pub const CONFIRM: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 
+/// An active download that has had no data for a while.
+pub const STALLED: Style = Style::new().fg(Color::LightRed);
+
 pub fn status_style(status: DownloadStatus) -> Style {
     let color = match status {
         DownloadStatus::Active => Color::Cyan,

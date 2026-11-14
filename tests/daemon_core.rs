@@ -679,3 +679,43 @@ fn ping_without_a_data_folder_reports_none() {
     assert_eq!(reply.data_dir, None);
     assert_eq!(reply.log_path, None);
 }
+
+#[tokio::test]
+async fn an_active_download_that_gets_no_data_reports_a_stall_in_its_ticks() {
+    // A server that takes connections and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let folder = tempfile::tempdir().unwrap();
+    let core = DaemonCore::new();
+    let summary = core
+        .add_download(AddDownloadParams {
+            destination: Some(folder.path().to_path_buf()),
+            ..add_without_options(format!("http://{addr}/silent.bin"))
+        })
+        .unwrap();
+    assert_eq!(summary.status, DownloadStatus::Active);
+
+    let mut ticks = core.telemetry_tx.subscribe();
+    core.tick_telemetry();
+    let early = ticks.recv().await.unwrap();
+    assert_eq!(early.stall, None, "too soon to call it a stall");
+
+    tokio::time::sleep(rustdm::daemon::stall::STALL_NOTICE_AFTER + Duration::from_millis(300))
+        .await;
+    core.tick_telemetry();
+    let late = ticks.recv().await.unwrap();
+    let stall = late.stall.expect("no stall reported");
+    assert!(stall.starts_with("no data for 5s"), "{stall}");
+
+    core.cancel_download(CancelDownloadParams {
+        id: summary.id,
+        delete_partial: true,
+    })
+    .unwrap();
+}

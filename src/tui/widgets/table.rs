@@ -1,7 +1,7 @@
 //! The downloads table, and the progress bar and size text it shares.
 
 use crate::ipc::protocol::DownloadSummary;
-use crate::tui::format::{format_bytes, format_eta, format_speed, fraction_done, status_label};
+use crate::tui::format::{format_bytes, format_eta, format_speed, fraction_done, status_span};
 use crate::tui::state::App;
 use crate::tui::theme;
 use ratatui::layout::{Constraint, Rect};
@@ -59,13 +59,11 @@ impl Column {
         }
     }
 
-    fn cell(self, d: &DownloadSummary, bar_width: usize) -> Cell<'static> {
+    fn cell(self, d: &DownloadSummary, bar_width: usize, stalled: bool) -> Cell<'static> {
         match self {
             Column::Id => Cell::from(d.id.clone()),
             Column::Name => Cell::from(d.filename.clone()),
-            Column::Status => {
-                Cell::from(status_label(d.status)).style(theme::status_style(d.status))
-            }
+            Column::Status => Cell::from(status_span(d.status, stalled)),
             Column::Progress => Cell::from(progress_bar(fraction_done(d), bar_width)),
             Column::Size => Cell::from(size_text(d)),
             Column::Speed => Cell::from(format_speed(d.speed_bps)),
@@ -194,7 +192,13 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
     let rows: Vec<Row> = shown
         .iter()
         .map(|d| {
-            let row = Row::new(layout.columns.iter().map(|c| c.cell(d, layout.bar_width)));
+            let stalled = app.stall_of(d).is_some();
+            let row = Row::new(
+                layout
+                    .columns
+                    .iter()
+                    .map(|c| c.cell(d, layout.bar_width, stalled)),
+            );
             if app.selected.as_deref() == Some(d.id.as_str()) {
                 row.style(theme::SELECTED_ROW)
             } else {
@@ -275,6 +279,16 @@ mod tests {
                 assert!(row.contains(piece), "{piece:?} cut at {width}:\n{text}");
             }
         }
+    }
+
+    #[test]
+    fn a_stalled_download_says_so_in_the_status_column() {
+        let mut app = sample_app();
+        app.ticks.get_mut("dl_1").unwrap().stall = Some("no data for 42s".to_string());
+        let text = draw(&mut app, 80, 24);
+        let row = text.lines().find(|l| l.contains("dl_1")).unwrap();
+        assert!(row.contains("stalled"), "{text}");
+        assert!(!row.contains("active"), "{text}");
     }
 
     #[test]

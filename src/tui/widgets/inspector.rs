@@ -1,7 +1,7 @@
 //! The inspector pane under the table: details of the selected download.
 
 use crate::ipc::protocol::{DownloadSummary, TelemetryTick};
-use crate::tui::format::{format_eta, format_speed, format_speed_cap, status_label};
+use crate::tui::format::{format_eta, format_speed, format_speed_cap, status_span};
 use crate::tui::state::App;
 use crate::tui::theme;
 use crate::tui::widgets::lanes::{render_lanes, MAX_LANE_LINES};
@@ -46,7 +46,7 @@ pub fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
     ])
     .areas(inner);
 
-    render_info(frame, d, tick, info);
+    render_info(frame, d, tick, app.stall_of(d), info);
     render_segment_map(frame, d, tick, map);
     render_lanes(frame, tick, lanes);
     render_speed(frame, app, d, speed);
@@ -55,15 +55,25 @@ pub fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
 /// Space between the status line's items.
 const ITEM_GAP: &str = "   ";
 
-fn render_info(frame: &mut Frame, d: &DownloadSummary, tick: Option<&TelemetryTick>, area: Rect) {
+fn render_info(
+    frame: &mut Frame,
+    d: &DownloadSummary,
+    tick: Option<&TelemetryTick>,
+    stall: Option<&str>,
+    area: Rect,
+) {
     let label = theme::MUTED;
-    let first = status_line(d, tick, area.width as usize);
-    let last = match &d.error_message {
-        Some(err) => Line::from(vec![
+    let first = status_line(d, tick, stall.is_some(), area.width as usize);
+    let last = match (stall, &d.error_message) {
+        (Some(reason), _) => Line::from(vec![
+            Span::styled("Waiting ", label),
+            Span::styled(reason.to_string(), theme::STALLED),
+        ]),
+        (None, Some(err)) => Line::from(vec![
             Span::styled("Error ", label),
             Span::styled(err.clone(), theme::ERROR),
         ]),
-        None => Line::from(vec![
+        (None, None) => Line::from(vec![
             Span::styled("Saved to ", label),
             Span::raw(d.destination.display().to_string()),
         ]),
@@ -78,12 +88,14 @@ fn render_info(frame: &mut Frame, d: &DownloadSummary, tick: Option<&TelemetryTi
 
 /// "Status active   Size …   Speed …   ETA …   Cap …   Connections …", most
 /// useful first, leaving out whole items that don't fit in `width` columns.
-fn status_line(d: &DownloadSummary, tick: Option<&TelemetryTick>, width: usize) -> Line<'static> {
+fn status_line(
+    d: &DownloadSummary,
+    tick: Option<&TelemetryTick>,
+    stalled: bool,
+    width: usize,
+) -> Line<'static> {
     let mut items: Vec<(&str, Span<'static>)> = vec![
-        (
-            "Status",
-            Span::styled(status_label(d.status), theme::status_style(d.status)),
-        ),
+        ("Status", status_span(d.status, stalled)),
         ("Size", Span::raw(size_text(d))),
         ("Speed", Span::raw(format_speed(d.speed_bps))),
         ("ETA", Span::raw(format_eta(d.eta_secs))),
@@ -132,6 +144,20 @@ mod tests {
             .find(|l| l.contains("Status "))
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn a_stalled_download_shows_why_in_the_details() {
+        let mut app = sample_app();
+        let reason = "no data for 42s: server busy (HTTP 503), retrying in 8s";
+        app.ticks.get_mut("dl_1").unwrap().stall = Some(reason.to_string());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains(&format!("Waiting {reason}")), "{text}");
+        assert!(text.contains("Status stalled"), "{text}");
     }
 
     #[test]

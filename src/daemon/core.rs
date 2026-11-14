@@ -742,6 +742,7 @@ impl DaemonCore {
                     active_connections,
                     segments,
                     lanes,
+                    stall: task.stall(now),
                 };
                 let _ = self.telemetry_tx.send(tick);
             }
