@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum FolderProblem {
     NotFullPath,
     NotAFolder,
+    /// No part of the path exists, not even its root: on Windows, a drive
+    /// letter or network share that isn't there.
+    NoSuchDrive,
     CantWrite(io::Error),
 }
 
@@ -18,6 +21,9 @@ impl fmt::Display for FolderProblem {
         match self {
             FolderProblem::NotFullPath => f.write_str("must be a full path"),
             FolderProblem::NotAFolder => f.write_str("is a file, not a folder"),
+            FolderProblem::NoSuchDrive => {
+                f.write_str("is on a drive or network share that can't be found")
+            }
             FolderProblem::CantWrite(e) => write!(f, "can't write there ({e})"),
         }
     }
@@ -31,7 +37,7 @@ pub fn check_folder(folder: &Path) -> Result<(), FolderProblem> {
         return Err(FolderProblem::NotFullPath);
     }
     let Some(existing) = folder.ancestors().find(|p| p.exists()) else {
-        return Ok(()); // Nothing to check against, not even the root.
+        return Err(FolderProblem::NoSuchDrive);
     };
     if !existing.is_dir() {
         return Err(FolderProblem::NotAFolder);
@@ -83,5 +89,21 @@ mod tests {
         let missing = dir.path().join("gone");
         // Creating inside a folder that isn't there fails like a refused write.
         assert!(probe_write_with(&missing, |p| std::fs::remove_file(p)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_on_a_drive_that_does_not_exist_is_rejected() {
+        let free = ('D'..='Z')
+            .rev()
+            .find(|d| !Path::new(&format!("{d}:\\")).exists())
+            .expect("every drive letter is in use");
+        let folder = std::path::PathBuf::from(format!("{free}:\\Downloads"));
+        let problem = check_folder(&folder).unwrap_err();
+        assert!(matches!(problem, FolderProblem::NoSuchDrive), "{problem}");
+        assert_eq!(
+            problem.to_string(),
+            "is on a drive or network share that can't be found"
+        );
     }
 }
