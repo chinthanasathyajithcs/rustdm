@@ -21,6 +21,24 @@ fn respond<T: Serialize>(id: RpcId, result: Result<T, RpcError>) -> RpcResponse 
     }
 }
 
+/// Answer `req` on the blocking pool. Requests can touch the disk (a folder's
+/// write test, the queue file), and a slow network share must not hold up
+/// an async worker. A handler that panics is answered with an internal error.
+async fn handle_off_thread(core: &DaemonCore, req: RpcRequest) -> RpcResponse {
+    let id = req.id.clone();
+    let core = core.clone();
+    match tokio::task::spawn_blocking(move || core.handle_request(req)).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!("RPC handler failed: {}", e);
+            RpcResponse::error(
+                id,
+                RpcError::internal_error("the daemon hit an internal error"),
+            )
+        }
+    }
+}
+
 impl DaemonCore {
     pub fn handle_request(&self, req: RpcRequest) -> RpcResponse {
         let id = req.id;
@@ -174,7 +192,7 @@ impl DaemonServer {
                                             if req.method == "subscribe.telemetry" {
                                                 is_subscribed = true;
                                             }
-                                            let resp = client_core.handle_request(req);
+                                            let resp = handle_off_thread(&client_core, req).await;
                                             if let Err(e) = sender.send(&resp).await {
                                                 tracing::debug!("Failed to send RPC response: {}", e);
                                                 break;
@@ -213,5 +231,19 @@ impl DaemonServer {
 
         let _ = ticker_handle.await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn requests_answered_on_the_blocking_pool_keep_their_id() {
+        let core = DaemonCore::new();
+        let req = RpcRequest::new(RpcId::Number(7), "daemon.get_limits", None);
+        let resp = handle_off_thread(&core, req).await;
+        assert_eq!(resp.id, RpcId::Number(7));
+        assert!(resp.error.is_none(), "{:?}", resp.error);
     }
 }
