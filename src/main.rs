@@ -4,7 +4,7 @@ use rustdm::daemon::service::{daemon_holds_lock, DEFAULT_SETTLE_TIMEOUT};
 use rustdm::daemon::speed::SpeedMeter;
 use rustdm::dirs::default_downloads_dir;
 use rustdm::engine::{
-    build_client, download, resume_with_options, DownloadRequest, Outcome, Progress,
+    build_client, download, resume_with_options, DownloadRequest, Outcome, PauseReason, Progress,
 };
 use rustdm::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use rustdm::ipc::protocol::{
@@ -394,6 +394,16 @@ fn report_outcome(verb: &str, outcome: Outcome) {
     match outcome {
         Outcome::Completed { path, steals } => {
             eprintln!("{verb} complete: {} (steals: {steals})", path.display());
+        }
+        Outcome::Paused {
+            reason: PauseReason::LinkExpired { status },
+            state,
+        } => {
+            eprintln!(
+                "Download paused ({}): state saved to {}",
+                rustdm::error::link_status_message(status),
+                state.display()
+            );
         }
         Outcome::Paused { reason, state } => {
             eprintln!(

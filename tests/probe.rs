@@ -64,6 +64,34 @@ async fn probe_reports_link_expired_on_403() {
     }
 }
 
+#[tokio::test]
+async fn probe_reports_link_expired_on_401_without_retrying() {
+    let srv = TestServer::start(vec![], Mode::Status(401)).await;
+    let client = reqwest::Client::new();
+    let err = probe(&client, &srv.url()).await.unwrap_err();
+    match err {
+        Error::LinkExpired { status } => assert_eq!(status, 401),
+        other => panic!("expected LinkExpired, got {other:?}"),
+    }
+    assert_eq!(srv.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn probe_records_the_content_type() {
+    let srv = TestServer::start(pattern_bytes(500), Mode::ContentType("text/html".into())).await;
+    let client = reqwest::Client::new();
+    let res = probe(&client, &srv.url()).await.unwrap();
+    assert_eq!(res.content_type.as_deref(), Some("text/html"));
+}
+
+#[tokio::test]
+async fn probe_has_no_content_type_when_the_server_sends_none() {
+    let srv = TestServer::start(pattern_bytes(500), Mode::Normal).await;
+    let client = reqwest::Client::new();
+    let res = probe(&client, &srv.url()).await.unwrap();
+    assert_eq!(res.content_type, None);
+}
+
 #[test]
 fn content_range_total_parses_only_numeric_totals() {
     assert_eq!(parse_content_range_total("bytes 0-0/1000"), Some(1000));

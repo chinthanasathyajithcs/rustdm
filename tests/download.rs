@@ -314,6 +314,127 @@ async fn link_expired_fails_without_retry() {
 }
 
 #[tokio::test]
+async fn sign_in_required_mid_download_is_link_expired_without_retry() {
+    let srv = TestServer::start(vec![], Mode::Status(401)).await;
+    let client = build_client();
+    let dir = tempdir().unwrap();
+    let part_path = dir.path().join("signin.bin.part");
+    let part = Arc::new(rustdm::writer::PartFile::create(&part_path, Some(1000)).unwrap());
+    let progress = Arc::new(Progress::new());
+
+    let err = rustdm::worker::fetch_range(
+        &client,
+        &srv.url().join("test.bin").unwrap(),
+        &rustdm::probe::Validator::default(),
+        rustdm::ranges::ByteRange {
+            start: 0,
+            end: 1000,
+        },
+        part,
+        progress,
+    )
+    .await
+    .unwrap_err();
+
+    match err {
+        rustdm::error::Error::LinkExpired { status } => assert_eq!(status, 401),
+        other => panic!("expected LinkExpired, got {other:?}"),
+    }
+    assert_eq!(srv.requests().len(), 1);
+}
+
+fn request_for(url: url::Url, dir: &std::path::Path) -> DownloadRequest {
+    DownloadRequest {
+        url,
+        template: "{downloads}/{name}".to_string(),
+        downloads_dir: dir.to_path_buf(),
+        connections: 2,
+        progress: Arc::new(Progress::new()),
+        cancel: None,
+        file_name: None,
+    }
+}
+
+async fn serve_with_type(content_type: Option<&str>) -> TestServer {
+    let mode = match content_type {
+        Some(value) => Mode::ContentType(value.to_string()),
+        None => Mode::Normal,
+    };
+    TestServer::start(pattern_bytes(4096), mode).await
+}
+
+#[tokio::test]
+async fn a_web_page_is_refused_and_leaves_no_file() {
+    for content_type in [
+        "text/html",
+        "text/html; charset=UTF-8",
+        "Application/XHTML+XML",
+    ] {
+        let srv = serve_with_type(Some(content_type)).await;
+        let dir = tempdir().unwrap();
+
+        let err = download(
+            &build_client(),
+            request_for(srv.url().join("watch").unwrap(), dir.path()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, rustdm::error::Error::WebPage),
+            "{content_type}: got {err:?}"
+        );
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "{content_type}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_link_that_names_a_page_file_still_downloads() {
+    for name in ["index.html", "INDEX.HTM", "a.xhtml", "saved.mhtml"] {
+        let srv = serve_with_type(Some("text/html; charset=utf-8")).await;
+        let dir = tempdir().unwrap();
+
+        let outcome = download(
+            &build_client(),
+            request_for(srv.url().join(name).unwrap(), dir.path()),
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            Outcome::Completed { path, .. } => assert_eq!(fs::read(path).unwrap().len(), 4096),
+            Outcome::Paused { .. } => panic!("{name}: expected completed outcome"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn binary_and_untyped_responses_download_as_before() {
+    for content_type in [Some("application/octet-stream"), None] {
+        let srv = serve_with_type(content_type).await;
+        let dir = tempdir().unwrap();
+
+        let outcome = download(
+            &build_client(),
+            request_for(srv.url().join("file.bin").unwrap(), dir.path()),
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            Outcome::Completed { path, .. } => {
+                assert_eq!(fs::read(path).unwrap(), pattern_bytes(4096))
+            }
+            Outcome::Paused { .. } => panic!("{content_type:?}: expected completed outcome"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn short_bodies_are_retried_while_each_one_adds_bytes() {
     // The server sends half of what is left each time: 8, 4, 2, 1, then 1 byte.
     // Every attempt makes progress, so the range finishes instead of giving up.

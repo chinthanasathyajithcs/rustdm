@@ -1,7 +1,7 @@
 use crate::daemon::queue_store::SavedDownload;
 use crate::daemon::speed::SpeedMeter;
 use crate::engine::{Outcome, PauseReason, Progress};
-use crate::error::Error;
+use crate::error::{link_status_message, Error};
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
 use crate::limiter::RateLimiter;
 use crate::state::{part_path, state_path};
@@ -269,7 +269,7 @@ impl TaskRecord {
                     self.status = DownloadStatus::Paused;
                 }
                 if let PauseReason::LinkExpired { status } = reason {
-                    self.error_message = Some(format!("link expired or removed (HTTP {status})"));
+                    self.error_message = Some(link_status_message(status));
                 }
             }
             // Stopped during the server check, before any file existed: the
@@ -452,6 +452,48 @@ mod tests {
         rec.status = DownloadStatus::Active;
         rec.running = true;
         rec.apply_outcome(Err(e));
+    }
+
+    #[test]
+    fn a_401_pauses_the_download_and_says_it_needs_sign_in() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.running = true;
+        rec.apply_outcome(Ok(Outcome::Paused {
+            reason: PauseReason::LinkExpired { status: 401 },
+            state: PathBuf::from("/downloads/ubuntu.iso.part.rdm"),
+        }));
+        assert_eq!(rec.status, DownloadStatus::Paused);
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("link needs sign-in (HTTP 401)")
+        );
+    }
+
+    #[test]
+    fn a_404_keeps_the_link_expired_message() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.running = true;
+        rec.apply_outcome(Ok(Outcome::Paused {
+            reason: PauseReason::LinkExpired { status: 404 },
+            state: PathBuf::from("/downloads/ubuntu.iso.part.rdm"),
+        }));
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("link expired or removed (HTTP 404)")
+        );
+    }
+
+    #[test]
+    fn a_web_page_fails_the_download_without_a_retry() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.begin_run();
+        fail(&mut rec, Error::WebPage);
+        assert_eq!(rec.status, DownloadStatus::Failed);
+        assert_eq!(rec.retry_at, None);
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("the link opened a web page, not a file")
+        );
     }
 
     #[test]

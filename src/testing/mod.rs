@@ -20,6 +20,8 @@ pub fn pattern_bytes(len: u64) -> Vec<u8> {
 #[derive(Clone, Debug)]
 pub enum Mode {
     Normal,
+    /// Serve like `Normal`, labelling every answer with this Content-Type.
+    ContentType(String),
     IgnoreRange,
     Status(u16),
     Redirect,
@@ -538,7 +540,11 @@ impl TestServer {
                                     resp.extend_from_slice(body_slice);
                                     resp
                                 }
-                                Mode::Normal => {
+                                Mode::Normal | Mode::ContentType(_) => {
+                                    let content_type = match &mode_clone {
+                                        Mode::ContentType(value) => format!("Content-Type: {value}\r\n"),
+                                        _ => String::new(),
+                                    };
                                     let total = body_ref.len();
                                     let mut serve_range = None;
 
@@ -555,14 +561,14 @@ impl TestServer {
                                     if let Some((start, end)) = serve_range {
                                         let slice_len = end - start + 1;
                                         let mut resp = format!(
-                                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\n{content_type}ETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
                                         )
                                         .into_bytes();
                                         resp.extend_from_slice(&body_ref[start..=end]);
                                         resp
                                     } else {
                                         let mut resp = format!(
-                                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+                                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n{content_type}ETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
                                         )
                                         .into_bytes();
                                         resp.extend_from_slice(&body_ref);

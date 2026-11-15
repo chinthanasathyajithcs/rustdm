@@ -1,10 +1,10 @@
 use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::engine::Progress;
-use crate::error::Error;
+use crate::error::{is_link_status, Error};
 use crate::retry::{backoff_delay, retry_after_secs, RetryCause, MAX_SEGMENT_ATTEMPTS};
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LAST_MODIFIED,
-    RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    LAST_MODIFIED, RANGE, RETRY_AFTER,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -22,6 +22,31 @@ pub struct Probe {
     pub ranges_supported: bool,
     pub validator: Validator,
     pub content_disposition: Option<String>,
+    pub content_type: Option<String>,
+}
+
+/// File name endings that show the user asked for a web page on purpose.
+const PAGE_EXTENSIONS: [&str; 4] = [".html", ".htm", ".xhtml", ".mhtml"];
+
+impl Probe {
+    /// True when the server answered with a web page and the link doesn't name
+    /// one: a sign-in screen or a video's watch page, not the file wanted.
+    pub fn is_unwanted_web_page(&self) -> bool {
+        let Some(content_type) = &self.content_type else {
+            return false;
+        };
+        let media_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if media_type != "text/html" && media_type != "application/xhtml+xml" {
+            return false;
+        }
+        let path = self.final_url.path().to_ascii_lowercase();
+        !PAGE_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
+    }
 }
 
 pub fn parse_content_range_total(value: &str) -> Option<u64> {
@@ -113,7 +138,7 @@ pub async fn probe_for(
     let status = res.status();
     let status_code = status.as_u16();
 
-    if status_code == 403 || status_code == 404 || status_code == 410 {
+    if is_link_status(status_code) {
         return Err(Error::LinkExpired {
             status: status_code,
         });
@@ -136,6 +161,11 @@ pub async fn probe_for(
 
     let content_disposition = headers
         .get(CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+
+    let content_type = headers
+        .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string());
 
@@ -174,5 +204,51 @@ pub async fn probe_for(
             last_modified,
         },
         content_disposition,
+        content_type,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn probe_of(url: &str, content_type: Option<&str>) -> Probe {
+        Probe {
+            final_url: url::Url::parse(url).unwrap(),
+            total: None,
+            ranges_supported: false,
+            validator: Validator::default(),
+            content_disposition: None,
+            content_type: content_type.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn html_without_a_page_name_is_an_unwanted_web_page() {
+        for content_type in [
+            "text/html",
+            "TEXT/HTML; charset=UTF-8",
+            " text/html ;charset=utf-8",
+            "application/xhtml+xml",
+        ] {
+            let probe = probe_of("http://example.com/watch?v=1", Some(content_type));
+            assert!(probe.is_unwanted_web_page(), "{content_type}");
+        }
+    }
+
+    #[test]
+    fn a_page_file_name_means_the_page_is_wanted() {
+        for path in ["a.html", "A.HTM", "a.xhtml", "a.mhtml"] {
+            let probe = probe_of(&format!("http://example.com/{path}?x=1"), Some("text/html"));
+            assert!(!probe.is_unwanted_web_page(), "{path}");
+        }
+    }
+
+    #[test]
+    fn other_or_missing_content_types_are_not_web_pages() {
+        let url = "http://example.com/file";
+        assert!(!probe_of(url, Some("application/octet-stream")).is_unwanted_web_page());
+        assert!(!probe_of(url, Some("text/plain")).is_unwanted_web_page());
+        assert!(!probe_of(url, None).is_unwanted_web_page());
+    }
 }

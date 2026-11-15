@@ -1,5 +1,5 @@
 use crate::cancel::{or_cancel, sleep_or_cancel};
-use crate::error::Error;
+use crate::error::{is_link_status, Error};
 use crate::limiter::{throttle_all, RateLimiter};
 use crate::probe::{self, Probe};
 use crate::ranges::{ByteRange, RangeSet};
@@ -239,6 +239,9 @@ fn resolve_output(req: &DownloadRequest, probe: &Probe) -> PathBuf {
 pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<Outcome, Error> {
     let probe_result =
         probe::probe_for(client, &req.url, req.cancel.as_ref(), Some(&req.progress)).await?;
+    if probe_result.is_unwanted_web_page() {
+        return Err(Error::WebPage);
+    }
     let final_path = resolve_output(&req, &probe_result);
     *req.progress.output.lock().unwrap() = Some(final_path.clone());
     let part_p = part_path(&final_path);
@@ -730,7 +733,7 @@ async fn download_single(
 
     if !res.status().is_success() {
         let status = res.status().as_u16();
-        if status == 403 || status == 404 || status == 410 {
+        if is_link_status(status) {
             if let (Some(sp), Some(st)) = (state_file_path, state_template) {
                 let _ = part.sync();
                 let _ = state::save_atomic(sp, st);
