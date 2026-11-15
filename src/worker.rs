@@ -1,6 +1,6 @@
 use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::engine::Progress;
-use crate::error::Error;
+use crate::error::{is_link_status, Error};
 use crate::probe::Validator;
 use crate::ranges::ByteRange;
 use crate::retry::{backoff_delay, retry_after_secs, RetryCause, MAX_SEGMENT_ATTEMPTS};
@@ -114,8 +114,8 @@ pub async fn fetch_lane(
         let status = res.status();
         let status_code = status.as_u16();
 
-        // 403, 404, 410 -> LinkExpired at once, no retry
-        if status_code == 403 || status_code == 404 || status_code == 410 {
+        // 401, 403, 404, 410 -> LinkExpired at once, no retry
+        if is_link_status(status_code) {
             return Err(Error::LinkExpired {
                 status: status_code,
             });
