@@ -186,6 +186,15 @@ impl TaskRecord {
         self.client = client;
     }
 
+    /// Put a stopped download back in the queue as if the user had resumed it.
+    pub fn requeue(&mut self) {
+        self.status = DownloadStatus::Queued;
+        self.error_message = None;
+        self.resume_after_restart = false;
+        self.retries = 0;
+        self.retry_at = None;
+    }
+
     /// Forget the cookies, keeping the Referer and User-Agent. Returns whether
     /// there were any, so the caller knows to delete the secret.
     pub fn drop_cookies(&mut self) -> bool {

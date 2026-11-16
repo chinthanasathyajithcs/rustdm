@@ -10,6 +10,7 @@ pub mod seal;
 pub mod secrets;
 pub mod server;
 pub mod service;
+pub mod sign_in;
 pub mod speed;
 pub mod stall;
 pub mod task;

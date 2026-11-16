@@ -1,7 +1,8 @@
 use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
+use crate::daemon::secrets::SecretStore;
 use crate::daemon::task::TaskRecord;
-use crate::daemon::{defaults, fair_share, queue_order};
+use crate::daemon::{defaults, fair_share, queue_order, sign_in};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::*;
@@ -100,6 +101,8 @@ pub struct DaemonCore {
     store: Option<Arc<QueueStore>>,
     /// Folder holding the queue file and the log, when the queue is saved.
     data_dir: Option<std::path::PathBuf>,
+    /// Browser cookies of downloads that came with them, when the queue is saved.
+    secrets: Option<Arc<SecretStore>>,
 }
 
 impl Default for DaemonCore {
@@ -141,22 +144,37 @@ impl DaemonCore {
             .map(|s| s.defaults.clone())
             .unwrap_or_default();
 
+        let data_dir = store
+            .as_ref()
+            .and_then(|s| s.path().parent())
+            .map(|p| p.to_path_buf());
+        let secrets = data_dir
+            .as_deref()
+            .map(|d| Arc::new(SecretStore::in_dir(d)));
+
         let mut downloads = HashMap::new();
         let mut order = Vec::new();
         let mut next_id = 0;
+        let mut restored_changes = false;
         if let Some(snapshot) = snapshot {
             next_id = snapshot.next_id;
             // Saved in queue order.
             for saved in snapshot.downloads {
                 next_id = next_id.max(download_id_number(&saved.id));
-                let rec = TaskRecord::from_saved(saved);
+                let mut rec = TaskRecord::from_saved(saved);
+                restored_changes |= sign_in::restore(secrets.as_deref(), &mut rec);
                 order.push(rec.id.clone());
                 downloads.insert(rec.id.clone(), Arc::new(Mutex::new(rec)));
             }
         }
+        if let Some(secrets) = &secrets {
+            let records: Vec<_> = downloads.values().map(|t| t.lock().unwrap()).collect();
+            let records: Vec<&TaskRecord> = records.iter().map(|r| &**r).collect();
+            sign_in::sweep(secrets, &records);
+        }
 
         let (telemetry_tx, _) = broadcast::channel(1024);
-        Self {
+        let core = Self {
             state: Arc::new(Mutex::new(DaemonState {
                 downloads,
                 order,
@@ -169,11 +187,35 @@ impl DaemonCore {
             client: build_client(),
             telemetry_tx,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-            data_dir: store
-                .as_ref()
-                .and_then(|s| s.path().parent())
-                .map(|p| p.to_path_buf()),
+            data_dir,
+            secrets,
             store: store.map(Arc::new),
+        };
+        if restored_changes {
+            core.persist();
+        }
+        core
+    }
+
+    /// Keep `cookies` as download `id`'s saved sign-in, or remove the saved one
+    /// when there are none. A failure is logged; the cookies then live in memory only.
+    fn keep_secret(&self, id: &str, cookies: &[crate::request_context::ContextCookie]) {
+        let Some(secrets) = &self.secrets else {
+            return;
+        };
+        if cookies.is_empty() {
+            secrets.delete(id);
+        } else if let Err(e) = secrets.save(id, cookies) {
+            tracing::warn!(
+                "could not save the sign-in for {id} ({}); a restart will need it again",
+                e.kind()
+            );
+        }
+    }
+
+    fn delete_secret(&self, id: &str) {
+        if let Some(secrets) = &self.secrets {
+            secrets.delete(id);
         }
     }
 
@@ -256,6 +298,7 @@ impl DaemonCore {
 
         let directory = params.destination.unwrap_or(defaults.folder);
         check_download_folder(&directory)?;
+        let context = params.context.as_ref().map(sign_in::check).transpose()?;
 
         let task = {
             let mut state = self.state.lock().unwrap();
@@ -274,6 +317,20 @@ impl DaemonCore {
                 }
             }
 
+            // Started again from the browser: carry on with the stopped
+            // download, from its partial file, with the fresh sign-in.
+            if let Some(checked) = &context {
+                if let Some(stopped) = sign_in::stopped_download_of(&state, &params.url) {
+                    {
+                        let mut task = stopped.lock().unwrap();
+                        task.set_context(&checked.context, checked.client.clone());
+                        task.requeue();
+                    }
+                    drop(state);
+                    return Ok(self.continue_with_context(&stopped, &checked.context));
+                }
+            }
+
             state.next_id += 1;
             let id = format!("dl_{}", state.next_id);
             let connections = params
@@ -288,19 +345,43 @@ impl DaemonCore {
                 params.filename,
                 connections,
             )));
-            task.lock()
-                .unwrap()
-                .speed_limiter
-                .set_bytes_per_sec(max_bytes_per_sec);
+            {
+                let mut new_task = task.lock().unwrap();
+                new_task.speed_limiter.set_bytes_per_sec(max_bytes_per_sec);
+                if let Some(checked) = &context {
+                    new_task.set_context(&checked.context, checked.client.clone());
+                }
+            }
             state.order.push(id.clone());
             state.downloads.insert(id, Arc::clone(&task));
             task
         };
 
+        if let Some(checked) = &context {
+            let id = task.lock().unwrap().id.clone();
+            self.keep_secret(&id, &checked.context.cookies);
+            sign_in::log_context(&id, &checked.context, "added with");
+        }
         self.persist();
         self.schedule();
         let summary = task.lock().unwrap().to_summary();
         Ok(summary)
+    }
+
+    /// Save the new sign-in of a stopped download that the browser started again,
+    /// and queue it. The record already holds the context.
+    fn continue_with_context(
+        &self,
+        task: &Arc<Mutex<TaskRecord>>,
+        context: &crate::request_context::RequestContext,
+    ) -> DownloadSummary {
+        let id = task.lock().unwrap().id.clone();
+        self.keep_secret(&id, &context.cookies);
+        sign_in::log_context(&id, context, "continued with");
+        self.persist();
+        self.schedule();
+        let summary = task.lock().unwrap().to_summary();
+        summary
     }
 
     pub fn pause_download(&self, id: &str) -> Result<DownloadSummary, RpcError> {
@@ -351,13 +432,7 @@ impl DaemonCore {
                 DownloadStatus::Paused
                 | DownloadStatus::Failed
                 | DownloadStatus::Retrying
-                | DownloadStatus::Cancelled => {
-                    task.status = DownloadStatus::Queued;
-                    task.error_message = None;
-                    task.resume_after_restart = false;
-                    task.retries = 0;
-                    task.retry_at = None;
-                }
+                | DownloadStatus::Cancelled => task.requeue(),
             }
         }
 
@@ -383,6 +458,7 @@ impl DaemonCore {
                 if let Some(ref tx) = task.cancel_tx {
                     let _ = tx.send(true);
                 }
+                task.drop_cookies();
             }
             if params.delete_partial {
                 if task.running {
@@ -394,6 +470,7 @@ impl DaemonCore {
             }
             task.to_summary()
         };
+        self.delete_secret(&params.id);
         self.persist();
         Ok(summary)
     }
@@ -418,6 +495,7 @@ impl DaemonCore {
             state.order.retain(|x| x != id);
             summary
         };
+        self.delete_secret(id);
         self.persist();
         Ok(summary)
     }
@@ -610,6 +688,7 @@ impl DaemonCore {
         let url = task.url.clone();
         let directory = task.directory.clone();
         let connections = task.connections;
+        let client = task.client.clone().unwrap_or_else(|| self.client.clone());
         let core = self.clone();
         let record = Arc::clone(task_lock);
 
@@ -617,7 +696,7 @@ impl DaemonCore {
             let outcome = match resume_from {
                 Some(state_file) => {
                     engine::resume_with_options(
-                        &core.client,
+                        &client,
                         &state_file,
                         None,
                         Some(progress),
@@ -636,7 +715,7 @@ impl DaemonCore {
                             progress,
                             cancel: Some(cancel_rx),
                         };
-                        engine::download(&core.client, req).await
+                        engine::download(&client, req).await
                     }
                     Err(e) => Err(Error::Protocol(format!("invalid URL: {e}"))),
                 },
@@ -646,13 +725,19 @@ impl DaemonCore {
     }
 
     fn finish_task(&self, record: &Arc<Mutex<TaskRecord>>, outcome: Result<Outcome, Error>) {
-        {
+        let finished_with_cookies = {
             let mut rec = record.lock().unwrap();
+            let had_cookies = rec.has_cookies;
             rec.apply_outcome(outcome);
             if rec.delete_on_stop {
                 rec.delete_partial_files();
                 rec.delete_on_stop = false;
             }
+            // Done, or turned down by the site: the cookies are of no more use.
+            (had_cookies && !rec.has_cookies).then(|| rec.id.clone())
+        };
+        if let Some(id) = finished_with_cookies {
+            self.delete_secret(&id);
         }
         self.persist();
         self.schedule();

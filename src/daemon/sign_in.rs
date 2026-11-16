@@ -1,0 +1,122 @@
+//! The daemon's side of a download's request context: checking what a client
+//! sent, and bringing a download's cookies back after a restart.
+
+use crate::daemon::core::DaemonState;
+use crate::daemon::secrets::{SecretError, SecretStore};
+use crate::daemon::task::TaskRecord;
+use crate::engine::Timeouts;
+use crate::error::saved_sign_in_unreadable_message;
+use crate::ipc::protocol::{DownloadStatus, RpcError};
+use crate::request_context::{client_for, now_unix, RequestContext};
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
+/// The paused or failed download of `url` that nothing is running for, if any.
+pub fn stopped_download_of(state: &DaemonState, url: &str) -> Option<Arc<Mutex<TaskRecord>>> {
+    state
+        .in_order()
+        .find(|task_lock| {
+            let task = task_lock.lock().unwrap();
+            task.url == url
+                && !task.running
+                && matches!(task.status, DownloadStatus::Paused | DownloadStatus::Failed)
+        })
+        .cloned()
+}
+
+/// Log that a download took a request context: counts and the Referer's origin, never a value.
+pub fn log_context(id: &str, context: &RequestContext, what: &str) {
+    tracing::info!(
+        "{id} {what} {} cookies, referer {}",
+        context.cookies.len(),
+        context.referer_origin().as_deref().unwrap_or("none")
+    );
+}
+
+/// A context that passed validation, with the client that carries it.
+pub struct CheckedContext {
+    pub context: RequestContext,
+    /// None when nothing is left to send, so the shared client will do.
+    pub client: Option<reqwest::Client>,
+}
+
+/// Validate what a client sent and build the client for it. The error names
+/// the field that is wrong, never its value.
+pub fn check(sent: &RequestContext) -> Result<CheckedContext, RpcError> {
+    let context = sent
+        .validated(now_unix())
+        .map_err(RpcError::invalid_params)?;
+    let client = client_of(&context)
+        .map_err(|e| RpcError::internal_error(format!("could not use the request context: {e}")))?;
+    Ok(CheckedContext { context, client })
+}
+
+fn client_of(context: &RequestContext) -> Result<Option<reqwest::Client>, crate::error::Error> {
+    if context.is_empty() {
+        return Ok(None);
+    }
+    client_for(context, Timeouts::default()).map(Some)
+}
+
+/// Bring back a restored download's client, with its cookies from `secrets`.
+/// A download whose cookies cannot be had is paused with a message instead of
+/// starting without them. Returns true when the record was changed.
+pub fn restore(secrets: Option<&SecretStore>, task: &mut TaskRecord) -> bool {
+    if matches!(
+        task.status,
+        DownloadStatus::Completed | DownloadStatus::Cancelled
+    ) {
+        // Nothing runs for these, so nothing needs the cookies.
+        return std::mem::take(&mut task.has_cookies);
+    }
+    let cookies = if task.has_cookies {
+        let loaded = match secrets {
+            Some(store) => store.load(&task.id),
+            None => Err(SecretError::Missing),
+        };
+        match loaded {
+            Ok(cookies) => cookies,
+            Err(e) => {
+                tracing::warn!(
+                    "saved sign-in for {} could not be restored ({})",
+                    task.id,
+                    e.kind()
+                );
+                return give_up(task);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let sent = RequestContext {
+        cookies,
+        referer: task.referer.clone(),
+        user_agent: task.user_agent.clone(),
+    };
+    // Cookies that ran out while the daemon was off are dropped here.
+    let Ok(CheckedContext { context, client }) = check(&sent) else {
+        return give_up(task);
+    };
+    let changed = context.cookies.len() != sent.cookies.len();
+    task.set_context(&context, client);
+    changed
+}
+
+/// Pause `task` because its saved sign-in is gone.
+fn give_up(task: &mut TaskRecord) -> bool {
+    task.drop_cookies();
+    task.status = DownloadStatus::Paused;
+    task.resume_after_restart = false;
+    task.error_message = Some(saved_sign_in_unreadable_message());
+    true
+}
+
+/// Delete secret files that no restored download needs.
+pub fn sweep(secrets: &SecretStore, tasks: &[&TaskRecord]) {
+    let keep: HashSet<String> = tasks
+        .iter()
+        .filter(|t| t.has_cookies)
+        .map(|t| t.id.clone())
+        .collect();
+    secrets.sweep(&keep);
+}
