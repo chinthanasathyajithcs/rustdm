@@ -229,6 +229,7 @@ async fn run(cli: Cli) -> CliResult {
                 filename: name,
                 connections,
                 max_bytes_per_sec: max_speed,
+                context: None,
             };
             add(&endpoint, params).await
         }
