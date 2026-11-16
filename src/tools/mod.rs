@@ -5,6 +5,8 @@
 pub mod checksum;
 pub mod error;
 pub mod openpgp;
+pub mod pins;
+pub mod store_file;
 pub mod version;
 
 pub use error::ToolError;
