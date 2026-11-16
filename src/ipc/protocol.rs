@@ -999,4 +999,35 @@ mod tests {
         let encoded = serde_json::to_string(&ping).unwrap();
         assert!(!encoded.contains("log_path"), "{encoded}");
     }
+
+    #[test]
+    fn tool_requests_and_replies_use_the_documented_names() {
+        assert_eq!(
+            serde_json::to_string(&ToolName::YtDlp).unwrap(),
+            "\"yt-dlp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolPhase::Downloading).unwrap(),
+            "\"downloading\""
+        );
+        let update: ToolUpdateParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(update.tool, None);
+        let update: ToolUpdateParams = serde_json::from_str(r#"{"tool":"deno"}"#).unwrap();
+        assert_eq!(update.tool, Some(ToolName::Deno));
+        assert!(serde_json::from_str::<ToolRollbackParams>("{}").is_err());
+
+        let info = ToolInfo {
+            tool: ToolName::Ffmpeg,
+            installed: Some("8.1.3".into()),
+            previous: None,
+            last_checked_unix: Some(1_794_839_520),
+            phase: ToolPhase::Idle,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            error: None,
+        };
+        let back: ToolInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        assert_eq!(back, info);
+        assert_eq!(RpcError::tool_failed("x").code, CODE_TOOL_FAILED);
+    }
 }

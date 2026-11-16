@@ -100,6 +100,9 @@ pub struct DaemonCore {
     store: Option<Arc<QueueStore>>,
     /// Folder holding the queue file and the log, when the queue is saved.
     data_dir: Option<std::path::PathBuf>,
+    /// Fetches and updates yt-dlp, ffmpeg and deno. `None` for a core that keeps
+    /// its queue in memory only.
+    pub(crate) tools: Option<Arc<crate::tools::ToolStore>>,
 }
 
 impl Default for DaemonCore {
@@ -155,6 +158,18 @@ impl DaemonCore {
             }
         }
 
+        let client = build_client();
+        let data_dir = store
+            .as_ref()
+            .and_then(|s| s.path().parent())
+            .map(|p| p.to_path_buf());
+        let tools = data_dir.as_deref().and_then(|dir| {
+            crate::tools::ToolStore::open(dir.join("tools"), client.clone())
+                .map(Arc::new)
+                .map_err(|e| tracing::warn!("tools folder unavailable: {e}"))
+                .ok()
+        });
+
         let (telemetry_tx, _) = broadcast::channel(1024);
         Self {
             state: Arc::new(Mutex::new(DaemonState {
@@ -166,14 +181,12 @@ impl DaemonCore {
                 limits,
                 defaults,
             })),
-            client: build_client(),
+            client,
             telemetry_tx,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-            data_dir: store
-                .as_ref()
-                .and_then(|s| s.path().parent())
-                .map(|p| p.to_path_buf()),
+            data_dir,
             store: store.map(Arc::new),
+            tools,
         }
     }
 

@@ -196,6 +196,29 @@ impl DaemonClient {
             .await
     }
 
+    /// Every helper tool's state: version, previous version, last check, progress.
+    pub async fn tools_status(&mut self) -> Result<Vec<ToolInfo>, ClientError> {
+        self.call("tools.status", None).await
+    }
+
+    /// Check one tool for a newer version (installing it if missing), or every
+    /// installed tool. Returns at once; the work shows up in `tools_status`.
+    pub async fn tools_update(
+        &mut self,
+        tool: Option<ToolName>,
+    ) -> Result<Vec<ToolInfo>, ClientError> {
+        let params = ToolUpdateParams { tool };
+        self.call("tools.update", Some(serde_json::to_value(params)?))
+            .await
+    }
+
+    /// Go back to the previous version of a tool.
+    pub async fn tools_rollback(&mut self, tool: ToolName) -> Result<ToolInfo, ClientError> {
+        let params = ToolRollbackParams { tool };
+        self.call("tools.rollback", Some(serde_json::to_value(params)?))
+            .await
+    }
+
     pub async fn subscribe_telemetry(&mut self) -> Result<(), ClientError> {
         self.call::<Value>("subscribe.telemetry", None).await?;
         Ok(())
