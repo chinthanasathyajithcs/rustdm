@@ -4,6 +4,7 @@
 
 pub mod checksum;
 pub mod error;
+pub mod openpgp;
 pub mod version;
 
 pub use error::ToolError;
