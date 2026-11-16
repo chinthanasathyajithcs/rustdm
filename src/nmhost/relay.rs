@@ -19,6 +19,25 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long `add` waits for a daemon it started to begin listening.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Where this machine's named pipes live.
+const LOCAL_PIPE_PREFIX: &str = r"\\.\pipe\";
+
+/// A daemon endpoint given by the environment (tests only). A Windows pipe
+/// name must be on this machine: `\\server\pipe\x` would open a pipe on
+/// another computer.
+pub fn endpoint_from_override(raw: &str) -> Result<IpcEndpoint, String> {
+    require_local(IpcEndpoint::from_arg(raw))
+}
+
+fn require_local(endpoint: IpcEndpoint) -> Result<IpcEndpoint, String> {
+    match &endpoint {
+        IpcEndpoint::NamedPipe(name) if !name.starts_with(LOCAL_PIPE_PREFIX) => {
+            Err("endpoint must be a local pipe".to_string())
+        }
+        _ => Ok(endpoint),
+    }
+}
+
 /// Serve requests until the browser closes the input. Starts `rdmd` from the
 /// folder this program is in when an `add` finds none running.
 pub async fn run_host<R, W>(
@@ -48,10 +67,26 @@ where
     W: AsyncWrite + Unpin,
     S: Fn() -> io::Result<()>,
 {
+    run_host_timed(reader, writer, endpoint, spawn, REQUEST_TIMEOUT).await
+}
+
+/// `run_host_with` with the per-request time limit supplied too (tests use a short one).
+pub async fn run_host_timed<R, W, S>(
+    reader: &mut R,
+    writer: &mut W,
+    endpoint: &IpcEndpoint,
+    spawn: S,
+    request_timeout: Duration,
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    S: Fn() -> io::Result<()>,
+{
     loop {
         let reply = match read_frame(reader).await {
             Ok(None) => return Ok(()),
-            Ok(Some(bytes)) => answer(&bytes, endpoint, &spawn).await,
+            Ok(Some(bytes)) => answer(&bytes, endpoint, &spawn, request_timeout).await,
             Err(FrameError::TooLarge(len)) => {
                 // The oversized body is still unread, so the stream cannot be
                 // trusted past this point: say so and stop.
@@ -86,6 +121,7 @@ async fn answer<S: Fn() -> io::Result<()>>(
     bytes: &[u8],
     endpoint: &IpcEndpoint,
     spawn: &S,
+    request_timeout: Duration,
 ) -> HostReply {
     let request = match HostRequest::parse(bytes) {
         Ok(request) => request,
@@ -94,11 +130,14 @@ async fn answer<S: Fn() -> io::Result<()>>(
         }
     };
     let id = request.id();
-    match tokio::time::timeout(REQUEST_TIMEOUT, handle(request, endpoint, spawn)).await {
+    match tokio::time::timeout(request_timeout, handle(request, endpoint, spawn)).await {
         Ok(reply) => reply,
+        // Giving up does not undo an `add` the daemon is already acting on: it
+        // may still finish after this reply, and the browser then fetches the
+        // file too. The daemon's duplicate check is what limits the damage.
         Err(_) => HostReply::failure(
             Some(id),
-            HostErrorKind::Rejected,
+            HostErrorKind::Timeout,
             None,
             "rdmd did not answer in time",
         ),
@@ -171,17 +210,26 @@ async fn add<S: Fn() -> io::Result<()>>(
             json!({ "download_id": summary.id, "filename": summary.filename }),
         ),
         Err(e) => {
-            // The host name only: URLs can carry tokens, and cookies are never logged.
-            tracing::warn!(
-                host = url::Url::parse(url)
-                    .ok()
-                    .and_then(|u| u.host_str().map(str::to_string))
-                    .as_deref()
-                    .unwrap_or("?"),
-                "could not hand the download to rdmd: {e}"
-            );
-            failure_for(id, e)
+            let reply = failure_for(id, e);
+            log_failure(url, &reply);
+            reply
         }
+    }
+}
+
+/// Log a refused hand-off: the host name, the error kind and the daemon's code
+/// only. Messages can carry the whole URL (which can hold tokens), and cookies
+/// are never logged. A duplicate is routine, so it is not a warning.
+fn log_failure(url: &str, reply: &HostReply) {
+    let Some(error) = &reply.error else { return };
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "?".to_string());
+    if error.kind == HostErrorKind::Duplicate {
+        tracing::debug!(%host, "download already known to rdmd");
+    } else {
+        tracing::warn!(%host, kind = ?error.kind, code = ?error.code, "could not hand the download to rdmd");
     }
 }
 
@@ -266,6 +314,50 @@ mod tests {
             replies_to(&[br#"{"type":"add","id":8,"url":"https://example.com/x"}"#]).await;
         assert_eq!(replies[0]["id"], 8);
         assert_eq!(replies[0]["error"]["kind"], "spawn_failed");
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_never_starts_listening_ends_in_a_timeout_reply() {
+        let mut input = Vec::new();
+        write_frame(
+            &mut input,
+            br#"{"type":"add","id":4,"url":"https://example.com/x"}"#,
+        )
+        .await
+        .unwrap();
+        let mut output = Vec::new();
+        let endpoint = IpcEndpoint::test_endpoint("relay_slow");
+        let started = std::time::Instant::now();
+        // The "daemon" starts fine but never listens, so the add keeps waiting.
+        run_host_timed(
+            &mut &input[..],
+            &mut output,
+            &endpoint,
+            || Ok(()),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let body = read_frame(&mut &output[..]).await.unwrap().unwrap();
+        let reply: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reply["id"], 4);
+        assert_eq!(reply["error"]["kind"], "timeout");
+    }
+
+    #[test]
+    fn only_local_endpoints_are_accepted_from_the_environment() {
+        let pipe = |name: &str| IpcEndpoint::NamedPipe(name.to_string());
+        assert!(require_local(pipe(r"\\.\pipe\rustdm_test")).is_ok());
+        assert!(require_local(pipe(r"\\server\pipe\rustdm")).is_err());
+        assert!(require_local(pipe(r"\\?\UNC\server\pipe\x")).is_err());
+        assert!(require_local(pipe("rustdm")).is_err());
+        assert!(require_local(IpcEndpoint::UnixSocket("/tmp/a.sock".into())).is_ok());
+        #[cfg(windows)]
+        {
+            assert!(endpoint_from_override("rustdm_test").is_ok());
+            assert!(endpoint_from_override(r"\\server\pipe\rustdm").is_err());
+        }
     }
 
     #[tokio::test]

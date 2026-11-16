@@ -7,10 +7,25 @@ use rustdm::nmhost::relay::run_host;
 use std::process::ExitCode;
 use std::time::Duration;
 
-/// Overrides the daemon endpoint (tests; normal runs use the per-user default).
+/// Overrides the daemon endpoint. Read only by builds with the `testing`
+/// feature; a release build always uses the per-user default.
+#[cfg(feature = "testing")]
 const ENDPOINT_ENV: &str = "RUSTDM_ENDPOINT";
 /// How long to wait for a blocked stdin read before exiting anyway.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(200);
+
+#[cfg(feature = "testing")]
+fn daemon_endpoint() -> Result<IpcEndpoint, String> {
+    match std::env::var(ENDPOINT_ENV) {
+        Ok(raw) if !raw.is_empty() => rustdm::nmhost::relay::endpoint_from_override(&raw),
+        _ => Ok(IpcEndpoint::default_endpoint()),
+    }
+}
+
+#[cfg(not(feature = "testing"))]
+fn daemon_endpoint() -> Result<IpcEndpoint, String> {
+    Ok(IpcEndpoint::default_endpoint())
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -28,11 +43,13 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let endpoint = std::env::var(ENDPOINT_ENV)
-        .ok()
-        .filter(|raw| !raw.is_empty())
-        .map(|raw| IpcEndpoint::from_arg(&raw))
-        .unwrap_or_else(IpcEndpoint::default_endpoint);
+    let endpoint = match daemon_endpoint() {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            eprintln!("rdm-nmhost: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

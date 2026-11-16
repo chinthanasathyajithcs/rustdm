@@ -67,6 +67,7 @@ pub enum HostErrorKind {
     NotRunning,
     SpawnFailed,
     Rejected,
+    Timeout,
     Duplicate,
     Invalid,
     TooLarge,
