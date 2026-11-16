@@ -12,6 +12,7 @@ use rustdm::ipc::protocol::{
     SetDefaultsParams, SetLimitsParams,
 };
 use rustdm::ipc::transport::IpcEndpoint;
+use rustdm::nmhost::install;
 use rustdm::tui::format::{
     format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
 };
@@ -139,6 +140,11 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Connect Chrome and Edge so they hand downloads to rustdm
+    Browser {
+        #[command(subcommand)]
+        action: BrowserAction,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -168,6 +174,16 @@ enum DaemonAction {
     Status,
     /// Pause all downloads and stop the daemon
     Stop,
+}
+
+#[derive(Subcommand)]
+enum BrowserAction {
+    /// Register the rustdm browser host (run again after moving the program folder)
+    Install,
+    /// Remove the registration
+    Uninstall,
+    /// Show what is registered
+    Status,
 }
 
 #[tokio::main]
@@ -281,6 +297,7 @@ async fn run(cli: Cli) -> CliResult {
             DaemonAction::Status => daemon_status(&endpoint).await,
             DaemonAction::Stop => daemon_stop(&endpoint).await,
         },
+        Commands::Browser { action } => browser(action),
     }
 }
 
@@ -562,6 +579,38 @@ async fn daemon_stop(endpoint: &IpcEndpoint) -> CliResult {
         tokio::time::sleep(STOP_POLL_INTERVAL).await;
     }
     println!("rdmd stopped");
+    Ok(())
+}
+
+fn browser(action: BrowserAction) -> CliResult {
+    let host = install::host_exe_path()?;
+    match action {
+        BrowserAction::Install => {
+            if !host.is_file() {
+                return Err(format!("{} not found; keep it next to rdm", host.display()).into());
+            }
+            let done = install::install(&host)?;
+            if done.is_empty() {
+                println!("No supported browser found; open Chrome or Edge once, then try again.");
+            }
+            for entry in &done {
+                println!("Registered with {}", entry.browser);
+            }
+            println!("Next: load the rustdm extension in your browser.");
+        }
+        BrowserAction::Uninstall => {
+            for entry in install::uninstall()? {
+                println!("Removed from {}", entry.browser);
+            }
+        }
+        BrowserAction::Status => {
+            let host_state = if host.is_file() { "found" } else { "MISSING" };
+            println!("Host: {} ({host_state})", host.display());
+            for entry in install::status()? {
+                println!("{}", install::describe(&entry, &host));
+            }
+        }
+    }
     Ok(())
 }
 
