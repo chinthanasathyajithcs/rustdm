@@ -38,7 +38,7 @@ jobs:
       - name: Run tests
         run: cargo test --features testing
 
-      # A build to try by hand: rdm.exe needs rdmd.exe in the same folder.
+      # A build to try by hand: rdm.exe needs rdmd.exe and rdm-nmhost.exe in the same folder.
       - name: Build Windows programs
         if: matrix.os == 'windows-latest'
         run: cargo build --release --bins
@@ -51,8 +51,26 @@ jobs:
           path: |
             target/release/rdm.exe
             target/release/rdmd.exe
+            target/release/rdm-nmhost.exe
           if-no-files-found: error
           retention-days: 14
+
+  extension:
+    name: Browser extension tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # A glob rather than the folder: it behaves the same on Node 22 and later.
+      - name: Run extension tests
+        run: node --test "extension/test/*.test.js"
 
   coverage:
     name: Code Coverage
