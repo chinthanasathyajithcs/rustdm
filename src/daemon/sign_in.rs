@@ -1,15 +1,55 @@
 //! The daemon's side of a download's request context: checking what a client
 //! sent, and bringing a download's cookies back after a restart.
 
-use crate::daemon::core::DaemonState;
+use crate::daemon::core::{DaemonCore, DaemonState};
 use crate::daemon::secrets::{SecretError, SecretStore};
 use crate::daemon::task::TaskRecord;
 use crate::engine::Timeouts;
 use crate::error::saved_sign_in_unreadable_message;
-use crate::ipc::protocol::{DownloadStatus, RpcError};
-use crate::request_context::{client_for, now_unix, RequestContext};
+use crate::ipc::protocol::{DownloadStatus, DownloadSummary, RpcError};
+use crate::request_context::{client_for, now_unix, ContextCookie, RequestContext};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+impl DaemonCore {
+    /// Keep `cookies` as download `id`'s saved sign-in, or remove the saved one
+    /// when there are none. A failure is logged; the cookies then live in memory only.
+    pub(super) fn keep_secret(&self, id: &str, cookies: &[ContextCookie]) {
+        let Some(secrets) = &self.secrets else {
+            return;
+        };
+        if cookies.is_empty() {
+            secrets.delete(id);
+        } else if let Err(e) = secrets.save(id, cookies) {
+            tracing::warn!(
+                "could not save the sign-in for {id} ({}); a restart will need it again",
+                e.kind()
+            );
+        }
+    }
+
+    pub(super) fn delete_secret(&self, id: &str) {
+        if let Some(secrets) = &self.secrets {
+            secrets.delete(id);
+        }
+    }
+
+    /// Save the new sign-in of a stopped download that the browser started again,
+    /// and queue it. The record already holds the context.
+    pub(super) fn continue_with_context(
+        &self,
+        task: &Arc<Mutex<TaskRecord>>,
+        context: &RequestContext,
+    ) -> DownloadSummary {
+        let id = task.lock().unwrap().id.clone();
+        self.keep_secret(&id, &context.cookies);
+        log_context(&id, context, "continued with");
+        self.persist();
+        self.schedule();
+        let summary = task.lock().unwrap().to_summary();
+        summary
+    }
+}
 
 /// The paused or failed download of `url` that nothing is running for, if any.
 pub fn stopped_download_of(state: &DaemonState, url: &str) -> Option<Arc<Mutex<TaskRecord>>> {

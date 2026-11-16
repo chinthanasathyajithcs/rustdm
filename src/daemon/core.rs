@@ -102,7 +102,7 @@ pub struct DaemonCore {
     /// Folder holding the queue file and the log, when the queue is saved.
     data_dir: Option<std::path::PathBuf>,
     /// Browser cookies of downloads that came with them, when the queue is saved.
-    secrets: Option<Arc<SecretStore>>,
+    pub(super) secrets: Option<Arc<SecretStore>>,
 }
 
 impl Default for DaemonCore {
@@ -195,28 +195,6 @@ impl DaemonCore {
             core.persist();
         }
         core
-    }
-
-    /// Keep `cookies` as download `id`'s saved sign-in, or remove the saved one
-    /// when there are none. A failure is logged; the cookies then live in memory only.
-    fn keep_secret(&self, id: &str, cookies: &[crate::request_context::ContextCookie]) {
-        let Some(secrets) = &self.secrets else {
-            return;
-        };
-        if cookies.is_empty() {
-            secrets.delete(id);
-        } else if let Err(e) = secrets.save(id, cookies) {
-            tracing::warn!(
-                "could not save the sign-in for {id} ({}); a restart will need it again",
-                e.kind()
-            );
-        }
-    }
-
-    fn delete_secret(&self, id: &str) {
-        if let Some(secrets) = &self.secrets {
-            secrets.delete(id);
-        }
     }
 
     /// Folder holding the queue file and the log, if this core saves its queue.
@@ -366,22 +344,6 @@ impl DaemonCore {
         self.schedule();
         let summary = task.lock().unwrap().to_summary();
         Ok(summary)
-    }
-
-    /// Save the new sign-in of a stopped download that the browser started again,
-    /// and queue it. The record already holds the context.
-    fn continue_with_context(
-        &self,
-        task: &Arc<Mutex<TaskRecord>>,
-        context: &crate::request_context::RequestContext,
-    ) -> DownloadSummary {
-        let id = task.lock().unwrap().id.clone();
-        self.keep_secret(&id, &context.cookies);
-        sign_in::log_context(&id, context, "continued with");
-        self.persist();
-        self.schedule();
-        let summary = task.lock().unwrap().to_summary();
-        summary
     }
 
     pub fn pause_download(&self, id: &str) -> Result<DownloadSummary, RpcError> {
@@ -856,7 +818,7 @@ impl DaemonCore {
 
     /// Save the queue to disk if this core has a store. Failures are logged; the
     /// daemon keeps running on its in-memory queue.
-    fn persist(&self) {
+    pub(super) fn persist(&self) {
         let Some(ref store) = self.store else {
             return;
         };
