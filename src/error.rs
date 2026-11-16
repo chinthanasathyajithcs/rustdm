@@ -40,6 +40,28 @@ pub fn link_status_message(status: u16) -> String {
     }
 }
 
+/// What to tell the user when the site refused a download's browser cookies.
+pub fn sign_in_expired_message(status: u16) -> String {
+    format!("sign-in expired (HTTP {status}); {START_AGAIN_FROM_BROWSER}")
+}
+
+/// What to tell the user when a download with cookies was answered with a sign-in page.
+pub fn sign_in_page_message() -> String {
+    format!("sign-in expired (the site sent a sign-in page); {START_AGAIN_FROM_BROWSER}")
+}
+
+/// What to tell the user when a restart could not bring back a download's cookies.
+pub fn saved_sign_in_unreadable_message() -> String {
+    format!("saved sign-in could not be read; {START_AGAIN_FROM_BROWSER}")
+}
+
+const START_AGAIN_FROM_BROWSER: &str = "start the download again from the browser to continue it";
+
+/// Statuses that mean the site did not accept the sign-in a download brought.
+pub fn is_sign_in_status(status: u16) -> bool {
+    matches!(status, 401 | 403)
+}
+
 impl Error {
     /// Network or server trouble that may go away by itself, so the download is
     /// worth trying again later. Disk, permission, and changed-file problems are not.
