@@ -45,17 +45,46 @@ pub fn save_atomic(path: &Path, state: &State) -> Result<(), Error> {
 /// over `path`, so readers see either the old or the new contents.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(&tmp_path)?;
+    finish_atomic(file, &tmp_path, path, bytes)
+}
 
+/// `write_atomic` for secrets: on Unix the temp file is created readable by the
+/// owner alone, so the contents are never visible to others, not even briefly.
+/// On Windows the file inherits its folder's access rules.
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+    // A temp file left by a crash keeps whatever permissions it was made with.
+    match std::fs::remove_file(&tmp_path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&tmp_path)?;
+    finish_atomic(file, &tmp_path, path, bytes)
+}
+
+fn finish_atomic(
+    mut file: std::fs::File,
+    tmp_path: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
 
-    std::fs::rename(&tmp_path, path)
+    std::fs::rename(tmp_path, path)
 }
 
 pub fn load(path: &Path) -> Result<State, Error> {
@@ -131,6 +160,34 @@ mod tests {
         assert!(!path.with_extension("tmp").exists());
         let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
         assert!(!tmp_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_write_is_readable_by_the_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("secret.bin");
+        // A leftover temp file with loose permissions must not be reused.
+        let leftover = dir.path().join("secret.bin.tmp");
+        std::fs::write(&leftover, b"old").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_atomic_private(&path, b"hush").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"hush");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!leftover.exists());
+    }
+
+    #[test]
+    fn a_private_write_replaces_the_old_contents() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("secret.bin");
+        write_atomic_private(&path, b"first").unwrap();
+        write_atomic_private(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
     }
 
     #[test]
