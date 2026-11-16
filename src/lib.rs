@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod limiter;
 pub mod probe;
 pub mod ranges;
+pub mod request_context;
 pub mod retry;
 pub mod scheduler;
 pub mod state;

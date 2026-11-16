@@ -169,12 +169,18 @@ pub fn build_client() -> reqwest::Client {
 }
 
 pub fn build_client_with(timeouts: Timeouts) -> reqwest::Client {
+    client_builder(timeouts)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The settings every download client shares: the default User-Agent and the
+/// timeouts. A client with a request context starts from the same builder.
+pub fn client_builder(timeouts: Timeouts) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(format!("rustdm/{}", crate::VERSION))
         .connect_timeout(timeouts.connect)
         .read_timeout(timeouts.read)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// An I/O error that names the file or folder it is about.
