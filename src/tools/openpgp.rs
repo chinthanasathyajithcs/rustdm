@@ -96,7 +96,7 @@ impl PinnedKey {
         let n = reader.mpi()?;
         let e = reader.mpi()?;
         reader.finish()?;
-        if bit_length(&n) < MIN_RSA_BITS {
+        if bit_length(n) < MIN_RSA_BITS {
             return Err(SignatureError::Unsupported("RSA key under 2048 bits"));
         }
 

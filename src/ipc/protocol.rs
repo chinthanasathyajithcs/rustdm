@@ -39,6 +39,9 @@ pub const CODE_TOO_MANY_REDIRECTS: i32 = -32045;
 pub const CODE_DAEMON_ALREADY_RUNNING: i32 = -32060;
 pub const CODE_DAEMON_SHUTTING_DOWN: i32 = -32061;
 
+// --- Tools Manager Error Codes (-32080..-32099) ---
+pub const CODE_TOOL_FAILED: i32 = -32080;
+
 /// JSON-RPC Message identifier (either integer or string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -342,6 +345,11 @@ impl RpcError {
         )
     }
 
+    /// A tools-manager request failed; `message` is already fit to show the user.
+    pub fn tool_failed(message: impl Into<String>) -> Self {
+        Self::new(CODE_TOOL_FAILED, message, None)
+    }
+
     pub fn daemon_shutting_down() -> Self {
         Self::new(
             CODE_DAEMON_SHUTTING_DOWN,
@@ -590,6 +598,53 @@ pub struct DownloadStateChanged {
     pub new_state: DownloadStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// The helper programs the daemon can fetch for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolName {
+    YtDlp,
+    Ffmpeg,
+    Deno,
+}
+
+/// What the tools manager is doing with a tool right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolPhase {
+    Idle,
+    Checking,
+    Downloading,
+    Verifying,
+    Installing,
+}
+
+/// One tool's state, as `tools.status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInfo {
+    pub tool: ToolName,
+    pub installed: Option<String>,
+    pub previous: Option<String>,
+    pub last_checked_unix: Option<u64>,
+    pub phase: ToolPhase,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    /// Why the last attempt failed, in words fit to show the user.
+    pub error: Option<String>,
+}
+
+/// `tools.update`: check one tool (installing it if missing), or every installed tool.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ToolUpdateParams {
+    #[serde(default)]
+    pub tool: Option<ToolName>,
+}
+
+/// `tools.rollback`: go back to the previous version of a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRollbackParams {
+    pub tool: ToolName,
 }
 
 /// Numeric part of a download id such as `dl_12`, for ordering. Other ids sort last.

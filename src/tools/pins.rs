@@ -204,10 +204,7 @@ mod tests {
                     "{tool} on {platform:?}: hash is not lower-case SHA-256 hex"
                 );
                 assert!(pin.path.ends_with(&pin.asset), "{tool}: {}", pin.path);
-                assert!(
-                    pin.wanted.iter().any(|w| *w == pin.exe),
-                    "{tool}: exe is not kept"
-                );
+                assert!(pin.wanted.contains(&pin.exe), "{tool}: exe is not kept");
                 assert!(pin.exe.starts_with(&pin.exe_dir));
                 assert!(!pin.version.is_empty());
             }

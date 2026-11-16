@@ -1,3 +1,4 @@
+pub mod fake_releases;
 pub mod tools;
 
 use std::net::SocketAddr;
