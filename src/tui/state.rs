@@ -2,7 +2,7 @@
 //! what the last frame drew.
 
 use crate::ipc::protocol::{
-    DaemonLimits, DownloadDefaults, DownloadStatus, DownloadSummary, TelemetryTick,
+    DaemonLimits, DownloadDefaults, DownloadStatus, DownloadSummary, TelemetryTick, ToolInfo,
 };
 use crate::tui::daemon_link::{ActionError, Outcome};
 use crate::tui::dialogs::{Dialog, DialogTarget};
@@ -159,6 +159,8 @@ pub struct App {
     pub limits: Option<DaemonLimits>,
     /// What new downloads start with, as the daemon reports it.
     pub defaults: Option<DownloadDefaults>,
+    /// The helper tools' state, as last read while Settings was open.
+    pub tools: Vec<ToolInfo>,
     pub connected: bool,
     pub screen: Screen,
     /// The Help overlay is drawn over the current screen.
@@ -187,6 +189,7 @@ impl Default for App {
             speed_history: HashMap::new(),
             limits: None,
             defaults: None,
+            tools: Vec::new(),
             connected: false,
             screen: Screen::Downloads,
             help_open: false,

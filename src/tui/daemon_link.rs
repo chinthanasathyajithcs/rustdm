@@ -4,10 +4,11 @@
 use crate::ipc::client::{ClientError, DaemonClient};
 use crate::ipc::protocol::{AddDownloadParams, DownloadSummary, QueuePosition, TelemetryTick};
 use crate::ipc::transport::IpcEndpoint;
+use crate::tools::display::tool_label;
 use crate::tui::action::Action;
 use crate::tui::format::{format_speed_cap, status_label};
 use crate::tui::open_folder::open_folder;
-use crate::tui::state::App;
+use crate::tui::state::{App, Screen};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -92,6 +93,12 @@ pub(crate) async fn refresh(
             }
             // An rdmd from before defaults existed has none to report.
             app.defaults = conn.get_defaults().await.ok();
+            // The tools are polled only while Settings, which shows them, is open.
+            if app.screen == Screen::Settings {
+                if let Ok(tools) = conn.tools_status().await {
+                    app.tools = tools;
+                }
+            }
         }
         Err(e) => {
             app.connected = false;
@@ -142,6 +149,18 @@ pub(crate) async fn perform(
         Action::SetDefaults(params) => {
             conn.set_defaults(params.clone()).await?;
             return Ok(message("Defaults for new downloads saved".to_string()));
+        }
+        Action::UpdateTool(tool) => {
+            conn.tools_update(Some(*tool)).await?;
+            return Ok(message(format!("Checking {}", tool_label(*tool))));
+        }
+        Action::RollbackTool(tool) => {
+            let info = conn.tools_rollback(*tool).await?;
+            return Ok(message(format!(
+                "{}: now {}",
+                tool_label(*tool),
+                info.installed.as_deref().unwrap_or("-")
+            )));
         }
         Action::StopDaemon => {
             conn.shutdown().await?;

@@ -4,7 +4,9 @@
 use crate::daemon::core::MAX_ACTIVE_LIMIT;
 use crate::dirs::{full_folder, home_dir};
 use crate::engine::MAX_CONNECTIONS;
-use crate::ipc::protocol::{SetDefaultsParams, SetLimitsParams};
+use crate::ipc::protocol::{SetDefaultsParams, SetLimitsParams, ToolName, ToolPhase};
+use crate::tools::display::{age_text, state_text};
+use crate::tools::release::now_unix;
 use crate::tui::action::Action;
 use crate::tui::daemon_link::ActionError;
 use crate::tui::format::format_speed_cap;
@@ -35,15 +37,36 @@ pub enum SettingsField {
     Folder,
     Connections,
     Speed,
+    /// The helper tools; these rows are not edited, they take `u` and `b`.
+    YtDlp,
+    Ffmpeg,
+    Deno,
 }
 
+/// The groups of fields, in the order they are drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Group {
+    Limits,
+    NewDownloads,
+    Tools,
+}
+
+const GROUPS: [(&str, Group); 3] = [
+    ("Limits", Group::Limits),
+    ("New downloads", Group::NewDownloads),
+    ("Tools", Group::Tools),
+];
+
 impl SettingsField {
-    pub const ALL: [SettingsField; 5] = [
+    pub const ALL: [SettingsField; 8] = [
         SettingsField::MaxActive,
         SettingsField::TotalSpeed,
         SettingsField::Folder,
         SettingsField::Connections,
         SettingsField::Speed,
+        SettingsField::YtDlp,
+        SettingsField::Ffmpeg,
+        SettingsField::Deno,
     ];
 
     pub fn label(self) -> &'static str {
@@ -53,6 +76,9 @@ impl SettingsField {
             SettingsField::Folder => "Folder",
             SettingsField::Connections => "Connections",
             SettingsField::Speed => "Speed cap per download",
+            SettingsField::YtDlp => "yt-dlp",
+            SettingsField::Ffmpeg => "ffmpeg",
+            SettingsField::Deno => "deno",
         }
     }
 
@@ -62,6 +88,7 @@ impl SettingsField {
             SettingsField::Connections => format!("1 to {MAX_CONNECTIONS}"),
             SettingsField::Folder => "A full path; created when a download needs it".into(),
             SettingsField::TotalSpeed | SettingsField::Speed => SPEED_HINT.into(),
+            SettingsField::YtDlp | SettingsField::Ffmpeg | SettingsField::Deno => String::new(),
         }
     }
 
@@ -69,8 +96,24 @@ impl SettingsField {
         Self::ALL.iter().position(|f| *f == self).unwrap_or(0)
     }
 
-    fn is_limit(self) -> bool {
-        matches!(self, SettingsField::MaxActive | SettingsField::TotalSpeed)
+    fn group(self) -> Group {
+        match self {
+            SettingsField::MaxActive | SettingsField::TotalSpeed => Group::Limits,
+            SettingsField::Folder | SettingsField::Connections | SettingsField::Speed => {
+                Group::NewDownloads
+            }
+            SettingsField::YtDlp | SettingsField::Ffmpeg | SettingsField::Deno => Group::Tools,
+        }
+    }
+
+    /// The tool this row is about, for the three tool rows.
+    pub fn tool(self) -> Option<ToolName> {
+        match self {
+            SettingsField::YtDlp => Some(ToolName::YtDlp),
+            SettingsField::Ffmpeg => Some(ToolName::Ffmpeg),
+            SettingsField::Deno => Some(ToolName::Deno),
+            _ => None,
+        }
     }
 }
 
@@ -130,6 +173,7 @@ fn current_value(app: &App, field: SettingsField) -> Option<String> {
         SettingsField::Folder => defaults.map(|d| d.folder.display().to_string()),
         SettingsField::Connections => defaults.map(|d| d.connections.to_string()),
         SettingsField::Speed => defaults.map(|d| format_speed_cap(d.max_bytes_per_sec)),
+        SettingsField::YtDlp | SettingsField::Ffmpeg | SettingsField::Deno => None,
     }
 }
 
@@ -181,6 +225,8 @@ fn on_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
         KeyCode::Up | KeyCode::Char('k') => select(app, -1),
         KeyCode::Down | KeyCode::Char('j') => select(app, 1),
         KeyCode::Enter => start_editing(app),
+        KeyCode::Char('u') => return app.settings.selected.tool().map(Action::UpdateTool),
+        KeyCode::Char('b') => return app.settings.selected.tool().map(Action::RollbackTool),
         _ => {}
     }
     None
@@ -193,6 +239,10 @@ fn select(app: &mut App, delta: isize) {
 }
 
 fn start_editing(app: &mut App) {
+    // A tool row is not a value to type.
+    if app.settings.selected.tool().is_some() {
+        return;
+    }
     let value = current_value(app, app.settings.selected).unwrap_or_default();
     app.settings.editing = Some(TextField::new(&value));
     app.settings.error = None;
@@ -243,6 +293,9 @@ fn parse_field(field: SettingsField, text: &str) -> Result<Action, String> {
             max_bytes_per_sec: Some(parse_speed(text)?),
             ..Default::default()
         }),
+        SettingsField::YtDlp | SettingsField::Ffmpeg | SettingsField::Deno => {
+            return Err("Tools are updated with u, not edited".to_string())
+        }
     })
 }
 
@@ -254,7 +307,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut y = inner.y;
     let mut hits = Vec::new();
-    for (title, is_limit) in [("Limits", true), ("New downloads", false)] {
+    for (title, group) in GROUPS {
         if y > inner.y {
             y += 1;
         }
@@ -266,7 +319,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         );
         for field in SettingsField::ALL
             .into_iter()
-            .filter(|f| f.is_limit() == is_limit)
+            .filter(|f| f.group() == group)
         {
             if y >= inner.bottom() {
                 break;
@@ -275,6 +328,16 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             render_field(frame, app, field, row);
             hits.push((row, field));
             y += 1;
+            if let Some(tool) = field.tool() {
+                render_tool_notes(
+                    frame,
+                    app,
+                    tool,
+                    field == app.settings.selected,
+                    inner,
+                    &mut y,
+                );
+            }
             if field == app.settings.selected && app.settings.is_editing() {
                 let under = match &app.settings.error {
                     Some(err) => Span::styled(err.clone(), theme::ERROR),
@@ -299,6 +362,53 @@ fn put_line(frame: &mut Frame, inner: Rect, y: &mut u16, line: Line) {
     *y += 1;
 }
 
+/// Under a tool's row: why its last attempt failed, and, when it is the
+/// selected row, which keys act on it.
+fn render_tool_notes(
+    frame: &mut Frame,
+    app: &App,
+    tool: ToolName,
+    selected: bool,
+    inner: Rect,
+    y: &mut u16,
+) {
+    let indent = || Span::raw(" ".repeat((INDENT + LABEL_WIDTH) as usize));
+    let failure = app
+        .tools
+        .iter()
+        .find(|i| i.tool == tool && i.phase == ToolPhase::Idle)
+        .and_then(|i| i.error.clone());
+    if let Some(error) = failure {
+        let line = Line::from(vec![indent(), Span::styled(error, theme::ERROR)]);
+        put_line(frame, inner, y, line);
+    }
+    if selected {
+        let hint = Span::styled("u Update · b Go back one version", theme::DIM);
+        put_line(frame, inner, y, Line::from(vec![indent(), hint]));
+    }
+}
+
+/// What a tool row shows after its name: version, last check, previous
+/// version, or the progress of what it is doing now.
+fn tool_value(app: &App, tool: ToolName, style: Style) -> Line<'static> {
+    let Some(info) = app.tools.iter().find(|i| i.tool == tool) else {
+        return Line::from(Span::styled("—", style));
+    };
+    if info.phase != ToolPhase::Idle {
+        return Line::from(Span::styled(state_text(info), style));
+    }
+    let Some(version) = &info.installed else {
+        return Line::from(Span::styled("not installed", style));
+    };
+    let mut spans = vec![Span::styled(version.clone(), style)];
+    let mut details = format!("  checked {}", age_text(info.last_checked_unix, now_unix()));
+    if let Some(previous) = &info.previous {
+        details.push_str(&format!("  previous {previous}"));
+    }
+    spans.push(Span::styled(details, theme::DIM));
+    Line::from(spans)
+}
+
 fn render_field(frame: &mut Frame, app: &App, field: SettingsField, row: Rect) {
     let selected = field == app.settings.selected;
     let editing = selected && app.settings.is_editing();
@@ -318,6 +428,15 @@ fn render_field(frame: &mut Frame, app: &App, field: SettingsField, row: Rect) {
     frame.render_widget(Paragraph::new(Span::styled(label, label_style)), row);
     match (&app.settings.editing, editing) {
         (Some(text), true) => text.render(frame, value_area, !app.settings.pending),
+        _ if field.tool().is_some() => {
+            let style = if selected {
+                theme::SELECTED_ROW
+            } else {
+                Style::new()
+            };
+            let line = tool_value(app, field.tool().unwrap_or(ToolName::YtDlp), style);
+            frame.render_widget(Paragraph::new(line), value_area);
+        }
         _ => {
             let value = current_value(app, field).unwrap_or_else(|| "—".into());
             let style = if selected {
@@ -333,6 +452,7 @@ fn render_field(frame: &mut Frame, app: &App, field: SettingsField, row: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::protocol::ToolInfo;
     use crate::ipc::protocol::{
         DaemonLimits, DownloadDefaults, SetDefaultsParams, SetLimitsParams, CODE_INVALID_PARAMS,
     };
@@ -412,9 +532,113 @@ mod tests {
             "Connections",
             "Speed cap per download",
             "unlimited",
+            "Tools",
+            "yt-dlp",
+            "ffmpeg",
+            "deno",
         ] {
             assert!(text.contains(want), "missing {want}:\n{text}");
         }
+    }
+
+    #[test]
+    fn u_and_b_dispatch_tool_actions_and_enter_is_ignored_on_tools() {
+        let mut app = settings_app();
+        for _ in 0..5 {
+            send(&mut app, key(KeyCode::Down));
+        }
+        assert_eq!(app.settings.selected, SettingsField::YtDlp);
+
+        assert_eq!(send(&mut app, key(KeyCode::Enter)), None);
+        assert!(!app.settings.is_editing());
+
+        assert_eq!(
+            send(&mut app, key(KeyCode::Char('u'))),
+            Some(Action::UpdateTool(ToolName::YtDlp))
+        );
+        assert_eq!(
+            send(&mut app, key(KeyCode::Char('b'))),
+            Some(Action::RollbackTool(ToolName::YtDlp))
+        );
+
+        send(&mut app, key(KeyCode::Down));
+        assert_eq!(app.settings.selected, SettingsField::Ffmpeg);
+        assert_eq!(
+            send(&mut app, key(KeyCode::Char('u'))),
+            Some(Action::UpdateTool(ToolName::Ffmpeg))
+        );
+        assert_eq!(
+            send(&mut app, key(KeyCode::Char('b'))),
+            Some(Action::RollbackTool(ToolName::Ffmpeg))
+        );
+    }
+
+    #[test]
+    fn tool_row_shows_version_previous_state_and_failure_note() {
+        let mut app = settings_app();
+        app.tools = vec![
+            ToolInfo {
+                tool: ToolName::YtDlp,
+                installed: Some("2026.10.26".into()),
+                previous: Some("2026.10.15".into()),
+                last_checked_unix: Some(now_unix().saturating_sub(60)),
+                phase: ToolPhase::Idle,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                error: None,
+            },
+            ToolInfo {
+                tool: ToolName::Ffmpeg,
+                installed: None,
+                previous: None,
+                last_checked_unix: None,
+                phase: ToolPhase::Downloading,
+                downloaded_bytes: 12 * 1024 * 1024,
+                total_bytes: Some(24 * 1024 * 1024),
+                error: None,
+            },
+            ToolInfo {
+                tool: ToolName::Deno,
+                installed: Some("2.9.8".into()),
+                previous: None,
+                last_checked_unix: Some(now_unix().saturating_sub(120)),
+                phase: ToolPhase::Idle,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                error: Some("checksum mismatch".into()),
+            },
+        ];
+
+        for _ in 0..7 {
+            send(&mut app, key(KeyCode::Down));
+        }
+        assert_eq!(app.settings.selected, SettingsField::Deno);
+
+        let text = draw(&mut app);
+        assert!(
+            text.contains("2026.10.26"),
+            "shows yt-dlp installed version: {text}"
+        );
+        assert!(
+            text.contains("previous 2026.10.15"),
+            "shows yt-dlp previous version: {text}"
+        );
+        assert!(
+            text.contains("Getting ffmpeg: 12/24 MiB"),
+            "shows ffmpeg downloading: {text}"
+        );
+        assert!(
+            text.contains("2.9.8"),
+            "shows deno installed version: {text}"
+        );
+        assert!(
+            text.contains("checksum mismatch"),
+            "shows deno error note: {text}"
+        );
+        assert!(
+            text.contains("u Update · b Go back one version"),
+            "shows hint under selected tool: {text}"
+        );
     }
 
     #[test]

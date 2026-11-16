@@ -38,6 +38,8 @@ const SETTINGS_KEYS: &[(&str, &str)] = &[
     ("↑/↓", "Select"),
     ("Enter", "Edit or save"),
     ("Esc", "Back"),
+    ("u", "Update tool"),
+    ("b", "Previous version"),
     ("l", "Logs"),
     ("?", "Help"),
     ("q", "Quit"),
