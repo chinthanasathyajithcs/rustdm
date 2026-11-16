@@ -32,13 +32,19 @@ pub enum HostRequest {
 
 impl HostRequest {
     /// Decode one frame. On failure, returns the request id when one can be
-    /// found, so the reply can still name it, and a message without any request data in it.
+    /// found, so the reply can still name it, and a fixed message. serde's own
+    /// text is never passed on: it can quote the URL or file name.
     pub fn parse(bytes: &[u8]) -> Result<Self, (Option<u64>, String)> {
         let request: Self = serde_json::from_slice(bytes).map_err(|e| {
             let id = serde_json::from_slice::<Value>(bytes)
                 .ok()
                 .and_then(|v| v.get("id").and_then(Value::as_u64));
-            (id, format!("unrecognised request: {e}"))
+            let message = if e.is_data() {
+                "invalid request: unknown type, unknown or missing field, or wrong value type"
+            } else {
+                "invalid request: not valid JSON"
+            };
+            (id, message.to_string())
         })?;
         if let Self::Add {
             url,
@@ -236,6 +242,24 @@ mod tests {
             assert!(parse(message).is_err(), "{extra} must be refused");
         }
         assert!(parse(json!({"type": "ping", "id": 1, "url": "https://example.com"})).is_err());
+    }
+
+    #[test]
+    fn error_messages_never_quote_what_the_extension_sent() {
+        let secret = "https://example.com/private-token-123";
+        let cases = [
+            json!({"type": secret, "id": 1}),
+            json!({"type": "add", "id": 1, "url": secret, "destination": secret}),
+            json!({"type": "add", "id": 1, "url": 5, "filename": secret}),
+            json!({"type": "add", "id": 1, "url": secret, "filename": format!("{secret}/x")}),
+            json!({"type": "add", "id": 1, "url": format!("ftp://{secret}")}),
+        ];
+        for case in cases {
+            let (_, message) = parse(case).unwrap_err();
+            assert!(!message.contains("private-token"), "{message}");
+        }
+        let (_, message) = HostRequest::parse(b"{\"type\":\"ping\", private-token").unwrap_err();
+        assert!(!message.contains("private-token"), "{message}");
     }
 
     #[test]
