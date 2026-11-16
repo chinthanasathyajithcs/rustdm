@@ -4,6 +4,7 @@
 
 pub mod checksum;
 pub mod error;
+pub mod extract;
 pub mod openpgp;
 pub mod pins;
 pub mod store_file;

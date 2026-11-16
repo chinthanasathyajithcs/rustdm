@@ -66,7 +66,52 @@ pub enum Mode {
         bytes_per_sec: u64,
         fast_bytes_per_sec: Option<u64>,
     },
+    /// Serve a different answer per request path (see `TestServer::start_routes`);
+    /// an unknown path gets 404.
+    Routes(Routes),
 }
+
+/// One path's answer in `Mode::Routes`. Range requests are honoured when the
+/// status is 200.
+#[derive(Clone, Debug)]
+pub struct Route {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Arc<[u8]>,
+    /// Send the body at about this speed, so a test can stop it part-way.
+    pub bytes_per_sec: Option<u64>,
+}
+
+impl Route {
+    pub fn ok(body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status: 200,
+            headers: Vec::new(),
+            body: Arc::from(body.into()),
+            bytes_per_sec: None,
+        }
+    }
+
+    pub fn status(status: u16) -> Self {
+        Self {
+            status,
+            ..Self::ok(Vec::new())
+        }
+    }
+
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn throttled(mut self, bytes_per_sec: u64) -> Self {
+        self.bytes_per_sec = Some(bytes_per_sec);
+        self
+    }
+}
+
+/// The routes of a `Mode::Routes` server, shared so a test can change them while it runs.
+pub type Routes = Arc<RwLock<std::collections::HashMap<String, Route>>>;
 
 /// Headers of a 206 answer for `start..=end` of a `total`-byte file.
 fn partial_header(
@@ -113,6 +158,7 @@ pub struct TestServer {
     etag: Arc<RwLock<String>>,
     requests: Arc<Mutex<Vec<RequestLog>>>,
     peak_in_flight: Arc<AtomicUsize>,
+    routes: Option<Routes>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -143,6 +189,23 @@ impl Drop for InFlight {
 impl TestServer {
     pub async fn start(body: Vec<u8>, mode: Mode) -> Self {
         Self::start_at("127.0.0.1:0", body, mode).await.unwrap()
+    }
+
+    /// A server that answers each path in `routes` as described, and 404 for any other.
+    /// Change an answer while it runs with `set_route`.
+    pub async fn start_routes(routes: Vec<(String, Route)>) -> Self {
+        let table: Routes = Arc::new(RwLock::new(routes.into_iter().collect()));
+        let mut server = Self::start(Vec::new(), Mode::Routes(Arc::clone(&table))).await;
+        server.routes = Some(table);
+        server
+    }
+
+    /// Add or replace the answer for `path` (for example `"/api/latest"`).
+    /// Does nothing on a server that was not started with `start_routes`.
+    pub fn set_route(&self, path: &str, route: Route) {
+        if let Some(table) = &self.routes {
+            table.write().unwrap().insert(path.to_string(), route);
+        }
     }
 
     pub async fn start_at(bind_addr: &str, body: Vec<u8>, mode: Mode) -> std::io::Result<Self> {
@@ -253,6 +316,54 @@ impl TestServer {
                             let last_modified = "Sun, 06 Nov 1994 08:49:37 GMT";
 
                             let response = match &mode_clone {
+                                Mode::Routes(table) => {
+                                    let route = table
+                                        .read()
+                                        .unwrap()
+                                        .get(path.split('?').next().unwrap_or(""))
+                                        .cloned();
+                                    let Some(route) = route else {
+                                        let _ = socket
+                                            .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                                            .await;
+                                        let _ = socket.shutdown().await;
+                                        return;
+                                    };
+                                    let total = route.body.len();
+                                    let range = if route.status == 200 {
+                                        range_hdr.as_deref().and_then(|r| parse_range(r, total))
+                                    } else {
+                                        None
+                                    };
+                                    let extra: String = route
+                                        .headers
+                                        .iter()
+                                        .map(|(k, v)| format!("{k}: {v}\r\n"))
+                                        .collect();
+                                    let (header, body) = match range {
+                                        Some((start, end)) => (
+                                            partial_header(start, end, total, &current_etag, last_modified)
+                                                .replace("\r\n\r\n", &format!("\r\n{extra}\r\n")),
+                                            &route.body[start..=end],
+                                        ),
+                                        None => (
+                                            format!(
+                                                "HTTP/1.1 {} Status\r\nContent-Length: {total}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\n{extra}Connection: close\r\n\r\n",
+                                                route.status
+                                            ),
+                                            &route.body[..],
+                                        ),
+                                    };
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    match route.bytes_per_sec {
+                                        Some(bps) => write_throttled(&mut socket, body, bps).await,
+                                        None => {
+                                            let _ = socket.write_all(body).await;
+                                        }
+                                    }
+                                    let _ = socket.shutdown().await;
+                                    return;
+                                }
                                 Mode::Redirect => {
                                     if !path.starts_with("/moved/") {
                                         let redirect_target = format!("/moved{}", if path.starts_with('/') { &path } else { "/" });
@@ -592,6 +703,7 @@ impl TestServer {
             etag,
             requests,
             peak_in_flight,
+            routes: None,
             shutdown_tx: Some(shutdown_tx),
         })
     }
