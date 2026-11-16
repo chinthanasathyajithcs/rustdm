@@ -415,6 +415,127 @@ async fn adding_the_same_link_again_continues_a_download_that_the_site_turned_do
     );
 }
 
+/// A paused download with a saved sign-in, and the core it lives in.
+async fn paused_with_cookies(
+    data: &Path,
+    folder: &Path,
+    server: &TestServer,
+) -> (DaemonCore, DownloadSummary) {
+    let core = open_core(data);
+    let added = core
+        .add_download(add_params(server, folder, Some(context("keep-me"))))
+        .unwrap();
+    core.pause_download(&added.id).unwrap();
+    wait_for(&core, &added.id, DownloadStatus::Paused).await;
+    (core, added)
+}
+
+/// The paused download was left alone and `other` is a separate, new download.
+fn assert_left_alone(
+    core: &DaemonCore,
+    data: &Path,
+    paused: &DownloadSummary,
+    other: &DownloadSummary,
+) {
+    assert_ne!(other.id, paused.id, "a new download, not a takeover");
+    assert!(core.list_downloads().len() >= 2);
+    assert_eq!(
+        core.get_status(&paused.id).unwrap().status,
+        DownloadStatus::Paused
+    );
+    let kept = SecretStore::in_dir(data).load(&paused.id).unwrap();
+    assert_eq!(
+        kept[0].value, "keep-me",
+        "the paused download keeps its sign-in"
+    );
+    core.cancel_download(CancelDownloadParams {
+        id: other.id.clone(),
+        delete_partial: true,
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn adding_with_only_a_referer_starts_a_new_download_and_leaves_the_paused_one_alone() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+    let referer_only = RequestContext {
+        referer: Some(REFERER.to_string()),
+        ..Default::default()
+    };
+
+    let other = core
+        .add_download(add_params(&server, folder.path(), Some(referer_only)))
+        .unwrap();
+
+    assert_left_alone(&core, data.path(), &paused, &other);
+}
+
+#[tokio::test]
+async fn adding_with_only_expired_cookies_does_not_wipe_the_paused_downloads_secret() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+    let mut stale = context("stale");
+    stale.cookies[0].expires = Some(1);
+
+    let other = core
+        .add_download(add_params(&server, folder.path(), Some(stale)))
+        .unwrap();
+
+    assert_left_alone(&core, data.path(), &paused, &other);
+}
+
+#[tokio::test]
+async fn adding_with_another_file_name_or_folder_starts_a_new_download() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+
+    let renamed = AddDownloadParams {
+        filename: Some("other.bin".to_string()),
+        ..add_params(&server, folder.path(), Some(context("fresh")))
+    };
+    let other = core.add_download(renamed).unwrap();
+    assert_ne!(other.id, paused.id);
+    core.cancel_download(CancelDownloadParams {
+        id: other.id,
+        delete_partial: true,
+    })
+    .unwrap();
+
+    let moved = add_params(&server, elsewhere.path(), Some(context("fresh")));
+    let other = core.add_download(moved).unwrap();
+    assert_left_alone(&core, data.path(), &paused, &other);
+}
+
+#[tokio::test]
+async fn a_browser_add_without_a_folder_or_name_still_continues_the_paused_download() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+    let bare = AddDownloadParams {
+        destination: None,
+        filename: None,
+        ..add_params(&server, folder.path(), Some(context("fresh")))
+    };
+
+    let again = core.add_download(bare).unwrap();
+
+    assert_eq!(again.id, paused.id);
+    core.cancel_download(CancelDownloadParams {
+        id: again.id,
+        delete_partial: true,
+    })
+    .unwrap();
+}
+
 #[tokio::test]
 async fn adding_a_running_download_again_is_still_a_duplicate() {
     let data = tempfile::tempdir().unwrap();

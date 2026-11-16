@@ -274,6 +274,7 @@ impl DaemonCore {
             }
         }
 
+        let asked_folder = params.destination.clone();
         let directory = params.destination.unwrap_or(defaults.folder);
         check_download_folder(&directory)?;
         let context = params.context.as_ref().map(sign_in::check).transpose()?;
@@ -295,10 +296,16 @@ impl DaemonCore {
                 }
             }
 
-            // Started again from the browser: carry on with the stopped
-            // download, from its partial file, with the fresh sign-in.
-            if let Some(checked) = &context {
-                if let Some(stopped) = sign_in::stopped_download_of(&state, &params.url) {
+            // Started again from the browser, with a fresh sign-in: carry on
+            // with the stopped download, from its partial file. Anything less
+            // (no cookies, another folder or name) is a different download.
+            let ask = sign_in::AddRequest {
+                url: &params.url,
+                folder: asked_folder.as_deref(),
+                file_name: params.filename.as_deref(),
+            };
+            if let Some(checked) = context.as_ref().filter(|c| !c.context.cookies.is_empty()) {
+                if let Some(stopped) = sign_in::stopped_download_of(&state, &ask) {
                     {
                         let mut task = stopped.lock().unwrap();
                         task.set_context(&checked.context, checked.client.clone());

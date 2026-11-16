@@ -51,15 +51,31 @@ impl DaemonCore {
     }
 }
 
-/// The paused or failed download of `url` that nothing is running for, if any.
-pub fn stopped_download_of(state: &DaemonState, url: &str) -> Option<Arc<Mutex<TaskRecord>>> {
+/// What a client asked for when it added a link.
+pub struct AddRequest<'a> {
+    pub url: &'a str,
+    pub folder: Option<&'a std::path::Path>,
+    pub file_name: Option<&'a str>,
+}
+
+/// The paused or failed download that an add of the same link with a fresh
+/// sign-in should carry on: nothing is running for it, and the add names no
+/// other folder or file name than the download already has.
+pub fn stopped_download_of(
+    state: &DaemonState,
+    ask: &AddRequest<'_>,
+) -> Option<Arc<Mutex<TaskRecord>>> {
     state
         .in_order()
         .find(|task_lock| {
             let task = task_lock.lock().unwrap();
-            task.url == url
+            task.url == ask.url
                 && !task.running
                 && matches!(task.status, DownloadStatus::Paused | DownloadStatus::Failed)
+                && ask.folder.is_none_or(|f| f == task.directory)
+                && ask
+                    .file_name
+                    .is_none_or(|n| task.requested_name.as_deref() == Some(n) || task.filename == n)
         })
         .cloned()
 }
