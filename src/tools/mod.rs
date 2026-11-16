@@ -8,6 +8,8 @@
 //! through `ToolStore`.
 
 pub mod checksum;
+pub mod cli;
+pub mod display;
 pub mod error;
 pub mod extract;
 pub mod install;
