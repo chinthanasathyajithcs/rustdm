@@ -156,7 +156,7 @@ async fn add<S: Fn() -> io::Result<()>>(
     spawn: &S,
 ) -> HostReply {
     let outcome = async {
-        let mut client = connect_or_spawn(endpoint, || spawn(), SPAWN_TIMEOUT).await?;
+        let mut client = connect_or_spawn(endpoint, spawn, SPAWN_TIMEOUT).await?;
         client
             .call::<DownloadSummary>(
                 "download.add",

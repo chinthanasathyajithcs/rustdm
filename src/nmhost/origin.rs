@@ -100,7 +100,7 @@ mod tests {
             String::new(),
         ] {
             assert_eq!(
-                check_caller(&[bad.clone()]),
+                check_caller(std::slice::from_ref(&bad)),
                 Err(OriginError::Unknown),
                 "{bad}"
             );

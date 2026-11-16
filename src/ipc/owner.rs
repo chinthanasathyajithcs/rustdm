@@ -61,6 +61,7 @@ mod windows {
         fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
         fn GetCurrentProcess() -> Handle;
         fn CloseHandle(handle: Handle) -> i32;
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
     }
 
     #[link(name = "advapi32")]
@@ -74,6 +75,30 @@ mod windows {
             return_length: *mut u32,
         ) -> i32;
         fn EqualSid(a: *mut c_void, b: *mut c_void) -> i32;
+        fn ConvertSidToStringSidW(sid: *mut c_void, string_sid: *mut *mut u16) -> i32;
+    }
+
+    /// The current user's SID as text, such as `S-1-5-21-...-1001`.
+    pub fn current_user_sid_string() -> io::Result<String> {
+        // SAFETY: the pseudo-handle from GetCurrentProcess needs no closing.
+        let ours = token_user(unsafe { GetCurrentProcess() })?;
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: the pointer is a SID inside the live TOKEN_USER buffer, and
+        // `text` is a valid out-pointer.
+        if unsafe { ConvertSidToStringSidW(sid(&ours), &mut text) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: on success `text` is a NUL-terminated UTF-16 string allocated
+        // with LocalFree's allocator; it is copied and then freed once.
+        unsafe {
+            let mut len = 0;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sid_text = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            Ok(sid_text)
+        }
     }
 
     /// Closes a kernel handle when dropped.
@@ -161,7 +186,7 @@ mod windows {
 }
 
 #[cfg(windows)]
-pub use windows::check_pipe_server_owner;
+pub use windows::{check_pipe_server_owner, current_user_sid_string};
 
 /// A name part made only of letters, digits, `-` and `_`, for per-user
 /// endpoint names. Anything else becomes `_`.

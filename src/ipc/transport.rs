@@ -375,6 +375,9 @@ pub struct IpcListener {
     pipe_name: String,
     #[cfg(windows)]
     server: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    /// Who may connect; every pipe instance is created with it.
+    #[cfg(windows)]
+    security: crate::ipc::pipe_security::PipeSecurity,
 }
 
 impl IpcListener {
@@ -422,12 +425,12 @@ impl IpcListener {
             ))),
             #[cfg(windows)]
             IpcEndpoint::NamedPipe(pipe_name) => {
-                let server = tokio::net::windows::named_pipe::ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .create(pipe_name)?;
+                let security = crate::ipc::pipe_security::PipeSecurity::for_current_user()?;
+                let server = security.create_server(true, pipe_name)?;
                 Ok(Self {
                     pipe_name: pipe_name.clone(),
                     server: Some(server),
+                    security,
                 })
             }
             #[cfg(not(windows))]
@@ -454,8 +457,7 @@ impl IpcListener {
             server.connect().await?;
 
             // Instantly create the subsequent server instance for future clients
-            let next_server =
-                tokio::net::windows::named_pipe::ServerOptions::new().create(&self.pipe_name)?;
+            let next_server = self.security.create_server(false, &self.pipe_name)?;
             self.server = Some(next_server);
 
             Ok(IpcConnection::from_stream(InnerStream::NamedPipeServer(
