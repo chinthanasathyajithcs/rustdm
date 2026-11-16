@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "rustdm",
+  "version": "0.1.0",
+  "description": "Sends your browser's downloads to rustdm, the resilient download manager.",
+  "minimum_chrome_version": "110",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvI+anySKIxCMhxCYpSq+js1wNDNu442Dabj4w3TRQjdf7s2uknv4swQ264fen25M1nvLWXOk2TmbF1c5Xufb+/JGtr7PY96zSMYS7hh8soX5Zqpjbvd270aRxsOhreRmVaR6kENa+c+Yj+eqcpN1Ultu31ZSSM3HIIqCH/A3UlZUAvcgEgmHTh5GMkjJ7RZcbKciPv69av6diP1wMuMsiHwU+0Dmy46Jb/2jDdQ6yRktqXhFvNQ3FnxOWtKhAwZFAGHreKka5FdampxZMIfFv5KR6wfOJrCEMCZ6P19hnIDegpQE6BUvwlrWJohB/flYKBsBM/flq4bpNEPwywHZ2QIDAQAB",
+  "permissions": [
+    "downloads",
+    "cookies",
+    "nativeMessaging",
+    "contextMenus",
+    "storage",
+    "webRequest"
+  ],
+  "optional_host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "rustdm",
+    "default_popup": "panel.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "options_ui": {
+    "page": "panel.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
