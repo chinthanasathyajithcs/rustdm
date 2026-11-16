@@ -392,6 +392,10 @@ pub async fn resume_with_options(
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
     let probe_result =
         probe::probe_for(client, &target_url, cancel.as_ref(), Some(&progress)).await?;
+    // A link that now opens a sign-in screen would be saved over the real file.
+    if probe_result.is_unwanted_web_page() {
+        return Err(Error::WebPage);
+    }
 
     // Without range support or a known size, the only way on is from byte 0.
     if !probe_result.ranges_supported || state.total == 0 {
