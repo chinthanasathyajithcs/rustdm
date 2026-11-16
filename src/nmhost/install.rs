@@ -104,8 +104,17 @@ pub fn install(host_exe: &Path) -> io::Result<Vec<BrowserEntry>> {
     platform::install(host_exe)
 }
 
-/// Remove the registrations. Returns the ones that existed.
-pub fn uninstall() -> io::Result<Vec<BrowserEntry>> {
+/// What `uninstall` did. One browser failing does not stop the others.
+#[derive(Debug, Default)]
+pub struct UninstallReport {
+    /// The registrations that existed and are gone.
+    pub removed: Vec<BrowserEntry>,
+    /// What could not be done, one line each.
+    pub problems: Vec<String>,
+}
+
+/// Remove the registrations.
+pub fn uninstall() -> io::Result<UninstallReport> {
     platform::uninstall()
 }
 
@@ -166,15 +175,19 @@ mod platform {
         Ok(done)
     }
 
-    pub(super) fn uninstall_in(config_home: &Path) -> io::Result<Vec<BrowserEntry>> {
-        let mut removed = Vec::new();
+    pub(super) fn uninstall_in(config_home: &Path) -> UninstallReport {
+        let mut report = UninstallReport::default();
         for (browser, folder) in BROWSERS {
             let before = entry(config_home, browser, folder);
-            if remove_if_present(&manifest_path(config_home, folder))? {
-                removed.push(before);
+            match remove_if_present(&manifest_path(config_home, folder)) {
+                Ok(true) => report.removed.push(before),
+                Ok(false) => {}
+                Err(e) => report
+                    .problems
+                    .push(format!("{browser}: cannot remove {}: {e}", before.location)),
             }
         }
-        Ok(removed)
+        report
     }
 
     pub(super) fn status_in(config_home: &Path) -> Vec<BrowserEntry> {
@@ -189,8 +202,8 @@ mod platform {
         install_in(&config_home()?, host_exe)
     }
 
-    pub(super) fn uninstall() -> io::Result<Vec<BrowserEntry>> {
-        uninstall_in(&config_home()?)
+    pub(super) fn uninstall() -> io::Result<UninstallReport> {
+        Ok(uninstall_in(&config_home()?))
     }
 
     pub(super) fn status() -> io::Result<Vec<BrowserEntry>> {
@@ -258,21 +271,40 @@ mod platform {
         Ok(done)
     }
 
-    pub(super) fn uninstall_in(local_app_data: &Path, root: &str) -> io::Result<Vec<BrowserEntry>> {
-        let mut removed = Vec::new();
+    pub(super) fn uninstall_in(local_app_data: &Path, root: &str) -> UninstallReport {
+        let mut report = UninstallReport::default();
         for (browser, vendor) in BROWSERS {
-            let before = entry(root, browser, vendor)?;
-            if registry::delete_key(&key_for(root, vendor))? {
-                removed.push(before);
+            // Reading the old state is only for the report; the key is deleted regardless.
+            let before = entry(root, browser, vendor).unwrap_or_else(|e| {
+                report
+                    .problems
+                    .push(format!("{browser}: cannot read its registration: {e}"));
+                BrowserEntry {
+                    browser,
+                    location: format!(r"HKCU\{}", key_for(root, vendor)),
+                    registered: true,
+                    host_path: None,
+                }
+            });
+            match registry::delete_key(&key_for(root, vendor)) {
+                Ok(true) => report.removed.push(before),
+                Ok(false) => {}
+                Err(e) => report
+                    .problems
+                    .push(format!("{browser}: cannot remove {}: {e}", before.location)),
             }
         }
         let manifest = manifest_path(local_app_data);
-        remove_if_present(&manifest)?;
+        if let Err(e) = remove_if_present(&manifest) {
+            report
+                .problems
+                .push(format!("cannot remove {}: {e}", manifest.display()));
+        }
         // Leave the folder if anything else is in it.
         if let Some(dir) = manifest.parent() {
             let _ = std::fs::remove_dir(dir);
         }
-        Ok(removed)
+        report
     }
 
     pub(super) fn status_in(root: &str) -> io::Result<Vec<BrowserEntry>> {
@@ -286,8 +318,8 @@ mod platform {
         install_in(&local_app_data()?, SOFTWARE_ROOT, host_exe)
     }
 
-    pub(super) fn uninstall() -> io::Result<Vec<BrowserEntry>> {
-        uninstall_in(&local_app_data()?, SOFTWARE_ROOT)
+    pub(super) fn uninstall() -> io::Result<UninstallReport> {
+        Ok(uninstall_in(&local_app_data()?, SOFTWARE_ROOT))
     }
 
     pub(super) fn status() -> io::Result<Vec<BrowserEntry>> {
@@ -421,11 +453,33 @@ mod tests {
         fn uninstall_removes_the_manifests_and_reports_what_it_removed() {
             let config = config_with(&["google-chrome", "chromium"]);
             install_in(config.path(), Path::new(HOST)).unwrap();
-            let removed = uninstall_in(config.path()).unwrap();
-            assert_eq!(removed.len(), 2);
+            let report = uninstall_in(config.path());
+            assert_eq!(report.removed.len(), 2);
+            assert!(report.problems.is_empty());
             assert!(!manifest_of(config.path(), "google-chrome").exists());
             assert!(status_in(config.path()).iter().all(|e| !e.registered));
-            assert!(uninstall_in(config.path()).unwrap().is_empty());
+            assert!(uninstall_in(config.path()).removed.is_empty());
+        }
+
+        #[test]
+        fn one_browser_failing_does_not_stop_the_others() {
+            let config = config_with(&["google-chrome", "chromium", "vivaldi"]);
+            install_in(config.path(), Path::new(HOST)).unwrap();
+            // Make Chromium's manifest impossible to remove as a file.
+            let stuck = manifest_of(config.path(), "chromium");
+            std::fs::remove_file(&stuck).unwrap();
+            std::fs::create_dir(&stuck).unwrap();
+
+            let report = uninstall_in(config.path());
+            let removed: Vec<_> = report.removed.iter().map(|e| e.browser).collect();
+            assert_eq!(removed, ["Google Chrome", "Vivaldi"]);
+            assert_eq!(report.problems.len(), 1);
+            assert!(
+                report.problems[0].starts_with("Chromium:"),
+                "{:?}",
+                report.problems
+            );
+            assert!(!manifest_of(config.path(), "vivaldi").exists());
         }
     }
 
@@ -479,8 +533,9 @@ mod tests {
             install_in(appdata.path(), &root.0, host).unwrap();
             assert!(status_in(&root.0).unwrap().iter().all(|e| e.registered));
 
-            let removed = uninstall_in(appdata.path(), &root.0).unwrap();
-            assert_eq!(removed.len(), 2);
+            let report = uninstall_in(appdata.path(), &root.0);
+            assert_eq!(report.removed.len(), 2);
+            assert!(report.problems.is_empty(), "{:?}", report.problems);
             assert!(status_in(&root.0).unwrap().iter().all(|e| !e.registered));
             assert!(!manifest_path(appdata.path()).exists());
         }

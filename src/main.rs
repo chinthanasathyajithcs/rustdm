@@ -599,8 +599,15 @@ fn browser(action: BrowserAction) -> CliResult {
             println!("Next: load the rustdm extension in your browser.");
         }
         BrowserAction::Uninstall => {
-            for entry in install::uninstall()? {
+            let report = install::uninstall()?;
+            for entry in &report.removed {
                 println!("Removed from {}", entry.browser);
+            }
+            for problem in &report.problems {
+                eprintln!("{problem}");
+            }
+            if !report.problems.is_empty() {
+                return Err("some registrations could not be removed".into());
             }
         }
         BrowserAction::Status => {
