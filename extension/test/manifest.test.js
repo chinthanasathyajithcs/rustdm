@@ -32,6 +32,10 @@ test('permissions are exactly the documented set', () => {
   assert.equal(manifest.host_permissions, undefined);
 });
 
+test('the extension is kept out of private windows', () => {
+  assert.equal(manifest.incognito, 'not_allowed');
+});
+
 test('nothing lets a web page reach the extension', () => {
   for (const field of [
     'externally_connectable',

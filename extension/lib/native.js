@@ -62,6 +62,10 @@ export function describeError(error) {
     case 'too_large':
     case 'invalid':
       return `rustdm could not use what the browser sent${detail}.`;
+    case 'cancel_failed':
+      return `rustdm has the download, but the browser could not stop its own copy${detail}. You may get the file twice.`;
+    case 'browser_download_failed':
+      return `rustdm could not take the download and the browser could not start it either${detail}.`;
     case 'rejected':
       return `rustdm refused the download${detail}.`;
     default:

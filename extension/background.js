@@ -7,6 +7,7 @@ import { recordPost, shouldTakeOver } from './lib/takeover.js';
 const ALL_URLS = { origins: ['<all_urls>'] };
 const MENU_ID = 'rustdm-download-link';
 const BADGE_MS = 4000;
+const OK_SHOWN_AT = 'okBadgeShownAt';
 const GREEN = '#1a7f37';
 const RED = '#cf222e';
 
@@ -27,15 +28,36 @@ async function loadSettings() {
   return { enabled, granted };
 }
 
+async function clearOkBadge() {
+  if ((await chrome.action.getBadgeText({})) === 'OK') {
+    await chrome.action.setBadgeText({ text: '' });
+  }
+  await chrome.storage.session.remove(OK_SHOWN_AT).catch(() => {});
+}
+
+// The worker can stop before the 4 s timer fires, so the time is also kept in
+// session storage and checked whenever the worker starts or an event arrives.
+async function clearStaleOkBadge() {
+  const stored = await chrome.storage.session.get(OK_SHOWN_AT).catch(() => ({}));
+  const shownAt = stored?.[OK_SHOWN_AT];
+  if (typeof shownAt === 'number' && Date.now() - shownAt >= BADGE_MS) await clearOkBadge();
+}
+
 async function flashOk() {
   await chrome.storage.local.remove('lastError').catch(() => {});
   await chrome.action.setBadgeBackgroundColor({ color: GREEN });
   await chrome.action.setBadgeText({ text: 'OK' });
-  setTimeout(async () => {
-    if ((await chrome.action.getBadgeText({})) === 'OK') {
-      await chrome.action.setBadgeText({ text: '' });
-    }
-  }, BADGE_MS);
+  await chrome.storage.session.set({ [OK_SHOWN_AT]: Date.now() }).catch(() => {});
+  setTimeout(() => void clearOkBadge(), BADGE_MS);
+}
+
+// rustdm could not take it, so the browser's own download goes ahead.
+async function fallbackToBrowser(url) {
+  try {
+    await chrome.downloads.download({ url });
+  } catch (error) {
+    await showFailure({ kind: 'browser_download_failed', message: String(error?.message ?? error) });
+  }
 }
 
 async function showFailure(error) {
@@ -65,13 +87,13 @@ async function handleDownload(item, suggest) {
   const release = () => {
     if (suggested) return;
     suggested = true;
-    try {
-      suggest();
-    } catch {
-      // The download may already be gone.
-    }
+    suggest();
+    // Read it so the browser does not log "Unchecked runtime.lastError" when
+    // the download is already gone.
+    void chrome.runtime.lastError;
   };
   try {
+    await clearStaleOkBadge();
     const decision = shouldTakeOver(item, await loadSettings(), recentPosts, Date.now());
     if (!decision.take) return;
 
@@ -87,8 +109,15 @@ async function handleDownload(item, suggest) {
       await showFailure(reply.error);
       return;
     }
-    await chrome.downloads.cancel(item.id).catch(() => {});
-    release();
+    try {
+      await chrome.downloads.cancel(item.id);
+    } catch (error) {
+      // The browser still has its copy and keeps it (released below), so say
+      // that rustdm has one too instead of claiming success.
+      await showFailure({ kind: 'cancel_failed', message: String(error?.message ?? error) });
+      return;
+    }
+    release(); // after cancel, so the browser does not start writing the file
     await chrome.downloads.erase({ id: item.id }).catch(() => {});
     await flashOk();
   } catch (error) {
@@ -104,10 +133,11 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 });
 
 async function handleMenuClick(info) {
+  await clearStaleOkBadge();
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
   if (!isWebUrl(url)) {
-    await chrome.downloads.download({ url }); // blob:, data: and the like stay with the browser
+    await fallbackToBrowser(url); // blob:, data: and the like stay with the browser
     return;
   }
   const { granted } = await loadSettings();
@@ -125,11 +155,15 @@ async function handleMenuClick(info) {
     return;
   }
   await showFailure(reply.error);
-  await chrome.downloads.download({ url }); // not caught again: it is started by an extension
+  await fallbackToBrowser(url); // not caught again: it is started by an extension
 }
 
-chrome.contextMenus.onClicked.addListener((info) => {
-  if (info.menuItemId === MENU_ID) void handleMenuClick(info);
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== MENU_ID) return;
+  // The manifest keeps the extension out of private windows ("not_allowed");
+  // this is the second lock, in case that ever changes.
+  if (tab?.incognito) return;
+  void handleMenuClick(info);
 });
 
 // Learn which pages were POSTed, so a form download is left to the browser.
@@ -151,6 +185,7 @@ function watchPosts() {
 }
 
 watchPosts();
+void clearStaleOkBadge(); // the worker may have stopped before the 4 s timer fired
 chrome.permissions.onAdded.addListener(watchPosts);
 
 chrome.runtime.onInstalled.addListener((details) => {

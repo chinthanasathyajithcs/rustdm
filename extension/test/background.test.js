@@ -5,7 +5,15 @@ import test from 'node:test';
 const listeners = {};
 const log = [];
 const store = {};
-const state = { granted: true, reply: { id: 1, ok: true, result: { download_id: 'dl_1' } }, cookies: [] };
+const session = {};
+const state = {
+  granted: true,
+  reply: { id: 1, ok: true, result: { download_id: 'dl_1' } },
+  cookies: [],
+  cancelFails: false,
+  downloadFails: false,
+  badge: '',
+};
 
 const event = (name) => ({
   addListener: (fn) => {
@@ -17,9 +25,15 @@ const event = (name) => ({
 globalThis.chrome = {
   downloads: {
     onDeterminingFilename: event('determining'),
-    cancel: async (id) => log.push(['cancel', id]),
+    cancel: async (id) => {
+      if (state.cancelFails) throw new Error('Invalid download id');
+      log.push(['cancel', id]);
+    },
     erase: async (q) => log.push(['erase', q.id]),
-    download: async (o) => log.push(['download', o.url]),
+    download: async (o) => {
+      log.push(['download', o.url]);
+      if (state.downloadFails) throw new Error('Invalid URL');
+    },
   },
   contextMenus: { onClicked: event('menu'), create: (o) => log.push(['menu', o.id]) },
   runtime: {
@@ -37,12 +51,20 @@ globalThis.chrome = {
       set: async (o) => Object.assign(store, o),
       remove: async (k) => delete store[k],
     },
+    session: {
+      get: async (k) => (k in session ? { [k]: session[k] } : {}),
+      set: async (o) => Object.assign(session, o),
+      remove: async (k) => delete session[k],
+    },
   },
   cookies: { getAll: async () => state.cookies },
   action: {
-    setBadgeText: async (o) => log.push(['badge', o.text]),
+    setBadgeText: async (o) => {
+      state.badge = o.text;
+      log.push(['badge', o.text]);
+    },
     setBadgeBackgroundColor: async () => {},
-    getBadgeText: async () => '',
+    getBadgeText: async () => state.badge,
   },
   webRequest: { onBeforeRequest: event('post') },
 };
@@ -123,4 +145,60 @@ test('the context menu falls back to the browser when rustdm cannot take the lin
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(log.some((e) => e[0] === 'native'));
   assert.deepEqual(log.find((e) => e[0] === 'download'), ['download', 'https://example.com/a.zip']);
+});
+
+test('if the browser cannot stop its own copy, nothing is erased and no OK is shown', async () => {
+  state.reply = { id: 1, ok: true, result: { download_id: 'dl_1' } };
+  state.cancelFails = true;
+  const run = offer();
+  await run.done();
+  state.cancelFails = false;
+  assert.ok(!log.some((e) => e[0] === 'erase'));
+  assert.ok(!log.some((e) => e[0] === 'badge' && e[1] === 'OK'));
+  assert.ok(log.some((e) => e[0] === 'badge' && e[1] === '!'));
+  assert.equal(run.suggested(), 1, 'the browser keeps its download');
+  assert.match(store.lastError.message, /twice/);
+});
+
+test('the context menu does nothing for a private window tab', async () => {
+  log.length = 0;
+  listeners.menu(
+    { menuItemId: 'rustdm-download-link', linkUrl: 'https://example.com/a.zip' },
+    { incognito: true },
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(log, []);
+});
+
+test('a browser fallback that fails is reported instead of lost', async () => {
+  state.reply = { id: 1, ok: false, error: { kind: 'host_missing', message: 'x' } };
+  state.downloadFails = true;
+  log.length = 0;
+  listeners.menu(
+    { menuItemId: 'rustdm-download-link', linkUrl: 'https://example.com/a.zip' },
+    { incognito: false },
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  state.downloadFails = false;
+  assert.ok(log.some((e) => e[0] === 'download'));
+  assert.match(store.lastError.message, /browser could not start/);
+});
+
+test('an OK badge older than 4 s is cleared by the next event, a fresh one is not', async () => {
+  state.badge = 'OK';
+  session.okBadgeShownAt = Date.now() - 1000;
+  await offer({ incognito: true }).done();
+  assert.equal(state.badge, 'OK', 'still fresh');
+
+  session.okBadgeShownAt = Date.now() - 5000;
+  await offer({ incognito: true }).done();
+  assert.equal(state.badge, '');
+  assert.ok(!('okBadgeShownAt' in session));
+});
+
+test('clearing a stale OK never wipes a red badge', async () => {
+  state.badge = '!';
+  session.okBadgeShownAt = Date.now() - 5000;
+  await offer({ incognito: true }).done();
+  assert.equal(state.badge, '!');
 });

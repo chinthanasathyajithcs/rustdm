@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Sends your browser's downloads to rustdm, the resilient download manager.",
   "minimum_chrome_version": "110",
+  "incognito": "not_allowed",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvI+anySKIxCMhxCYpSq+js1wNDNu442Dabj4w3TRQjdf7s2uknv4swQ264fen25M1nvLWXOk2TmbF1c5Xufb+/JGtr7PY96zSMYS7hh8soX5Zqpjbvd270aRxsOhreRmVaR6kENa+c+Yj+eqcpN1Ultu31ZSSM3HIIqCH/A3UlZUAvcgEgmHTh5GMkjJ7RZcbKciPv69av6diP1wMuMsiHwU+0Dmy46Jb/2jDdQ6yRktqXhFvNQ3FnxOWtKhAwZFAGHreKka5FdampxZMIfFv5KR6wfOJrCEMCZ6P19hnIDegpQE6BUvwlrWJohB/flYKBsBM/flq4bpNEPwywHZ2QIDAQAB",
   "permissions": [
     "downloads",
