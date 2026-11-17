@@ -142,6 +142,35 @@ mod windows {
             ) -> i32;
         }
 
+        /// The DACL inside `descriptor` as SDDL text. The caller keeps
+        /// ownership of `descriptor`.
+        fn dacl_text(descriptor: *mut c_void) -> String {
+            let mut text: *mut u16 = std::ptr::null_mut();
+            // SAFETY: `descriptor` is a valid security descriptor; `text` is a
+            // valid out-pointer.
+            let ok = unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(ok, 0, "conversion to SDDL failed");
+            // SAFETY: `text` is a NUL-terminated UTF-16 string in LocalAlloc
+            // memory, freed once.
+            unsafe {
+                let mut len = 0;
+                while *text.add(len) != 0 {
+                    len += 1;
+                }
+                let sddl = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+                LocalFree(text.cast());
+                sddl
+            }
+        }
+
         /// The DACL of `pipe` as SDDL text.
         fn dacl_of(pipe: &NamedPipeServer) -> String {
             let mut descriptor: *mut c_void = std::ptr::null_mut();
@@ -159,30 +188,37 @@ mod windows {
                 )
             };
             assert_eq!(code, 0, "GetSecurityInfo failed");
-            let mut text: *mut u16 = std::ptr::null_mut();
-            // SAFETY: `descriptor` came from GetSecurityInfo above.
+            let sddl = dacl_text(descriptor);
+            // SAFETY: `descriptor` came from GetSecurityInfo (LocalAlloc) and is freed once.
+            unsafe { LocalFree(descriptor) };
+            sddl
+        }
+
+        /// How Windows writes `sid` as an SDDL trustee. Some well-known SIDs are
+        /// abbreviated to an alias (the built-in Administrator, RID 500, is
+        /// `LA`), so the raw SID string cannot be compared to a DACL as read
+        /// back. Round-trip it through a descriptor the same way instead.
+        fn trustee_as_windows_writes_it(sid: &str) -> String {
+            let wide: Vec<u16> = format!("D:(A;;GA;;;{sid})")
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let mut descriptor: *mut c_void = std::ptr::null_mut();
+            // SAFETY: `wide` is NUL-terminated; `descriptor` is a valid out-pointer.
             let ok = unsafe {
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    descriptor,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide.as_ptr(),
                     SDDL_REVISION_1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
+                    &mut descriptor,
                     std::ptr::null_mut(),
                 )
             };
-            assert_ne!(ok, 0, "conversion to SDDL failed");
-            // SAFETY: `text` is a NUL-terminated UTF-16 string; both buffers are
-            // LocalAlloc memory and freed once.
-            unsafe {
-                let mut len = 0;
-                while *text.add(len) != 0 {
-                    len += 1;
-                }
-                let sddl = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
-                LocalFree(text.cast());
-                LocalFree(descriptor);
-                sddl
-            }
+            assert_ne!(ok, 0, "the user's SID did not convert");
+            let sddl = dacl_text(descriptor);
+            // SAFETY: `descriptor` was allocated by the conversion (LocalAlloc), freed once.
+            unsafe { LocalFree(descriptor) };
+            let (_, tail) = sddl.rsplit_once(';').expect("an entry with a trustee");
+            tail.split(')').next().unwrap_or_default().to_string()
         }
 
         #[tokio::test]
@@ -205,12 +241,14 @@ mod windows {
             // A later instance gets the same protection as the first.
             let second = security.create_server(false, &name).unwrap();
 
-            let sid = crate::ipc::owner::current_user_sid_string().unwrap();
+            let user = trustee_as_windows_writes_it(
+                &crate::ipc::owner::current_user_sid_string().unwrap(),
+            );
             for pipe in [&first, &second] {
                 let dacl = dacl_of(pipe);
                 assert!(dacl.starts_with("D:P"), "protected DACL: {dacl}");
                 assert_eq!(dacl.matches("(A;").count(), 2, "two entries: {dacl}");
-                assert!(dacl.contains(&format!(";{sid})")), "user entry: {dacl}");
+                assert!(dacl.contains(&format!(";{user})")), "user entry: {dacl}");
                 assert!(dacl.contains(";SY)"), "system entry: {dacl}");
             }
         }
