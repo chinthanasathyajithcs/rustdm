@@ -50,6 +50,11 @@ pub fn sign_in_page_message() -> String {
     format!("sign-in expired (the site sent a sign-in page); {START_AGAIN_FROM_BROWSER}")
 }
 
+/// What to tell the user when the saved cookies ran out while the daemon was off.
+pub fn sign_in_lapsed_message() -> String {
+    format!("sign-in expired (the saved cookies have run out); {START_AGAIN_FROM_BROWSER}")
+}
+
 /// What to tell the user when a restart could not bring back a download's cookies.
 pub fn saved_sign_in_unreadable_message() -> String {
     format!("saved sign-in could not be read; {START_AGAIN_FROM_BROWSER}")

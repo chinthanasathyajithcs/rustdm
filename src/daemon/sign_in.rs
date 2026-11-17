@@ -5,7 +5,7 @@ use crate::daemon::core::{DaemonCore, DaemonState};
 use crate::daemon::secrets::{SecretError, SecretStore};
 use crate::daemon::task::TaskRecord;
 use crate::engine::Timeouts;
-use crate::error::saved_sign_in_unreadable_message;
+use crate::error::{saved_sign_in_unreadable_message, sign_in_lapsed_message};
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary, RpcError};
 use crate::request_context::{client_for, now_unix, ContextCookie, RequestContext};
 use std::collections::HashSet;
@@ -138,7 +138,12 @@ pub fn restore(secrets: Option<&SecretStore>, task: &mut TaskRecord) -> bool {
                     task.id,
                     e.kind()
                 );
-                return give_up(task);
+                let message = saved_sign_in_unreadable_message();
+                return match e {
+                    // Trouble reading may pass: keep the file and the claim on it.
+                    SecretError::Unreadable(_) => pause(task, message),
+                    _ => give_up(task, message),
+                };
             }
         }
     } else {
@@ -151,20 +156,29 @@ pub fn restore(secrets: Option<&SecretStore>, task: &mut TaskRecord) -> bool {
     };
     // Cookies that ran out while the daemon was off are dropped here.
     let Ok(CheckedContext { context, client }) = check(&sent) else {
-        return give_up(task);
+        return give_up(task, saved_sign_in_unreadable_message());
     };
+    if !sent.cookies.is_empty() && context.cookies.is_empty() {
+        // Starting without the sign-in would only fetch a login page.
+        return give_up(task, sign_in_lapsed_message());
+    }
     let changed = context.cookies.len() != sent.cookies.len();
     task.set_context(&context, client);
     changed
 }
 
-/// Pause `task` because its saved sign-in is gone.
-fn give_up(task: &mut TaskRecord) -> bool {
-    task.drop_cookies();
+/// Pause `task` with `message`, keeping what it knows of its sign-in.
+fn pause(task: &mut TaskRecord, message: String) -> bool {
     task.status = DownloadStatus::Paused;
     task.resume_after_restart = false;
-    task.error_message = Some(saved_sign_in_unreadable_message());
+    task.error_message = Some(message);
     true
+}
+
+/// Pause `task` with `message` because its saved sign-in is gone for good.
+fn give_up(task: &mut TaskRecord, message: String) -> bool {
+    task.drop_cookies();
+    pause(task, message)
 }
 
 /// Delete secret files that no restored download needs.

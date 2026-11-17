@@ -308,6 +308,71 @@ async fn an_unreadable_secret_pauses_the_download_with_a_message_instead_of_star
 }
 
 #[tokio::test]
+async fn cookies_that_ran_out_while_the_daemon_was_off_pause_the_download() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let first = open_core(data.path());
+    let added = first
+        .add_download(add_params(&server, folder.path(), Some(context("abc"))))
+        .unwrap();
+    stop(&first).await;
+    drop(first);
+    let lapsed = ContextCookie {
+        expires: Some(1),
+        ..cookie("abc")
+    };
+    SecretStore::in_dir(data.path())
+        .save(&added.id, &[lapsed])
+        .unwrap();
+    let requests_before = server.requests().len();
+
+    let second = open_core(data.path());
+    second.schedule();
+
+    let summary = second.get_status(&added.id).unwrap();
+    assert_eq!(summary.status, DownloadStatus::Paused);
+    assert_eq!(
+        summary.error_message.as_deref(),
+        Some("sign-in expired (the saved cookies have run out); start the download again from the browser to continue it")
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        server.requests().len(),
+        requests_before,
+        "nothing was started"
+    );
+    assert!(!secret_file(data.path(), &added.id).exists());
+}
+
+#[tokio::test]
+async fn a_secret_that_cannot_be_read_keeps_its_file_and_pauses_the_download() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let first = open_core(data.path());
+    let added = first
+        .add_download(add_params(&server, folder.path(), Some(context("abc"))))
+        .unwrap();
+    stop(&first).await;
+    drop(first);
+    // A folder where the file should be: reading it fails, but not as "missing".
+    let path = secret_file(data.path(), &added.id);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    let second = open_core(data.path());
+
+    let summary = second.get_status(&added.id).unwrap();
+    assert_eq!(summary.status, DownloadStatus::Paused);
+    assert!(summary
+        .error_message
+        .as_deref()
+        .is_some_and(|m| m.starts_with("saved sign-in could not be read")));
+    assert!(path.exists(), "the file is kept in case the trouble passes");
+}
+
+#[tokio::test]
 async fn a_missing_secret_pauses_the_download_the_same_way() {
     let data = tempfile::tempdir().unwrap();
     let folder = tempfile::tempdir().unwrap();
