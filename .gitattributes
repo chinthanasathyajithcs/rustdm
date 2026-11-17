@@ -1,0 +1,5 @@
+# Signed and hashed test data must stay byte-exact: no CRLF conversion on Windows.
+tests/fixtures/** -text
+*.gpg binary
+*.sig binary
+*.der binary
