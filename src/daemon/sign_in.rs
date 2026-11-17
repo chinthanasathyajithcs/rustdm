@@ -74,7 +74,10 @@ pub fn stopped_download_of(
             let task = task_lock.lock().unwrap();
             task.url == ask.url
                 && !task.running
-                && matches!(task.status, DownloadStatus::Paused | DownloadStatus::Failed)
+                && matches!(
+                    task.status,
+                    DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Retrying
+                )
                 && ask.folder.is_none_or(|f| f == task.directory)
                 && ask
                     .file_name

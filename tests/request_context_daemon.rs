@@ -687,6 +687,48 @@ async fn a_download_without_context_never_touches_the_secret_store() {
 }
 
 #[tokio::test]
+async fn adding_the_same_link_again_continues_a_download_that_is_waiting_to_retry() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    // A server that is having trouble: the download waits to retry.
+    let server = TestServer::start(pattern_bytes(1024), Mode::Status(503)).await;
+    let core = open_core(data.path());
+    let added = core
+        .add_download(add_params(&server, folder.path(), Some(context("old"))))
+        .unwrap();
+    wait_for(&core, &added.id, DownloadStatus::Retrying).await;
+
+    let again = core
+        .add_download(add_params(&server, folder.path(), Some(context("new"))))
+        .unwrap();
+
+    assert_eq!(again.id, added.id, "the waiting download carries on");
+    assert_eq!(core.list_downloads().len(), 1);
+    let store = SecretStore::in_dir(data.path());
+    assert_eq!(store.load(&added.id).unwrap()[0].value, "new");
+}
+
+#[tokio::test]
+async fn adding_the_same_link_with_no_cookies_does_not_take_over_a_download_waiting_to_retry() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = TestServer::start(pattern_bytes(1024), Mode::Status(503)).await;
+    let core = open_core(data.path());
+    let added = core
+        .add_download(add_params(&server, folder.path(), Some(context("keep-me"))))
+        .unwrap();
+    wait_for(&core, &added.id, DownloadStatus::Retrying).await;
+
+    let other = core
+        .add_download(add_params(&server, folder.path(), None))
+        .unwrap();
+
+    assert_ne!(other.id, added.id);
+    let store = SecretStore::in_dir(data.path());
+    assert_eq!(store.load(&added.id).unwrap()[0].value, "keep-me");
+}
+
+#[tokio::test]
 async fn cancelling_leaves_no_cookies_behind_even_after_a_restart() {
     let data = tempfile::tempdir().unwrap();
     let folder = tempfile::tempdir().unwrap();
