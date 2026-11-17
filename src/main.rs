@@ -13,6 +13,7 @@ use rustdm::ipc::protocol::{
 };
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::nmhost::install;
+use rustdm::request_context::RequestContext;
 use rustdm::tui::format::{
     format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
 };
@@ -82,6 +83,12 @@ enum Commands {
         /// Speed cap for this download alone, such as 500K or 2M
         #[arg(long, value_parser = parse_speed)]
         max_speed: Option<u64>,
+        /// Page the link came from, sent as the Referer
+        #[arg(long)]
+        referer: Option<String>,
+        /// User-Agent to send instead of rustdm's own
+        #[arg(long)]
+        user_agent: Option<String>,
     },
     /// List the background daemon's downloads in queue order
     List,
@@ -238,13 +245,23 @@ async fn run(cli: Cli) -> CliResult {
             name,
             connections,
             max_speed,
+            referer,
+            user_agent,
         } => {
+            // No --cookie: a value on the command line lands in shell history
+            // and in the process list. Cookies come from the browser link.
+            let context = (referer.is_some() || user_agent.is_some()).then(|| RequestContext {
+                referer,
+                user_agent,
+                ..Default::default()
+            });
             let params = AddDownloadParams {
                 url,
                 destination: dir,
                 filename: name,
                 connections,
                 max_bytes_per_sec: max_speed,
+                context,
             };
             add(&endpoint, params).await
         }

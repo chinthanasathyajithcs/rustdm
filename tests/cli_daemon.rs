@@ -141,6 +141,58 @@ async fn rdm_add_starts_the_daemon_and_completes_the_download() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rdm_add_sends_the_referer_and_user_agent_it_was_given() {
+    let body = pattern_bytes(256 * 1024);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    mock.require_header("referer", "https://files.example.com/page");
+    mock.require_header("user-agent", "CliTest/1.0");
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+    let url = mock.url().to_string();
+    let dest = downloads.path().to_string_lossy().into_owned();
+
+    tokio::task::block_in_place(|| {
+        rdm.ok(&[
+            "add",
+            &url,
+            "--dir",
+            &dest,
+            "--name",
+            "ctx.bin",
+            "--referer",
+            "https://files.example.com/page",
+            "--user-agent",
+            "CliTest/1.0",
+        ]);
+        rdm.wait_for_list("completed");
+    });
+
+    assert_eq!(
+        std::fs::read(downloads.path().join("ctx.bin")).unwrap(),
+        body
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_add_refuses_a_referer_that_is_not_a_web_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+
+    let out = tokio::task::block_in_place(|| {
+        rdm.run(&[
+            "add",
+            "http://127.0.0.1:9/a.bin",
+            "--referer",
+            "ftp://example.com/",
+        ])
+    });
+
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("referer"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rdm_pauses_resumes_and_cancels_background_downloads() {
     let mock = TestServer::start(
         pattern_bytes(8 * 1024 * 1024),

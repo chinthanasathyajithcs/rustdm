@@ -195,6 +195,7 @@ pub fn add_params_json(
         filename: filename.map(str::to_string),
         connections: None,
         max_bytes_per_sec: None,
+        context: None,
     };
     let mut value = serde_json::to_value(params).unwrap_or(Value::Null);
     if let (Some(object), Some(context)) = (value.as_object_mut(), context) {
