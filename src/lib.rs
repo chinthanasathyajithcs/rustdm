@@ -10,6 +10,7 @@ pub mod engine;
 pub mod error;
 pub mod ipc;
 pub mod limiter;
+pub mod nmhost;
 pub mod probe;
 pub mod ranges;
 pub mod request_context;

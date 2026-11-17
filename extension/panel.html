@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rustdm</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; min-width: 320px; max-width: 480px; }
+    h1 { font-size: 16px; margin: 0 0 12px; }
+    section { margin: 0 0 14px; }
+    label { display: flex; gap: 8px; align-items: center; }
+    button { font: inherit; padding: 6px 10px; }
+    .muted { opacity: 0.75; }
+    .error { color: #cf222e; }
+    @media (prefers-color-scheme: dark) { .error { color: #ff7b72; } }
+    [hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <h1>rustdm</h1>
+
+  <section>
+    <label><input type="checkbox" id="enabled"> Catch downloads from this browser</label>
+  </section>
+
+  <section id="permission" hidden>
+    <p>To catch downloads, rustdm needs to see them on all sites. This is asked once.</p>
+    <button type="button" id="grant">Allow on all sites</button>
+  </section>
+
+  <section>
+    <div id="host" class="muted">Checking rustdm...</div>
+  </section>
+
+  <section id="error-box" hidden>
+    <strong>Last problem</strong>
+    <div id="error" class="error"></div>
+  </section>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
