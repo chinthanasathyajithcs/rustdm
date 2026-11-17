@@ -38,11 +38,14 @@ pub fn test_sources(server: &TestServer) -> Sources {
 const FAKE_VERSION_MARKER: &[u8] = b"\0rdm-fake-version=";
 
 /// The version appended to a fake program (see `fake_program`), if it has one.
+/// The version ends at a NUL byte, so a test may pad the program after it.
 pub fn fake_version_in(program: &[u8]) -> Option<String> {
     let at = program
         .windows(FAKE_VERSION_MARKER.len())
         .rposition(|window| window == FAKE_VERSION_MARKER)?;
-    String::from_utf8(program[at + FAKE_VERSION_MARKER.len()..].to_vec()).ok()
+    let rest = &program[at + FAKE_VERSION_MARKER.len()..];
+    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    String::from_utf8(rest[..end].to_vec()).ok()
 }
 
 /// For `rdmd` in a test build: when it was started as a fake program (see
@@ -77,6 +80,7 @@ pub fn fake_program(version: &str) -> Vec<u8> {
         // Makes each version's file different, and is what `--version` prints.
         bytes.extend_from_slice(FAKE_VERSION_MARKER);
         bytes.extend_from_slice(version.as_bytes());
+        bytes.push(0);
         bytes
     } else {
         format!("#!/bin/sh\necho {version}\n").into_bytes()
@@ -171,5 +175,17 @@ mod tests {
             Some("2026.11.14.200000")
         );
         assert_eq!(fake_version_in(b"plain program"), None);
+    }
+
+    #[test]
+    fn padding_after_a_fake_programs_version_is_not_part_of_it() {
+        let mut program = b"MZ....rdmd bytes".to_vec();
+        program.extend_from_slice(FAKE_VERSION_MARKER);
+        program.extend_from_slice(b"2026.11.14.200000\0");
+        program.extend(std::iter::repeat_n(b'#', 1000));
+        assert_eq!(
+            fake_version_in(&program).as_deref(),
+            Some("2026.11.14.200000")
+        );
     }
 }
