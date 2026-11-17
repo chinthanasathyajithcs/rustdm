@@ -10,14 +10,17 @@ pub mod engine;
 pub mod error;
 pub mod ipc;
 pub mod limiter;
+pub mod nmhost;
 pub mod probe;
 pub mod ranges;
+pub mod request_context;
 pub mod retry;
 pub mod scheduler;
 pub mod state;
 pub mod template;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod tools;
 pub mod tui;
 pub mod units;
 pub mod worker;

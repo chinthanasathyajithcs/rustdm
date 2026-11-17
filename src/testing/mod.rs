@@ -1,3 +1,6 @@
+pub mod fake_releases;
+pub mod tools;
+
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -25,6 +28,11 @@ pub enum Mode {
     IgnoreRange,
     Status(u16),
     Redirect,
+    /// Answer every request with a redirect to the same path on this server.
+    RedirectTo(url::Url),
+    /// Redirect once, setting a `sid=redirect-cookie` cookie on the way; the
+    /// redirected request is served like `Normal`, with ranges.
+    SetCookieThenRedirect,
     Chunked,
     FailThenOk {
         status: u16,
@@ -64,7 +72,52 @@ pub enum Mode {
         bytes_per_sec: u64,
         fast_bytes_per_sec: Option<u64>,
     },
+    /// Serve a different answer per request path (see `TestServer::start_routes`);
+    /// an unknown path gets 404.
+    Routes(Routes),
 }
+
+/// One path's answer in `Mode::Routes`. Range requests are honoured when the
+/// status is 200.
+#[derive(Clone, Debug)]
+pub struct Route {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Arc<[u8]>,
+    /// Send the body at about this speed, so a test can stop it part-way.
+    pub bytes_per_sec: Option<u64>,
+}
+
+impl Route {
+    pub fn ok(body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status: 200,
+            headers: Vec::new(),
+            body: Arc::from(body.into()),
+            bytes_per_sec: None,
+        }
+    }
+
+    pub fn status(status: u16) -> Self {
+        Self {
+            status,
+            ..Self::ok(Vec::new())
+        }
+    }
+
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+
+    pub fn throttled(mut self, bytes_per_sec: u64) -> Self {
+        self.bytes_per_sec = Some(bytes_per_sec);
+        self
+    }
+}
+
+/// The routes of a `Mode::Routes` server, shared so a test can change them while it runs.
+pub type Routes = Arc<RwLock<std::collections::HashMap<String, Route>>>;
 
 /// Headers of a 206 answer for `start..=end` of a `total`-byte file.
 fn partial_header(
@@ -78,6 +131,41 @@ fn partial_header(
     format!(
         "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {len}\r\nETag: {etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
     )
+}
+
+/// Answer like `Mode::Normal`: the range asked for if the server may honour it, else the whole body.
+fn serve_normal(
+    body: &[u8],
+    range: Option<String>,
+    if_range: Option<String>,
+    etag: &str,
+    last_modified: &str,
+    content_type: &str,
+) -> Vec<u8> {
+    let total = body.len();
+    let mut serve_range = None;
+    if let Some(r) = range {
+        match if_range {
+            Some(ir) if ir != etag => {}
+            _ => serve_range = parse_range(&r, total),
+        }
+    }
+    if let Some((start, end)) = serve_range {
+        let slice_len = end - start + 1;
+        let mut resp = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\n{content_type}ETag: {etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        resp.extend_from_slice(&body[start..=end]);
+        resp
+    } else {
+        let mut resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n{content_type}ETag: {etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        resp.extend_from_slice(body);
+        resp
+    }
 }
 
 /// Write `body` at about `bytes_per_sec`, waiting before each piece so a finished
@@ -104,13 +192,18 @@ pub struct RequestLog {
     pub if_range: Option<String>,
     pub accept_encoding: Option<String>,
     pub user_agent: Option<String>,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
 }
 
 pub struct TestServer {
     url: url::Url,
+    /// Headers every request must carry; others get 403.
+    required: Arc<RwLock<Vec<(String, String)>>>,
     etag: Arc<RwLock<String>>,
     requests: Arc<Mutex<Vec<RequestLog>>>,
     peak_in_flight: Arc<AtomicUsize>,
+    routes: Option<Routes>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -143,6 +236,23 @@ impl TestServer {
         Self::start_at("127.0.0.1:0", body, mode).await.unwrap()
     }
 
+    /// A server that answers each path in `routes` as described, and 404 for any other.
+    /// Change an answer while it runs with `set_route`.
+    pub async fn start_routes(routes: Vec<(String, Route)>) -> Self {
+        let table: Routes = Arc::new(RwLock::new(routes.into_iter().collect()));
+        let mut server = Self::start(Vec::new(), Mode::Routes(Arc::clone(&table))).await;
+        server.routes = Some(table);
+        server
+    }
+
+    /// Add or replace the answer for `path` (for example `"/api/latest"`).
+    /// Does nothing on a server that was not started with `start_routes`.
+    pub fn set_route(&self, path: &str, route: Route) {
+        if let Some(table) = &self.routes {
+            table.write().unwrap().insert(path.to_string(), route);
+        }
+    }
+
     pub async fn start_at(bind_addr: &str, body: Vec<u8>, mode: Mode) -> std::io::Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
         let local_addr: SocketAddr = listener.local_addr()?;
@@ -150,6 +260,8 @@ impl TestServer {
 
         let etag = Arc::new(RwLock::new("\"v1\"".to_string()));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let required: Arc<RwLock<Vec<(String, String)>>> = Arc::new(RwLock::new(Vec::new()));
+        let server_required = Arc::clone(&required);
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak_in_flight = Arc::new(AtomicUsize::new(0));
         let server_peak = Arc::clone(&peak_in_flight);
@@ -173,6 +285,7 @@ impl TestServer {
 
                         let etag_lock = Arc::clone(&server_etag);
                         let reqs_lock = Arc::clone(&server_requests);
+                        let required_lock = Arc::clone(&server_required);
                         let body_ref = Arc::clone(&server_body);
                         let mode_clone = mode.clone();
                         let counter = Arc::clone(&mode_counter);
@@ -216,16 +329,22 @@ impl TestServer {
                             let mut if_range_hdr = None;
                             let mut accept_encoding_hdr = None;
                             let mut user_agent_hdr = None;
+                            let mut cookie_hdr = None;
+                            let mut referer_hdr = None;
+                            let mut all_headers = Vec::new();
 
                             for line in lines {
                                 if let Some((k, v)) = line.split_once(':') {
                                     let key = k.trim().to_ascii_lowercase();
                                     let val = v.trim().to_string();
+                                    all_headers.push((key.clone(), val.clone()));
                                     match key.as_str() {
                                         "range" => range_hdr = Some(val),
                                         "if-range" => if_range_hdr = Some(val),
                                         "accept-encoding" => accept_encoding_hdr = Some(val),
                                         "user-agent" => user_agent_hdr = Some(val),
+                                        "cookie" => cookie_hdr = Some(val),
+                                        "referer" => referer_hdr = Some(val),
                                         _ => {}
                                     }
                                 }
@@ -238,6 +357,8 @@ impl TestServer {
                                 if_range: if_range_hdr.clone(),
                                 accept_encoding: accept_encoding_hdr,
                                 user_agent: user_agent_hdr,
+                                cookie: cookie_hdr,
+                                referer: referer_hdr,
                             };
 
                             reqs_lock.lock().unwrap().push(log_entry);
@@ -247,10 +368,71 @@ impl TestServer {
                             let _in_flight =
                                 (!is_probe).then(|| InFlight::enter(&in_flight, &peak));
 
+                            let missing_header = required_lock.read().unwrap().iter().any(|(name, want)| {
+                                !all_headers
+                                    .iter()
+                                    .any(|(key, val)| key == name && val.contains(want.as_str()))
+                            });
+                            if missing_header {
+                                let _ = socket
+                                    .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                                    .await;
+                                let _ = socket.shutdown().await;
+                                return;
+                            }
+
                             let current_etag = etag_lock.read().unwrap().clone();
                             let last_modified = "Sun, 06 Nov 1994 08:49:37 GMT";
 
                             let response = match &mode_clone {
+                                Mode::Routes(table) => {
+                                    let route = table
+                                        .read()
+                                        .unwrap()
+                                        .get(path.split('?').next().unwrap_or(""))
+                                        .cloned();
+                                    let Some(route) = route else {
+                                        let _ = socket
+                                            .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                                            .await;
+                                        let _ = socket.shutdown().await;
+                                        return;
+                                    };
+                                    let total = route.body.len();
+                                    let range = if route.status == 200 {
+                                        range_hdr.as_deref().and_then(|r| parse_range(r, total))
+                                    } else {
+                                        None
+                                    };
+                                    let extra: String = route
+                                        .headers
+                                        .iter()
+                                        .map(|(k, v)| format!("{k}: {v}\r\n"))
+                                        .collect();
+                                    let (header, body) = match range {
+                                        Some((start, end)) => (
+                                            partial_header(start, end, total, &current_etag, last_modified)
+                                                .replace("\r\n\r\n", &format!("\r\n{extra}\r\n")),
+                                            &route.body[start..=end],
+                                        ),
+                                        None => (
+                                            format!(
+                                                "HTTP/1.1 {} Status\r\nContent-Length: {total}\r\nETag: {current_etag}\r\nLast-Modified: {last_modified}\r\n{extra}Connection: close\r\n\r\n",
+                                                route.status
+                                            ),
+                                            &route.body[..],
+                                        ),
+                                    };
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    match route.bytes_per_sec {
+                                        Some(bps) => write_throttled(&mut socket, body, bps).await,
+                                        None => {
+                                            let _ = socket.write_all(body).await;
+                                        }
+                                    }
+                                    let _ = socket.shutdown().await;
+                                    return;
+                                }
                                 Mode::Redirect => {
                                     if !path.starts_with("/moved/") {
                                         let redirect_target = format!("/moved{}", if path.starts_with('/') { &path } else { "/" });
@@ -266,6 +448,23 @@ impl TestServer {
                                         .into_bytes();
                                         resp.extend_from_slice(&body_ref);
                                         resp
+                                    }
+                                }
+                                Mode::RedirectTo(target) => {
+                                    let location = target.join(&path).map(|u| u.to_string()).unwrap_or_default();
+                                    format!(
+                                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                                    )
+                                    .into_bytes()
+                                }
+                                Mode::SetCookieThenRedirect => {
+                                    if path.starts_with("/moved/") {
+                                        serve_normal(&body_ref, range_hdr, if_range_hdr, &current_etag, last_modified, "")
+                                    } else {
+                                        format!(
+                                            "HTTP/1.1 302 Found\r\nSet-Cookie: sid=redirect-cookie; Path=/\r\nLocation: /moved{path}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                                        )
+                                        .into_bytes()
                                     }
                                 }
                                 Mode::Status(status) => {
@@ -545,35 +744,7 @@ impl TestServer {
                                         Mode::ContentType(value) => format!("Content-Type: {value}\r\n"),
                                         _ => String::new(),
                                     };
-                                    let total = body_ref.len();
-                                    let mut serve_range = None;
-
-                                    if let Some(r) = range_hdr {
-                                        if let Some(ir) = if_range_hdr {
-                                            if ir == current_etag {
-                                                serve_range = parse_range(&r, total);
-                                            }
-                                        } else {
-                                            serve_range = parse_range(&r, total);
-                                        }
-                                    }
-
-                                    if let Some((start, end)) = serve_range {
-                                        let slice_len = end - start + 1;
-                                        let mut resp = format!(
-                                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\n{content_type}ETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
-                                        )
-                                        .into_bytes();
-                                        resp.extend_from_slice(&body_ref[start..=end]);
-                                        resp
-                                    } else {
-                                        let mut resp = format!(
-                                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n{content_type}ETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
-                                        )
-                                        .into_bytes();
-                                        resp.extend_from_slice(&body_ref);
-                                        resp
-                                    }
+                                    serve_normal(&body_ref, range_hdr, if_range_hdr, &current_etag, last_modified, &content_type)
                                 }
                             };
 
@@ -587,15 +758,26 @@ impl TestServer {
 
         Ok(TestServer {
             url,
+            required,
             etag,
             requests,
             peak_in_flight,
+            routes: None,
             shutdown_tx: Some(shutdown_tx),
         })
     }
 
     pub fn url(&self) -> url::Url {
         self.url.clone()
+    }
+
+    /// From now on, answer 403 to any request whose `name` header (any case)
+    /// does not contain `value`. The request is still logged.
+    pub fn require_header(&self, name: &str, value: &str) {
+        self.required
+            .write()
+            .unwrap()
+            .push((name.to_ascii_lowercase(), value.to_string()));
     }
 
     pub fn set_etag(&self, etag: &str) {

@@ -47,6 +47,21 @@ pub fn daemon_exe_path() -> io::Result<PathBuf> {
     Ok(dir.join(format!("rdmd{}", std::env::consts::EXE_SUFFIX)))
 }
 
+/// Win32 error for a job that does not allow its processes to break away.
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// Run `spawn(true)`, asking to leave the caller's job object, and when the job
+/// forbids that (access denied) run `spawn(false)` instead. A browser or
+/// terminal often runs its children in a job that kills them on exit; leaving
+/// it keeps the daemon alive.
+#[cfg_attr(unix, allow(dead_code))]
+fn with_breakaway_fallback<T>(mut spawn: impl FnMut(bool) -> io::Result<T>) -> io::Result<T> {
+    match spawn(true) {
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => spawn(false),
+        other => other,
+    }
+}
+
 /// Start `rdmd` detached from this terminal so it outlives the calling command.
 pub fn spawn_detached(exe: &Path, endpoint: &IpcEndpoint) -> io::Result<()> {
     let mut cmd = Command::new(exe);
@@ -69,11 +84,67 @@ pub fn spawn_detached(exe: &Path, endpoint: &IpcEndpoint) -> io::Result<()> {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         stop_stdio_inheritance();
+        with_breakaway_fallback(|breakaway| {
+            let mut flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+            if breakaway {
+                flags |= CREATE_BREAKAWAY_FROM_JOB;
+            }
+            cmd.creation_flags(flags);
+            cmd.spawn()
+        })
+        .map(|_| ())
+        .map_err(|e| cannot_run(exe, e))
+    }
+    #[cfg(unix)]
+    {
+        cmd.spawn().map(|_| ()).map_err(|e| cannot_run(exe, e))
+    }
+}
+
+fn cannot_run(exe: &Path, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("cannot run {}: {}", exe.display(), e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn breakaway_is_tried_first_and_kept_when_it_works() {
+        let mut tries = Vec::new();
+        let result = with_breakaway_fallback(|breakaway| {
+            tries.push(breakaway);
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(tries, [true]);
     }
 
-    cmd.spawn()
-        .map(|_| ())
-        .map_err(|e| io::Error::new(e.kind(), format!("cannot run {}: {}", exe.display(), e)))
+    #[test]
+    fn access_denied_retries_without_breakaway() {
+        let mut tries = Vec::new();
+        let result = with_breakaway_fallback(|breakaway| {
+            tries.push(breakaway);
+            if breakaway {
+                Err(io::Error::from_raw_os_error(ERROR_ACCESS_DENIED))
+            } else {
+                Ok("started")
+            }
+        });
+        assert_eq!(result.unwrap(), "started");
+        assert_eq!(tries, [true, false]);
+    }
+
+    #[test]
+    fn other_errors_are_not_retried() {
+        let mut tries = 0;
+        let result: io::Result<()> = with_breakaway_fallback(|_| {
+            tries += 1;
+            Err(io::Error::from_raw_os_error(2))
+        });
+        assert!(result.is_err());
+        assert_eq!(tries, 1);
+    }
 }

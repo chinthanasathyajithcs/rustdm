@@ -39,6 +39,9 @@ pub const CODE_TOO_MANY_REDIRECTS: i32 = -32045;
 pub const CODE_DAEMON_ALREADY_RUNNING: i32 = -32060;
 pub const CODE_DAEMON_SHUTTING_DOWN: i32 = -32061;
 
+// --- Tools Manager Error Codes (-32080..-32099) ---
+pub const CODE_TOOL_FAILED: i32 = -32080;
+
 /// JSON-RPC Message identifier (either integer or string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -342,6 +345,11 @@ impl RpcError {
         )
     }
 
+    /// A tools-manager request failed; `message` is already fit to show the user.
+    pub fn tool_failed(message: impl Into<String>) -> Self {
+        Self::new(CODE_TOOL_FAILED, message, None)
+    }
+
     pub fn daemon_shutting_down() -> Self {
         Self::new(
             CODE_DAEMON_SHUTTING_DOWN,
@@ -422,6 +430,9 @@ pub struct AddDownloadParams {
     /// Speed cap for this download alone in bytes per second; 0 or missing means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes_per_sec: Option<u64>,
+    /// Cookies, Referer and User-Agent to send with every request, from a browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::request_context::RequestContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -592,6 +603,56 @@ pub struct DownloadStateChanged {
     pub reason: Option<String>,
 }
 
+/// The helper programs the daemon can fetch for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolName {
+    YtDlp,
+    Ffmpeg,
+    Deno,
+}
+
+/// What the tools manager is doing with a tool right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolPhase {
+    Idle,
+    Checking,
+    Downloading,
+    Verifying,
+    Installing,
+}
+
+/// One tool's state, as `tools.status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInfo {
+    pub tool: ToolName,
+    pub installed: Option<String>,
+    pub previous: Option<String>,
+    pub last_checked_unix: Option<u64>,
+    pub phase: ToolPhase,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    /// Why the last attempt failed, in words fit to show the user.
+    pub error: Option<String>,
+    /// What went wrong underneath `error`, for the command line to show after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// `tools.update`: check one tool (installing it if missing), or every installed tool.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ToolUpdateParams {
+    #[serde(default)]
+    pub tool: Option<ToolName>,
+}
+
+/// `tools.rollback`: go back to the previous version of a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRollbackParams {
+    pub tool: ToolName,
+}
+
 /// Numeric part of a download id such as `dl_12`, for ordering. Other ids sort last.
 pub fn download_id_number(id: &str) -> u64 {
     id.strip_prefix("dl_")
@@ -690,6 +751,7 @@ mod tests {
             filename: Some("file.bin".to_string()),
             connections: Some(8),
             max_bytes_per_sec: None,
+            context: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),
@@ -943,5 +1005,37 @@ mod tests {
         assert_eq!(ping.log_path, None);
         let encoded = serde_json::to_string(&ping).unwrap();
         assert!(!encoded.contains("log_path"), "{encoded}");
+    }
+
+    #[test]
+    fn tool_requests_and_replies_use_the_documented_names() {
+        assert_eq!(
+            serde_json::to_string(&ToolName::YtDlp).unwrap(),
+            "\"yt-dlp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ToolPhase::Downloading).unwrap(),
+            "\"downloading\""
+        );
+        let update: ToolUpdateParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(update.tool, None);
+        let update: ToolUpdateParams = serde_json::from_str(r#"{"tool":"deno"}"#).unwrap();
+        assert_eq!(update.tool, Some(ToolName::Deno));
+        assert!(serde_json::from_str::<ToolRollbackParams>("{}").is_err());
+
+        let info = ToolInfo {
+            tool: ToolName::Ffmpeg,
+            installed: Some("8.1.3".into()),
+            previous: None,
+            last_checked_unix: Some(1_794_839_520),
+            phase: ToolPhase::Idle,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            error: None,
+            detail: Some("dns error".into()),
+        };
+        let back: ToolInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
+        assert_eq!(back, info);
+        assert_eq!(RpcError::tool_failed("x").code, CODE_TOOL_FAILED);
     }
 }

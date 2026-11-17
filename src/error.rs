@@ -14,6 +14,11 @@ pub enum Error {
     Protocol(String),
     #[error("state error: {0}")]
     State(String),
+    /// A helper tool (yt-dlp, ffmpeg, deno) could not be fetched or installed.
+    /// `message` is shown to the user as it is; `transient` marks trouble that
+    /// may go away by itself.
+    #[error("{message}")]
+    Tool { message: String, transient: bool },
     #[error("insufficient disk space on {target}: required {required} bytes, available {available} bytes")]
     InsufficientDiskSpace {
         target: String,
@@ -40,11 +45,46 @@ pub fn link_status_message(status: u16) -> String {
     }
 }
 
+/// What to tell the user when the site refused a download's browser cookies.
+pub fn sign_in_expired_message(status: u16) -> String {
+    format!("sign-in expired (HTTP {status}); {START_AGAIN_FROM_BROWSER}")
+}
+
+/// What to tell the user when a download with cookies was answered with a web
+/// page. It may be a sign-in page, or the link may just lead to a page: browser
+/// cookies ride along on almost every caught download, so neither is assumed.
+pub fn web_page_with_cookies_message() -> String {
+    "the link opened a web page, not a file; \
+     if the site wants you to sign in, sign in and start the download again from the browser"
+        .to_string()
+}
+
+/// What to tell the user when the saved cookies ran out while the daemon was off.
+pub fn sign_in_lapsed_message() -> String {
+    format!("sign-in expired (the saved cookies have run out); {START_AGAIN_FROM_BROWSER}")
+}
+
+/// What to tell the user when a restart could not bring back a download's cookies.
+pub fn saved_sign_in_unreadable_message() -> String {
+    format!("saved sign-in could not be read; {START_AGAIN_FROM_BROWSER}")
+}
+
+const START_AGAIN_FROM_BROWSER: &str = "start the download again from the browser to continue it";
+
+/// Statuses that mean the site did not accept the sign-in a download brought.
+pub fn is_sign_in_status(status: u16) -> bool {
+    matches!(status, 401 | 403)
+}
+
 impl Error {
     /// Network or server trouble that may go away by itself, so the download is
     /// worth trying again later. Disk, permission, and changed-file problems are not.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Error::Http(_) | Error::Protocol(_))
+        match self {
+            Error::Http(_) | Error::Protocol(_) => true,
+            Error::Tool { transient, .. } => *transient,
+            _ => false,
+        }
     }
 }
 

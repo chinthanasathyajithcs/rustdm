@@ -102,6 +102,12 @@ impl DaemonCore {
                 id,
                 parse_params::<DownloadIdParam>(params).and_then(|p| self.get_status(&p.id)),
             ),
+            "tools.status" => respond(id, self.tools_status()),
+            "tools.update" => respond(id, self.tools_update(params)),
+            "tools.rollback" => respond(
+                id,
+                parse_params(params).and_then(|p| self.tools_rollback(p)),
+            ),
             "subscribe.telemetry" => respond(id, Ok(serde_json::json!({ "subscribed": true }))),
             other => RpcResponse::error(id, RpcError::method_not_found(other)),
         }

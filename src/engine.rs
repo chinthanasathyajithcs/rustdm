@@ -169,12 +169,18 @@ pub fn build_client() -> reqwest::Client {
 }
 
 pub fn build_client_with(timeouts: Timeouts) -> reqwest::Client {
+    client_builder(timeouts)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The settings every download client shares: the default User-Agent and the
+/// timeouts. A client with a request context starts from the same builder.
+pub fn client_builder(timeouts: Timeouts) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(format!("rustdm/{}", crate::VERSION))
         .connect_timeout(timeouts.connect)
         .read_timeout(timeouts.read)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 /// An I/O error that names the file or folder it is about.
@@ -386,6 +392,10 @@ pub async fn resume_with_options(
     let progress = custom_progress.unwrap_or_else(|| Arc::new(Progress::new()));
     let probe_result =
         probe::probe_for(client, &target_url, cancel.as_ref(), Some(&progress)).await?;
+    // A link that now opens a sign-in screen would be saved over the real file.
+    if probe_result.is_unwanted_web_page() {
+        return Err(Error::WebPage);
+    }
 
     // Without range support or a known size, the only way on is from byte 0.
     if !probe_result.ranges_supported || state.total == 0 {

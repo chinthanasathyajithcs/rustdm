@@ -277,6 +277,7 @@ impl AddDialog {
                 filename: filename.clone(),
                 connections: connections.map(|n| n as usize),
                 max_bytes_per_sec,
+                context: None,
             })
             .collect())
     }
@@ -461,6 +462,7 @@ mod tests {
                 filename: None,
                 connections: Some(4),
                 max_bytes_per_sec: Some(512 * 1024),
+                context: None,
             }]
         );
         assert!(dialog.is_pending());

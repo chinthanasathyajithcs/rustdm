@@ -13,6 +13,7 @@ fn test_integration_full_rpc_cycle() {
         filename: Some("100MB.bin".to_string()),
         connections: Some(16),
         max_bytes_per_sec: None,
+        context: None,
     };
     let client_req = RpcRequest::new(
         RpcId::Number(1001),
@@ -98,4 +99,51 @@ fn test_integration_error_handling_cycle() {
         client_err.data.unwrap()["id"],
         serde_json::Value::String("dl_non_existent".to_string())
     );
+}
+
+#[test]
+fn an_add_without_context_sends_no_context_field_and_parses_without_one() {
+    let params = AddDownloadParams {
+        url: "https://example.com/f.bin".to_string(),
+        destination: None,
+        filename: None,
+        connections: None,
+        max_bytes_per_sec: None,
+        context: None,
+    };
+    let json = serde_json::to_value(&params).unwrap();
+    assert!(json.get("context").is_none());
+
+    let older: AddDownloadParams =
+        serde_json::from_str(r#"{"url":"https://example.com/f.bin"}"#).unwrap();
+    assert_eq!(older.context, None);
+}
+
+#[test]
+fn an_add_carries_the_browser_context_from_the_documented_json() {
+    let json = r#"{
+        "url": "https://example.com/f.bin",
+        "context": {
+            "cookies": [{"name": "SID", "value": "x", "domain": ".example.com", "path": "/",
+                         "secure": true, "host_only": false, "expires": 1767225600.5}],
+            "referer": "https://example.com/files",
+            "user_agent": "Mozilla/5.0"
+        }
+    }"#;
+    let params: AddDownloadParams = serde_json::from_str(json).unwrap();
+    let context = params.context.expect("context");
+    assert_eq!(context.cookies.len(), 1);
+    assert_eq!(context.cookies[0].expires, Some(1_767_225_600));
+    assert_eq!(
+        context.referer.as_deref(),
+        Some("https://example.com/files")
+    );
+    assert_eq!(context.user_agent.as_deref(), Some("Mozilla/5.0"));
+
+    let wire = serde_json::to_string(&context).unwrap();
+    assert!(
+        wire.contains("\"value\":\"x\""),
+        "the wire format keeps the value"
+    );
+    assert!(!format!("{context:?}").contains("\"x\""));
 }
