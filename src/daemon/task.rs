@@ -78,6 +78,10 @@ pub struct TaskRecord {
     /// A client holding the cookies, Referer and User-Agent; none means the
     /// daemon's shared client.
     pub client: Option<reqwest::Client>,
+    /// The cookies were just dropped and the client, which still holds them, has
+    /// been let go; one with only the Referer and User-Agent is yet to be built.
+    /// The build is slow, so the caller does it outside the lock.
+    pub client_pending: bool,
 }
 
 impl TaskRecord {
@@ -127,6 +131,7 @@ impl TaskRecord {
             referer: None,
             user_agent: None,
             client: None,
+            client_pending: false,
         }
     }
 
@@ -184,6 +189,7 @@ impl TaskRecord {
         self.referer = ctx.referer.clone();
         self.user_agent = ctx.user_agent.clone();
         self.client = client;
+        self.client_pending = false;
     }
 
     /// Put a stopped download back in the queue as if the user had resumed it.
@@ -196,21 +202,33 @@ impl TaskRecord {
     }
 
     /// Forget the cookies, keeping the Referer and User-Agent. Returns whether
-    /// there were any, so the caller knows to delete the secret.
+    /// there were any, so the caller knows to delete the secret. The client that
+    /// held the cookies goes too; the caller builds its replacement outside the
+    /// lock (see `pending_client_context`).
     pub fn drop_cookies(&mut self) -> bool {
         let had = self.has_cookies;
         self.has_cookies = false;
-        let ctx = RequestContext {
+        self.client = None;
+        self.client_pending = self.referer.is_some() || self.user_agent.is_some();
+        had
+    }
+
+    /// What a replacement client must carry, when one is waited for.
+    pub fn pending_client_context(&self) -> Option<RequestContext> {
+        self.client_pending.then(|| RequestContext {
             cookies: Vec::new(),
             referer: self.referer.clone(),
             user_agent: self.user_agent.clone(),
-        };
-        self.client = if ctx.is_empty() {
-            None
-        } else {
-            crate::request_context::client_for(&ctx, crate::engine::Timeouts::default()).ok()
-        };
-        had
+        })
+    }
+
+    /// Take the replacement client, unless the download has taken a new
+    /// context since (then the pending one is moot).
+    pub fn finish_pending_client(&mut self, client: Option<reqwest::Client>) {
+        if self.client_pending && !self.has_cookies && self.client.is_none() {
+            self.client = client;
+        }
+        self.client_pending = false;
     }
 
     /// This download's own speed cap; 0 means none.
@@ -322,6 +340,7 @@ impl TaskRecord {
                 self.retry_at = None;
                 self.has_cookies = false;
                 self.client = None;
+                self.client_pending = false;
             }
             Ok(Outcome::Paused { reason, state: _ }) => {
                 let link_expired = matches!(reason, PauseReason::LinkExpired { .. });
@@ -706,7 +725,40 @@ mod tests {
             Some("sign-in expired (HTTP 403); start the download again from the browser to continue it")
         );
         assert_eq!(rec.referer.as_deref(), Some("https://example.com/page"));
-        assert!(rec.client.is_some(), "Referer and User-Agent stay in force");
+        assert!(
+            rec.client.is_none(),
+            "the client that held the cookies is gone"
+        );
+        let ctx = rec
+            .pending_client_context()
+            .expect("a client is waited for");
+        assert!(ctx.cookies.is_empty());
+        assert_eq!(ctx.referer.as_deref(), Some("https://example.com/page"));
+        assert_eq!(ctx.user_agent.as_deref(), Some("TestBrowser/1"));
+    }
+
+    #[test]
+    fn a_replacement_client_is_taken_once_and_only_while_it_is_waited_for() {
+        let mut rec = with_cookies(DownloadStatus::Paused);
+        rec.drop_cookies();
+        rec.finish_pending_client(Some(reqwest::Client::new()));
+        assert!(rec.client.is_some());
+        assert!(rec.pending_client_context().is_none());
+
+        // A new context arrived meanwhile: the late client is not wanted.
+        let mut rec = with_cookies(DownloadStatus::Paused);
+        rec.drop_cookies();
+        rec.set_context(&RequestContext::default(), None);
+        rec.finish_pending_client(Some(reqwest::Client::new()));
+        assert!(rec.client.is_none());
+    }
+
+    #[test]
+    fn dropping_cookies_from_a_download_with_no_referer_or_agent_waits_for_nothing() {
+        let mut rec = record(DownloadStatus::Paused);
+        rec.has_cookies = true;
+        assert!(rec.drop_cookies());
+        assert!(rec.pending_client_context().is_none());
     }
 
     #[test]

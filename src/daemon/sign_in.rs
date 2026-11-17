@@ -6,48 +6,51 @@ use crate::daemon::secrets::{SecretError, SecretStore};
 use crate::daemon::task::TaskRecord;
 use crate::engine::Timeouts;
 use crate::error::{saved_sign_in_unreadable_message, sign_in_lapsed_message};
-use crate::ipc::protocol::{DownloadStatus, DownloadSummary, RpcError};
+use crate::ipc::protocol::{DownloadStatus, RpcError};
 use crate::request_context::{client_for, now_unix, ContextCookie, RequestContext};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 impl DaemonCore {
-    /// Keep `cookies` as download `id`'s saved sign-in, or remove the saved one
-    /// when there are none. A failure is logged; the cookies then live in memory only.
-    pub(super) fn keep_secret(&self, id: &str, cookies: &[ContextCookie]) {
+    /// Keep `cookies` as `task`'s saved sign-in, or remove the saved one when the
+    /// task holds none. Call with the task's lock held: the file then always
+    /// matches the record, and a delete that raced this save cannot be undone by it.
+    /// A failure is logged; the cookies then live in memory only.
+    pub(super) fn keep_secret(&self, task: &TaskRecord, cookies: &[ContextCookie]) {
         let Some(secrets) = &self.secrets else {
             return;
         };
-        if cookies.is_empty() {
-            secrets.delete(id);
-        } else if let Err(e) = secrets.save(id, cookies) {
+        if !task.has_cookies || cookies.is_empty() {
+            secrets.delete(&task.id);
+        } else if let Err(e) = secrets.save(&task.id, cookies) {
             tracing::warn!(
-                "could not save the sign-in for {id} ({}); a restart will need it again",
+                "could not save the sign-in for {} ({}); a restart will need it again",
+                task.id,
                 e.kind()
             );
         }
     }
 
+    /// Remove download `id`'s saved sign-in. Call with the task's lock held.
     pub(super) fn delete_secret(&self, id: &str) {
         if let Some(secrets) = &self.secrets {
             secrets.delete(id);
         }
     }
 
-    /// Save the new sign-in of a stopped download that the browser started again,
-    /// and queue it. The record already holds the context.
-    pub(super) fn continue_with_context(
-        &self,
-        task: &Arc<Mutex<TaskRecord>>,
-        context: &RequestContext,
-    ) -> DownloadSummary {
-        let id = task.lock().unwrap().id.clone();
-        self.keep_secret(&id, &context.cookies);
-        log_context(&id, context, "continued with");
-        self.persist();
+    /// Build the client that replaces one whose cookies were just dropped,
+    /// without holding the task's lock while it is built. A download waits for
+    /// it before it starts, so the Referer and User-Agent are never lost.
+    pub(super) fn refresh_client(&self, task: &Arc<Mutex<TaskRecord>>) {
+        let Some(context) = task.lock().unwrap().pending_client_context() else {
+            return;
+        };
+        let client = client_of(&context).unwrap_or_else(|e| {
+            tracing::warn!("could not rebuild a download's client: {e}");
+            None
+        });
+        task.lock().unwrap().finish_pending_client(client);
         self.schedule();
-        let summary = task.lock().unwrap().to_summary();
-        summary
     }
 }
 
@@ -58,9 +61,9 @@ pub struct AddRequest<'a> {
     pub file_name: Option<&'a str>,
 }
 
-/// The paused or failed download that an add of the same link with a fresh
-/// sign-in should carry on: nothing is running for it, and the add names no
-/// other folder or file name than the download already has.
+/// The paused, failed or waiting-to-retry download that an add of the same link
+/// with a fresh sign-in should carry on: nothing is running for it, and the add
+/// names no other folder or file name than the download already has.
 pub fn stopped_download_of(
     state: &DaemonState,
     ask: &AddRequest<'_>,
@@ -99,9 +102,17 @@ pub struct CheckedContext {
 /// Validate what a client sent and build the client for it. The error names
 /// the field that is wrong, never its value.
 pub fn check(sent: &RequestContext) -> Result<CheckedContext, RpcError> {
-    let context = sent
-        .validated(now_unix())
-        .map_err(RpcError::invalid_params)?;
+    with_client(validate(sent)?)
+}
+
+/// The cheap half of `check`: validation alone, so a request that is going to
+/// be refused anyway does not pay for building a client.
+pub fn validate(sent: &RequestContext) -> Result<RequestContext, RpcError> {
+    sent.validated(now_unix()).map_err(RpcError::invalid_params)
+}
+
+/// The slow half of `check`: build the client for a validated context.
+pub fn with_client(context: RequestContext) -> Result<CheckedContext, RpcError> {
     let client = client_of(&context)
         .map_err(|e| RpcError::internal_error(format!("could not use the request context: {e}")))?;
     Ok(CheckedContext { context, client })
@@ -118,12 +129,16 @@ fn client_of(context: &RequestContext) -> Result<Option<reqwest::Client>, crate:
 /// A download whose cookies cannot be had is paused with a message instead of
 /// starting without them. Returns true when the record was changed.
 pub fn restore(secrets: Option<&SecretStore>, task: &mut TaskRecord) -> bool {
-    if matches!(
-        task.status,
-        DownloadStatus::Completed | DownloadStatus::Cancelled
-    ) {
-        // Nothing runs for these, so nothing needs the cookies.
-        return std::mem::take(&mut task.has_cookies);
+    match task.status {
+        // Nothing runs for a finished download, so nothing needs its cookies.
+        DownloadStatus::Completed => return std::mem::take(&mut task.has_cookies),
+        // A cancelled one may be resumed: without cookies, but with its Referer and User-Agent.
+        DownloadStatus::Cancelled => {
+            let had = task.drop_cookies();
+            settle_client(task);
+            return had;
+        }
+        _ => {}
     }
     let cookies = if task.has_cookies {
         let loaded = match secrets {
@@ -178,7 +193,17 @@ fn pause(task: &mut TaskRecord, message: String) -> bool {
 /// Pause `task` with `message` because its saved sign-in is gone for good.
 fn give_up(task: &mut TaskRecord, message: String) -> bool {
     task.drop_cookies();
+    settle_client(task);
     pause(task, message)
+}
+
+/// Build the client a download waits for after losing its cookies. Only for
+/// records no one else can reach yet.
+fn settle_client(task: &mut TaskRecord) {
+    let Some(context) = task.pending_client_context() else {
+        return;
+    };
+    task.finish_pending_client(client_of(&context).ok().flatten());
 }
 
 /// Delete secret files that no restored download needs.

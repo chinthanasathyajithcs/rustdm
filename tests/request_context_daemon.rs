@@ -685,3 +685,225 @@ async fn a_download_without_context_never_touches_the_secret_store() {
     })
     .unwrap();
 }
+
+#[tokio::test]
+async fn cancelling_leaves_no_cookies_behind_even_after_a_restart() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let first = open_core(data.path());
+    let added = first
+        .add_download(add_params(&server, folder.path(), Some(context("abc"))))
+        .unwrap();
+
+    first
+        .cancel_download(CancelDownloadParams {
+            id: added.id.clone(),
+            delete_partial: false,
+        })
+        .unwrap();
+    assert!(first.wait_until_settled(Duration::from_secs(15)).await);
+
+    assert!(!secret_file(data.path(), &added.id).exists());
+    let queue = std::fs::read_to_string(data.path().join("queue.json")).unwrap();
+    assert!(queue.contains("\"has_cookies\": false"));
+    drop(first);
+    let second = open_core(data.path());
+    assert_eq!(
+        second.get_status(&added.id).unwrap().status,
+        DownloadStatus::Cancelled
+    );
+    assert!(!secret_file(data.path(), &added.id).exists());
+}
+
+#[tokio::test]
+async fn a_cancel_racing_a_continue_never_leaves_a_secret_for_a_cancelled_download() {
+    let server = slow_server().await;
+    for round in 0..10 {
+        let data = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+        let core = std::sync::Arc::new(core);
+        let params = add_params(&server, folder.path(), Some(context("fresh")));
+
+        let adder = {
+            let core = std::sync::Arc::clone(&core);
+            tokio::task::spawn_blocking(move || core.add_download(params))
+        };
+        let canceller = {
+            let core = std::sync::Arc::clone(&core);
+            let id = paused.id.clone();
+            tokio::task::spawn_blocking(move || {
+                core.cancel_download(CancelDownloadParams {
+                    id,
+                    delete_partial: false,
+                })
+            })
+        };
+        let added = adder.await.unwrap().unwrap();
+        canceller.await.unwrap().unwrap();
+
+        // Whichever came first, the secret on disk matches the download's state.
+        let status = core.get_status(&paused.id).unwrap().status;
+        let has_file = secret_file(data.path(), &paused.id).exists();
+        assert_eq!(
+            has_file,
+            status != DownloadStatus::Cancelled,
+            "round {round}"
+        );
+        if added.id != paused.id {
+            // The cancel came first; the add made a download of its own, with its own secret.
+            assert!(
+                secret_file(data.path(), &added.id).exists(),
+                "round {round}"
+            );
+        }
+        stop(&core).await;
+    }
+}
+
+/// Wait until the server's address can be used again after `old` was dropped.
+async fn restart_server_at(old: TestServer, body: Vec<u8>, mode: Mode) -> TestServer {
+    let address = format!(
+        "127.0.0.1:{}",
+        old.url().port().expect("the test server has a port")
+    );
+    drop(old);
+    for _ in 0..100 {
+        if let Ok(server) = TestServer::start_at(&address, body.clone(), mode.clone()).await {
+            return server;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("could not bring the server back at {address}");
+}
+
+#[tokio::test]
+async fn a_sign_in_page_on_resume_fails_the_download_and_deletes_the_secret() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+    // The site now answers the link with a sign-in page.
+    let _page = restart_server_at(
+        server,
+        pattern_bytes(BODY_BYTES),
+        Mode::ContentType("text/html".to_string()),
+    )
+    .await;
+
+    core.resume_download(&paused.id).unwrap();
+    let failed = wait_for(&core, &paused.id, DownloadStatus::Failed).await;
+
+    assert_eq!(
+        failed.error_message.as_deref(),
+        Some("sign-in expired (the site sent a sign-in page); start the download again from the browser to continue it")
+    );
+    assert!(!secret_file(data.path(), &paused.id).exists());
+}
+
+#[tokio::test]
+async fn after_the_cookies_are_dropped_a_resume_still_sends_the_referer_and_user_agent() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = TestServer::start(pattern_bytes(BODY_BYTES), Mode::ExpireAfter(2)).await;
+    let core = open_core(data.path());
+    let added = core
+        .add_download(add_params(&server, folder.path(), Some(context("abc"))))
+        .unwrap();
+    wait_for(&core, &added.id, DownloadStatus::Paused).await;
+    assert!(!secret_file(data.path(), &added.id).exists());
+    let before = server.requests().len();
+
+    core.resume_download(&added.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server.requests().len() == before {
+        assert!(Instant::now() < deadline, "the resume sent nothing");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let later = &server.requests()[before..];
+    assert!(later.iter().all(|r| r.cookie.is_none()), "{later:?}");
+    assert!(later
+        .iter()
+        .all(|r| r.referer.as_deref() == Some(REFERER)
+            && r.user_agent.as_deref() == Some(USER_AGENT)));
+}
+
+#[tokio::test]
+async fn after_a_restart_a_cancelled_download_that_is_resumed_keeps_its_referer_and_user_agent() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let first = open_core(data.path());
+    let added = first
+        .add_download(add_params(&server, folder.path(), Some(context("abc"))))
+        .unwrap();
+    first
+        .cancel_download(CancelDownloadParams {
+            id: added.id.clone(),
+            delete_partial: false,
+        })
+        .unwrap();
+    assert!(first.wait_until_settled(Duration::from_secs(15)).await);
+    drop(first);
+    let before = server.requests().len();
+
+    let second = open_core(data.path());
+    second.resume_download(&added.id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while server.requests().len() == before {
+        assert!(Instant::now() < deadline, "the resume sent nothing");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let later = &server.requests()[before..];
+    assert!(later
+        .iter()
+        .all(|r| r.referer.as_deref() == Some(REFERER)
+            && r.user_agent.as_deref() == Some(USER_AGENT)));
+    assert!(later.iter().all(|r| r.cookie.is_none()));
+    stop(&second).await;
+}
+
+#[tokio::test]
+async fn a_cookie_the_server_sets_stays_with_the_download_through_a_pause() {
+    use rustdm::daemon::TaskRecord;
+    use rustdm::engine::{Outcome, PauseReason};
+    let server = TestServer::start(pattern_bytes(64 * 1024), Mode::SetCookieThenRedirect).await;
+    let ctx = RequestContext {
+        referer: Some(REFERER.to_string()),
+        ..Default::default()
+    };
+    let client =
+        rustdm::request_context::client_for(&ctx, rustdm::engine::Timeouts::default()).unwrap();
+    let mut record = TaskRecord::new(
+        "dl_1".to_string(),
+        server.url().join("file.bin").unwrap().to_string(),
+        std::path::PathBuf::from("/downloads"),
+        None,
+        1,
+    );
+    record.set_context(&ctx, Some(client));
+    // The first request is redirected, and the site sets its cookie on the way.
+    let first = record.client.clone().unwrap();
+    first.get(&record.url).send().await.unwrap();
+
+    record.status = DownloadStatus::Active;
+    record.running = true;
+    record.apply_outcome(Ok(Outcome::Paused {
+        reason: PauseReason::Cancelled,
+        state: std::path::PathBuf::from("/downloads/file.bin.part.rdm"),
+    }));
+    assert_eq!(record.status, DownloadStatus::Paused);
+
+    let resumed = record.client.clone().expect("the client is kept");
+    resumed
+        .get(server.url().join("moved/file.bin").unwrap())
+        .send()
+        .await
+        .unwrap();
+    let last = server.requests().pop().unwrap();
+    assert_eq!(last.path, "/moved/file.bin");
+    assert_eq!(last.cookie.as_deref(), Some("sid=redirect-cookie"));
+}

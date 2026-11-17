@@ -567,6 +567,20 @@ mod tests {
     }
 
     #[test]
+    fn a_far_off_expiry_is_cut_to_400_days_and_a_past_one_to_nothing() {
+        let day = 24 * 60 * 60;
+        let mut c = cookie("sid", "1", "example.com");
+        c.expires = Some(NOW + 1000 * day);
+        assert!(set_cookie_text(&c, NOW).ends_with(&format!("; Max-Age={}", 400 * day)));
+        c.expires = Some(NOW + 10 * day);
+        assert!(set_cookie_text(&c, NOW).ends_with(&format!("; Max-Age={}", 10 * day)));
+        c.expires = Some(NOW - day);
+        assert!(set_cookie_text(&c, NOW).ends_with("; Max-Age=0"));
+        c.expires = None;
+        assert!(!set_cookie_text(&c, NOW).contains("Max-Age"));
+    }
+
+    #[test]
     fn client_for_rejects_a_header_value_that_cannot_be_sent() {
         let ctx = RequestContext {
             user_agent: Some("bad\r\nagent".to_string()),

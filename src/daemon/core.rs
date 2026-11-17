@@ -81,6 +81,34 @@ fn check_download_folder(folder: &std::path::Path) -> Result<(), RpcError> {
 }
 
 /// A speed cap must be 0 (none) or at least `MIN_BYTES_PER_SEC`.
+/// What a client asked for when it added a link, once the defaults are filled in.
+struct NewDownload {
+    url: String,
+    directory: std::path::PathBuf,
+    filename: Option<String>,
+    connections: u32,
+    max_bytes_per_sec: u64,
+}
+
+/// An add of `url` is turned away while the daemon shuts down, or while that
+/// link is already queued or downloading.
+fn refuse_unless_open(state: &DaemonState, url: &str) -> Result<(), RpcError> {
+    if state.is_shutting_down {
+        return Err(RpcError::daemon_shutting_down());
+    }
+    for task_lock in state.downloads.values() {
+        let task = task_lock.lock().unwrap();
+        let unfinished = matches!(
+            task.status,
+            DownloadStatus::Active | DownloadStatus::Queued | DownloadStatus::Pausing
+        );
+        if task.url == url && unfinished {
+            return Err(RpcError::duplicate_download(url, &task.id));
+        }
+    }
+    Ok(())
+}
+
 fn validate_speed(bytes_per_sec: u64) -> Result<(), RpcError> {
     if bytes_per_sec != 0 && bytes_per_sec < MIN_BYTES_PER_SEC {
         return Err(RpcError::invalid_params(format!(
@@ -277,24 +305,14 @@ impl DaemonCore {
         let asked_folder = params.destination.clone();
         let directory = params.destination.unwrap_or(defaults.folder);
         check_download_folder(&directory)?;
-        let context = params.context.as_ref().map(sign_in::check).transpose()?;
+        let validated = params.context.as_ref().map(sign_in::validate).transpose()?;
+        // Turn the add away before paying for a client when it will be turned away anyway.
+        self.refuse_unless_open_for(&params.url)?;
+        let context = validated.map(sign_in::with_client).transpose()?;
 
         let task = {
             let mut state = self.state.lock().unwrap();
-            if state.is_shutting_down {
-                return Err(RpcError::daemon_shutting_down());
-            }
-
-            for task_lock in state.downloads.values() {
-                let task = task_lock.lock().unwrap();
-                let unfinished = matches!(
-                    task.status,
-                    DownloadStatus::Active | DownloadStatus::Queued | DownloadStatus::Pausing
-                );
-                if task.url == params.url && unfinished {
-                    return Err(RpcError::duplicate_download(&params.url, &task.id));
-                }
-            }
+            refuse_unless_open(&state, &params.url)?;
 
             // Started again from the browser, with a fresh sign-in: carry on
             // with the stopped download, from its partial file. Anything less
@@ -304,53 +322,88 @@ impl DaemonCore {
                 folder: asked_folder.as_deref(),
                 file_name: params.filename.as_deref(),
             };
-            if let Some(checked) = context.as_ref().filter(|c| !c.context.cookies.is_empty()) {
-                if let Some(stopped) = sign_in::stopped_download_of(&state, &ask) {
-                    {
-                        let mut task = stopped.lock().unwrap();
-                        task.set_context(&checked.context, checked.client.clone());
-                        task.requeue();
-                    }
-                    drop(state);
-                    return Ok(self.continue_with_context(&stopped, &checked.context));
+            let continuing = context
+                .as_ref()
+                .filter(|c| !c.context.cookies.is_empty())
+                .and_then(|c| Some((sign_in::stopped_download_of(&state, &ask)?, c)));
+            match continuing {
+                Some((stopped, checked)) => self.continue_stopped(&stopped, checked),
+                None => {
+                    let connections = params
+                        .connections
+                        .unwrap_or(defaults.connections as usize)
+                        .clamp(1, MAX_CONNECTIONS) as u32;
+                    self.insert_new_download(
+                        &mut state,
+                        NewDownload {
+                            url: params.url,
+                            directory,
+                            filename: params.filename,
+                            connections,
+                            max_bytes_per_sec,
+                        },
+                        context.as_ref(),
+                    )
                 }
             }
-
-            state.next_id += 1;
-            let id = format!("dl_{}", state.next_id);
-            let connections = params
-                .connections
-                .unwrap_or(defaults.connections as usize)
-                .clamp(1, MAX_CONNECTIONS) as u32;
-
-            let task = Arc::new(Mutex::new(TaskRecord::new(
-                id.clone(),
-                params.url,
-                directory,
-                params.filename,
-                connections,
-            )));
-            {
-                let mut new_task = task.lock().unwrap();
-                new_task.speed_limiter.set_bytes_per_sec(max_bytes_per_sec);
-                if let Some(checked) = &context {
-                    new_task.set_context(&checked.context, checked.client.clone());
-                }
-            }
-            state.order.push(id.clone());
-            state.downloads.insert(id, Arc::clone(&task));
-            task
         };
-
-        if let Some(checked) = &context {
-            let id = task.lock().unwrap().id.clone();
-            self.keep_secret(&id, &checked.context.cookies);
-            sign_in::log_context(&id, &checked.context, "added with");
-        }
         self.persist();
         self.schedule();
+        // After scheduling, so the summary shows a download that started.
         let summary = task.lock().unwrap().to_summary();
         Ok(summary)
+    }
+
+    /// Refuse an add of `url` while the daemon is shutting down or already
+    /// downloads it.
+    fn refuse_unless_open_for(&self, url: &str) -> Result<(), RpcError> {
+        refuse_unless_open(&self.state.lock().unwrap(), url)
+    }
+
+    /// Carry on a stopped download with the fresh sign-in the browser brought.
+    /// Called with the state lock held, so nothing changed it since it was chosen.
+    fn continue_stopped(
+        &self,
+        stopped: &Arc<Mutex<TaskRecord>>,
+        checked: &sign_in::CheckedContext,
+    ) -> Arc<Mutex<TaskRecord>> {
+        {
+            let mut task = stopped.lock().unwrap();
+            task.set_context(&checked.context, checked.client.clone());
+            task.requeue();
+            // Saved under the task's lock, so a cancel cannot slip in between.
+            self.keep_secret(&task, &checked.context.cookies);
+            sign_in::log_context(&task.id, &checked.context, "continued with");
+        }
+        Arc::clone(stopped)
+    }
+
+    /// Put a new download in the queue. Called with the state lock held.
+    fn insert_new_download(
+        &self,
+        state: &mut DaemonState,
+        new: NewDownload,
+        context: Option<&sign_in::CheckedContext>,
+    ) -> Arc<Mutex<TaskRecord>> {
+        state.next_id += 1;
+        let id = format!("dl_{}", state.next_id);
+        let mut task = TaskRecord::new(
+            id.clone(),
+            new.url,
+            new.directory,
+            new.filename,
+            new.connections,
+        );
+        task.speed_limiter.set_bytes_per_sec(new.max_bytes_per_sec);
+        if let Some(checked) = context {
+            task.set_context(&checked.context, checked.client.clone());
+            self.keep_secret(&task, &checked.context.cookies);
+            sign_in::log_context(&id, &checked.context, "added with");
+        }
+        let task = Arc::new(Mutex::new(task));
+        state.order.push(id.clone());
+        state.downloads.insert(id, Arc::clone(&task));
+        task
     }
 
     pub fn pause_download(&self, id: &str) -> Result<DownloadSummary, RpcError> {
@@ -427,7 +480,9 @@ impl DaemonCore {
                 if let Some(ref tx) = task.cancel_tx {
                     let _ = tx.send(true);
                 }
-                task.drop_cookies();
+                if task.drop_cookies() {
+                    self.delete_secret(&task.id);
+                }
             }
             if params.delete_partial {
                 if task.running {
@@ -439,7 +494,7 @@ impl DaemonCore {
             }
             task.to_summary()
         };
-        self.delete_secret(&params.id);
+        self.refresh_client(&task_lock);
         self.persist();
         Ok(summary)
     }
@@ -458,13 +513,14 @@ impl DaemonCore {
                 if task.running {
                     return Err(RpcError::operation_in_progress(id, "download"));
                 }
+                // Saves happen under the state lock too, so none is on its way.
+                self.delete_secret(id);
                 task.to_summary()
             };
             state.downloads.remove(id);
             state.order.retain(|x| x != id);
             summary
         };
-        self.delete_secret(id);
         self.persist();
         Ok(summary)
     }
@@ -612,7 +668,7 @@ impl DaemonCore {
             let task = task_lock.lock().unwrap();
             if task.running {
                 running += 1;
-            } else if task.status == DownloadStatus::Queued {
+            } else if task.status == DownloadStatus::Queued && !task.client_pending {
                 queued.push(Arc::clone(task_lock));
             }
         }
@@ -628,7 +684,8 @@ impl DaemonCore {
     /// otherwise a fresh download. Called by `schedule` with the state lock held.
     fn start_task(&self, task_lock: &Arc<Mutex<TaskRecord>>) {
         let mut task = task_lock.lock().unwrap();
-        if task.running || task.status != DownloadStatus::Queued {
+        // One that waits for its client starts when `refresh_client` has built it.
+        if task.running || task.status != DownloadStatus::Queued || task.client_pending {
             return;
         }
 
@@ -694,7 +751,7 @@ impl DaemonCore {
     }
 
     fn finish_task(&self, record: &Arc<Mutex<TaskRecord>>, outcome: Result<Outcome, Error>) {
-        let finished_with_cookies = {
+        {
             let mut rec = record.lock().unwrap();
             let had_cookies = rec.has_cookies;
             rec.apply_outcome(outcome);
@@ -703,11 +760,11 @@ impl DaemonCore {
                 rec.delete_on_stop = false;
             }
             // Done, or turned down by the site: the cookies are of no more use.
-            (had_cookies && !rec.has_cookies).then(|| rec.id.clone())
-        };
-        if let Some(id) = finished_with_cookies {
-            self.delete_secret(&id);
+            if had_cookies && !rec.has_cookies {
+                self.delete_secret(&rec.id);
+            }
         }
+        self.refresh_client(record);
         self.persist();
         self.schedule();
     }
