@@ -3,13 +3,12 @@
 
 use crate::daemon::launch::{daemon_exe_path, spawn_detached};
 use crate::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
-use crate::ipc::protocol::{DownloadSummary, CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS};
+use crate::ipc::protocol::{CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS};
 use crate::ipc::transport::IpcEndpoint;
 use crate::nmhost::frame::{read_frame, write_frame, FrameError};
-use crate::nmhost::message::{
-    add_params_json, HostErrorKind, HostReply, HostRequest, PROTOCOL_VERSION,
-};
-use serde_json::{json, Map, Value};
+use crate::nmhost::message::{add_params, HostErrorKind, HostReply, HostRequest, PROTOCOL_VERSION};
+use crate::request_context::RequestContext;
+use serde_json::json;
 use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -190,18 +189,13 @@ async fn add<S: Fn() -> io::Result<()>>(
     id: u64,
     url: &str,
     filename: Option<&str>,
-    context: Option<&Map<String, Value>>,
+    context: Option<&RequestContext>,
     endpoint: &IpcEndpoint,
     spawn: &S,
 ) -> HostReply {
     let outcome = async {
         let mut client = connect_or_spawn(endpoint, spawn, SPAWN_TIMEOUT).await?;
-        client
-            .call::<DownloadSummary>(
-                "download.add",
-                Some(add_params_json(url, filename, context)),
-            )
-            .await
+        client.add(add_params(url, filename, context)).await
     }
     .await;
     match outcome {
@@ -258,6 +252,7 @@ fn failure_for(id: u64, error: ClientError) -> HostReply {
 mod tests {
     use super::*;
     use crate::ipc::protocol::RpcError;
+    use serde_json::Value;
 
     async fn replies_to(frames: &[&[u8]]) -> Vec<Value> {
         let mut input = Vec::new();

@@ -2,6 +2,7 @@
 //! Content limits for cookies, Referer and User-Agent belong to the daemon.
 
 use crate::ipc::protocol::AddDownloadParams;
+use crate::request_context::RequestContext;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -12,11 +13,11 @@ pub const MAX_URL_BYTES: usize = 8 * 1024;
 /// Longest file name the host passes on.
 pub const MAX_FILENAME_BYTES: usize = 255;
 
-/// The only two things the extension can ask for. Anything else, including any
-/// extra field (such as `destination`), is refused.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// The only two things the extension can ask for, as they arrive. Anything
+/// else, including any extra field (such as `destination`), is refused.
+#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HostRequest {
+enum WireRequest {
     Ping {
         id: u64,
     },
@@ -30,12 +31,27 @@ pub enum HostRequest {
     },
 }
 
+/// A checked request. The context is already the daemon's own type, so its
+/// content limits (cookie count, sizes, names) are enforced by the daemon.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostRequest {
+    Ping {
+        id: u64,
+    },
+    Add {
+        id: u64,
+        url: String,
+        filename: Option<String>,
+        context: Option<RequestContext>,
+    },
+}
+
 impl HostRequest {
     /// Decode one frame. On failure, returns the request id when one can be
     /// found, so the reply can still name it, and a fixed message. serde's own
     /// text is never passed on: it can quote the URL or file name.
     pub fn parse(bytes: &[u8]) -> Result<Self, (Option<u64>, String)> {
-        let request: Self = serde_json::from_slice(bytes).map_err(|e| {
+        let wire: WireRequest = serde_json::from_slice(bytes).map_err(|e| {
             let id = serde_json::from_slice::<Value>(bytes)
                 .ok()
                 .and_then(|v| v.get("id").and_then(Value::as_u64));
@@ -46,18 +62,24 @@ impl HostRequest {
             };
             (id, message.to_string())
         })?;
-        if let Self::Add {
-            url,
-            filename,
-            context,
-            ..
-        } = &request
-        {
-            if let Err(message) = check_add(url, filename.as_deref(), context.as_ref()) {
-                return Err((Some(request.id()), message));
+        match wire {
+            WireRequest::Ping { id } => Ok(Self::Ping { id }),
+            WireRequest::Add {
+                id,
+                url,
+                filename,
+                context,
+            } => {
+                let context = check_add(&url, filename.as_deref(), context)
+                    .map_err(|message| (Some(id), message))?;
+                Ok(Self::Add {
+                    id,
+                    url,
+                    filename,
+                    context,
+                })
             }
         }
-        Ok(request)
     }
 
     pub fn id(&self) -> u64 {
@@ -135,8 +157,8 @@ impl HostReply {
 fn check_add(
     url: &str,
     filename: Option<&str>,
-    context: Option<&Map<String, Value>>,
-) -> Result<(), String> {
+    context: Option<Map<String, Value>>,
+) -> Result<Option<RequestContext>, String> {
     if url.len() > MAX_URL_BYTES {
         return Err(format!("url is longer than {MAX_URL_BYTES} bytes"));
     }
@@ -148,10 +170,7 @@ fn check_add(
     if let Some(name) = filename {
         check_filename(name)?;
     }
-    if let Some(context) = context {
-        check_context_shape(context)?;
-    }
-    Ok(())
+    context.map(typed_context).transpose()
 }
 
 fn check_filename(name: &str) -> Result<(), String> {
@@ -164,8 +183,10 @@ fn check_filename(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_context_shape(context: &Map<String, Value>) -> Result<(), String> {
-    for (key, value) in context {
+/// The context as the daemon's own type. Shape problems get fixed messages
+/// that name the field only: serde's text can quote cookie values.
+fn typed_context(context: Map<String, Value>) -> Result<RequestContext, String> {
+    for (key, value) in &context {
         let fits = match key.as_str() {
             "cookies" => value.is_array(),
             "referer" | "user_agent" => value.is_string(),
@@ -175,33 +196,25 @@ fn check_context_shape(context: &Map<String, Value>) -> Result<(), String> {
             return Err(format!("context.{key} has the wrong type"));
         }
     }
-    Ok(())
+    serde_json::from_value(Value::Object(context))
+        .map_err(|_| "context has a missing or wrongly typed field".to_string())
 }
 
 /// The `download.add` parameters for an `add` request. The host never sets a
 /// destination, connection count or speed cap, so the daemon's defaults apply.
-///
-/// `context` is carried as plain JSON because the typed field on
-/// `AddDownloadParams` arrives with request-context support; a daemon without
-/// it ignores the field. Switch to the typed field once it is on main.
-pub fn add_params_json(
+pub fn add_params(
     url: &str,
     filename: Option<&str>,
-    context: Option<&Map<String, Value>>,
-) -> Value {
-    let params = AddDownloadParams {
+    context: Option<&RequestContext>,
+) -> AddDownloadParams {
+    AddDownloadParams {
         url: url.to_string(),
         destination: None,
         filename: filename.map(str::to_string),
         connections: None,
         max_bytes_per_sec: None,
-        context: None,
-    };
-    let mut value = serde_json::to_value(params).unwrap_or(Value::Null);
-    if let (Some(object), Some(context)) = (value.as_object_mut(), context) {
-        object.insert("context".to_string(), Value::Object(context.clone()));
+        context: context.cloned(),
     }
-    value
 }
 
 #[cfg(test)]
@@ -327,16 +340,56 @@ mod tests {
     }
 
     #[test]
+    fn a_cookie_of_the_wrong_shape_is_refused_without_quoting_it() {
+        for cookies in [
+            json!([5]),
+            json!([{"value": "secret-value", "domain": "example.com"}]),
+            json!([{"name": "a", "value": "secret-value", "domain": "example.com",
+                "expires": "secret-value"}]),
+        ] {
+            let message = json!({"type": "add", "id": 1, "url": "https://example.com/x",
+                "context": {"cookies": cookies}});
+            let (id, text) = parse(message).unwrap_err();
+            assert_eq!(id, Some(1));
+            assert!(!text.contains("secret-value"), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_extensions_cookie_shape_parses_into_the_typed_context() {
+        let message = json!({"type": "add", "id": 1, "url": "https://example.com/x",
+            "context": {
+                "cookies": [{"name": "sid", "value": "v", "domain": ".example.com", "path": "/a",
+                    "secure": true, "host_only": false, "expires": 1893456000.5}],
+                "referer": "https://example.com/page", "user_agent": "UA"}});
+        let HostRequest::Add { context, .. } = parse(message).unwrap() else {
+            panic!("an add");
+        };
+        let context = context.unwrap();
+        assert_eq!(context.cookies.len(), 1);
+        assert_eq!(context.cookies[0].expires, Some(1_893_456_000));
+        assert!(context.cookies[0].secure);
+        assert_eq!(context.referer.as_deref(), Some("https://example.com/page"));
+        assert_eq!(context.user_agent.as_deref(), Some("UA"));
+    }
+
+    #[test]
     fn daemon_params_carry_the_context_and_no_other_settings() {
-        let context = json!({"cookies": [], "referer": "https://example.com/"});
-        let context = context.as_object().unwrap();
-        let params = add_params_json("https://example.com/x", Some("x.zip"), Some(context));
+        let context = RequestContext {
+            referer: Some("https://example.com/".to_string()),
+            ..RequestContext::default()
+        };
+        let params = add_params("https://example.com/x", Some("x.zip"), Some(&context));
         assert_eq!(
-            params,
-            json!({"url": "https://example.com/x", "filename": "x.zip", "context": context})
+            serde_json::to_value(params).unwrap(),
+            json!({"url": "https://example.com/x", "filename": "x.zip",
+                "context": {"referer": "https://example.com/"}})
         );
-        let bare = add_params_json("https://example.com/x", None, None);
-        assert_eq!(bare, json!({"url": "https://example.com/x"}));
+        let bare = add_params("https://example.com/x", None, None);
+        assert_eq!(
+            serde_json::to_value(bare).unwrap(),
+            json!({"url": "https://example.com/x"})
+        );
     }
 
     #[test]
