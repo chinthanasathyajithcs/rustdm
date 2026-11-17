@@ -14,10 +14,13 @@ use crate::state::write_atomic_private;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 /// Folder under the data folder that holds the secret files.
 pub const SECRETS_DIR: &str = "secrets";
 const FILE_EXTENSION: &str = "cookies";
+const TEMP_EXTENSION: &str = "tmp";
 const MAGIC: &[u8; 4] = b"RDMC";
 const FORMAT_VERSION: u8 = 1;
 const HEADER_LEN: usize = MAGIC.len() + 2;
@@ -46,8 +49,13 @@ impl SecretError {
     }
 }
 
+/// Makes every temp file name unique within this process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 pub struct SecretStore {
     dir: PathBuf,
+    /// Held for the whole of a save, delete or sweep, so they happen one at a time.
+    write_lock: Mutex<()>,
 }
 
 /// Download ids look like `dl_12`. Checked before an id becomes part of a path.
@@ -64,7 +72,13 @@ impl SecretStore {
     pub fn in_dir(data_dir: &Path) -> Self {
         Self {
             dir: data_dir.join(SECRETS_DIR),
+            write_lock: Mutex::new(()),
         }
+    }
+
+    fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
+        // Nothing under the lock leaves shared state half changed, so a panic elsewhere is no reason to stop.
+        self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn file_for(&self, id: &str) -> Option<PathBuf> {
@@ -76,7 +90,6 @@ impl SecretStore {
         let path = self
             .file_for(id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a download id"))?;
-        self.make_dir()?;
         let json = serde_json::to_vec(cookies).map_err(io::Error::other)?;
         let sealed = seal::seal(&json, &entropy_for(id))?;
         let mut file = Vec::with_capacity(HEADER_LEN + sealed.len());
@@ -84,7 +97,18 @@ impl SecretStore {
         file.push(FORMAT_VERSION);
         file.push(seal::SCHEME);
         file.extend_from_slice(&sealed);
-        write_atomic_private(&path, &file)
+        let _writing = self.lock_writes();
+        self.make_dir()?;
+        write_atomic_private(&path, &self.temp_for(id), &file)
+    }
+
+    /// A temp file name no other write, in this process or a crashed earlier one, uses.
+    fn temp_for(&self, id: &str) -> PathBuf {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        self.dir.join(format!(
+            "{id}.{FILE_EXTENSION}.{}-{n}.{TEMP_EXTENSION}",
+            std::process::id()
+        ))
     }
 
     pub fn load(&self, id: &str) -> Result<Vec<ContextCookie>, SecretError> {
@@ -110,13 +134,15 @@ impl SecretStore {
         serde_json::from_slice(&json).map_err(|_| SecretError::Corrupt)
     }
 
-    /// Remove download `id`'s secret. A secret that is already gone is fine; any
-    /// other failure is logged (by kind only), since the caller cannot do more.
+    /// Remove download `id`'s secret and any temp file of it. A secret that is
+    /// already gone is fine; any other failure is logged (by kind only), since
+    /// the caller cannot do more.
     pub fn delete(&self, id: &str) {
         let Some(path) = self.file_for(id) else {
             return;
         };
-        for target in [path.clone(), temp_of(&path)] {
+        let _writing = self.lock_writes();
+        for target in std::iter::once(path).chain(self.temp_files_of(id)) {
             match std::fs::remove_file(&target) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -125,15 +151,33 @@ impl SecretStore {
         }
     }
 
+    /// Temp files that a write of `id`'s secret left behind.
+    fn temp_files_of(&self, id: &str) -> Vec<PathBuf> {
+        let prefix = format!("{id}.{FILE_EXTENSION}.");
+        let suffix = format!(".{TEMP_EXTENSION}");
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix) && name.ends_with(&suffix)
+            })
+            .map(|e| e.path())
+            .collect()
+    }
+
     /// Remove temp files and every secret whose download is not in `keep`.
     pub fn sweep(&self, keep: &HashSet<String>) {
+        let _writing = self.lock_writes();
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            let orphan = if name.ends_with(".tmp") {
+            let orphan = if name.ends_with(&format!(".{TEMP_EXTENSION}")) {
                 true
             } else if let Some(id) = name.strip_suffix(&format!(".{FILE_EXTENSION}")) {
                 !keep.contains(id)
@@ -148,20 +192,27 @@ impl SecretStore {
         }
     }
 
-    /// Create the secrets folder, closed to other users on Unix.
+    /// Create the secrets folder, closed to other users on Unix from the start.
     fn make_dir(&self) -> io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
         #[cfg(unix)]
         {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&self.dir)?;
+        #[cfg(unix)]
+        {
+            // A folder made by an earlier version may be open to others.
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+            let mode = std::fs::metadata(&self.dir)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
         Ok(())
     }
-}
-
-fn temp_of(path: &Path) -> PathBuf {
-    PathBuf::from(format!("{}.tmp", path.display()))
 }
 
 #[cfg(test)]
@@ -289,7 +340,7 @@ mod tests {
     fn delete_removes_the_secret_and_its_temp_file_and_is_repeatable() {
         let (_dir, store) = store();
         store.save("dl_3", &[cookie("a", "b")]).unwrap();
-        let leftover = temp_of(&file_of(&store, "dl_3"));
+        let leftover = store.dir.join("dl_3.cookies.4242-7.tmp");
         std::fs::write(&leftover, b"half").unwrap();
 
         store.delete("dl_3");
@@ -304,15 +355,80 @@ mod tests {
         let (_dir, store) = store();
         store.save("dl_1", &[cookie("a", "b")]).unwrap();
         store.save("dl_2", &[cookie("a", "b")]).unwrap();
-        std::fs::write(store.dir.join("dl_9.cookies.tmp"), b"half").unwrap();
+        std::fs::write(store.dir.join("dl_9.cookies.4242-7.tmp"), b"half").unwrap();
         std::fs::write(store.dir.join("readme.txt"), b"mine").unwrap();
 
         store.sweep(&HashSet::from(["dl_1".to_string()]));
 
         assert!(file_of(&store, "dl_1").exists());
         assert!(!file_of(&store, "dl_2").exists());
-        assert!(!store.dir.join("dl_9.cookies.tmp").exists());
+        assert!(!store.dir.join("dl_9.cookies.4242-7.tmp").exists());
         assert!(store.dir.join("readme.txt").exists());
+    }
+
+    #[test]
+    fn delete_leaves_another_downloads_temp_file_alone() {
+        let (_dir, store) = store();
+        store.save("dl_3", &[cookie("a", "b")]).unwrap();
+        let other = store.dir.join("dl_30.cookies.4242-7.tmp");
+        std::fs::write(&other, b"half").unwrap();
+
+        store.delete("dl_3");
+
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn writes_use_temp_names_of_their_own_and_leave_none_behind() {
+        let (_dir, store) = store();
+        let first = store.temp_for("dl_1");
+        let second = store.temp_for("dl_1");
+        assert_ne!(first, second);
+        for name in [&first, &second] {
+            let name = name.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.starts_with("dl_1.cookies."), "{name}");
+            assert!(name.ends_with(".tmp"), "{name}");
+        }
+
+        store.save("dl_1", &[cookie("a", "b")]).unwrap();
+
+        let names: Vec<_> = std::fs::read_dir(&store.dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["dl_1.cookies"]);
+    }
+
+    #[test]
+    fn saves_and_deletes_from_many_threads_never_fail_and_never_leave_a_temp_file() {
+        let (_dir, store) = store();
+        let store = std::sync::Arc::new(store);
+        let threads: Vec<_> = (0..8)
+            .map(|t| {
+                let store = std::sync::Arc::clone(&store);
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        let value = format!("v{t}-{i}");
+                        store.save("dl_1", &[cookie("SID", &value)]).unwrap();
+                        // Whatever is on disk is a whole, readable secret.
+                        match store.load("dl_1") {
+                            Ok(_) | Err(SecretError::Missing) => {}
+                            Err(e) => panic!("{e:?}"),
+                        }
+                        if i % 5 == 0 {
+                            store.delete("dl_1");
+                        }
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        store.delete("dl_1");
+
+        assert_eq!(std::fs::read_dir(&store.dir).unwrap().count(), 0);
     }
 
     #[test]
@@ -334,6 +450,20 @@ mod tests {
             .mode();
         assert_eq!(folder & 0o777, 0o700);
         assert_eq!(file & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_unix_a_folder_left_open_by_an_earlier_version_is_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = store();
+        std::fs::create_dir(&store.dir).unwrap();
+        std::fs::set_permissions(&store.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        store.save("dl_1", &[cookie("a", "b")]).unwrap();
+
+        let folder = std::fs::metadata(&store.dir).unwrap().permissions().mode();
+        assert_eq!(folder & 0o777, 0o700);
     }
 
     #[cfg(windows)]
