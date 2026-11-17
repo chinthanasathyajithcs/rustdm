@@ -21,7 +21,8 @@ pub fn test_sources(server: &TestServer) -> Sources {
         api_base: base.clone(),
         download_base: base,
         ytdlp_repo: TEST_REPO.to_string(),
-        key: test_pinned_key(),
+        keys: vec![test_pinned_key()],
+        ytdlp_min_version: "2026.01.01".to_string(),
         ytdlp_asset: Some(TEST_ASSET.to_string()),
         pins: HashMap::new(),
     }

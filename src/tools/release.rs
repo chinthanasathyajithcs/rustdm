@@ -2,8 +2,8 @@
 //! genuine: the release list gives the version and where the files are, and
 //! the signed `SHA2-256SUMS` gives the hash the download must have.
 
-use super::checksum::expected_for;
-use super::openpgp::{parse_fingerprint, verify_detached, PinnedKey};
+use super::checksum::{parse_strict_sums, unique_hash};
+use super::openpgp::{parse_fingerprint, verify_detached_any, PinnedKey};
 use super::pins::{self, Pin, Platform};
 use super::version;
 use super::{Tool, ToolError};
@@ -19,6 +19,8 @@ const SUMS_CAP_BYTES: usize = 64 * 1024;
 const RELEASE_CAP_BYTES: usize = 1024 * 1024;
 /// How long to wait when GitHub says "slow down" without saying for how long.
 const DEFAULT_RATE_LIMIT_WAIT_SECS: u64 = 60;
+/// The longest we ever hold off asking again, whatever GitHub's headers say.
+pub const MAX_RATE_LIMIT_WAIT_SECS: u64 = 60 * 60;
 
 /// Where to look, whom to trust, and what to install. `production()` is the
 /// real thing; tests point the URLs at a local server and trust a test key.
@@ -29,8 +31,10 @@ pub struct Sources {
     /// `https://github.com`; release assets must live under it.
     pub download_base: String,
     pub ytdlp_repo: String,
-    /// The key that must have signed yt-dlp's checksum file.
-    pub key: PinnedKey,
+    /// The keys one of which must have signed yt-dlp's checksum file.
+    pub keys: Vec<PinnedKey>,
+    /// The oldest yt-dlp version that may be installed.
+    pub ytdlp_min_version: String,
     /// yt-dlp's release asset for this system, if there is one.
     pub ytdlp_asset: Option<String>,
     /// Pinned builds of the other tools for this system.
@@ -39,10 +43,15 @@ pub struct Sources {
 
 impl Sources {
     pub fn production() -> std::io::Result<Self> {
-        let fingerprint = parse_fingerprint(pins::YTDLP_FINGERPRINT)
-            .ok_or_else(|| std::io::Error::other("built-in fingerprint is malformed"))?;
-        let key = PinnedKey::load(pins::YTDLP_KEY, &fingerprint)
-            .map_err(|e| std::io::Error::other(format!("built-in yt-dlp key: {e}")))?;
+        let keys = pins::YTDLP_KEYS
+            .iter()
+            .map(|(fingerprint, key)| {
+                let fingerprint = parse_fingerprint(fingerprint)
+                    .ok_or_else(|| std::io::Error::other("built-in fingerprint is malformed"))?;
+                PinnedKey::load(key, &fingerprint)
+                    .map_err(|e| std::io::Error::other(format!("built-in yt-dlp key: {e}")))
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
         let platform = Platform::current();
         let pins = platform
             .map(|platform| {
@@ -56,7 +65,8 @@ impl Sources {
             api_base: pins::GITHUB_API.to_string(),
             download_base: pins::GITHUB_DOWNLOADS.to_string(),
             ytdlp_repo: pins::YTDLP_REPO.to_string(),
-            key,
+            keys,
+            ytdlp_min_version: pins::YTDLP_MIN_VERSION.to_string(),
             ytdlp_asset: platform.map(|p| p.ytdlp_asset().to_string()),
             pins,
         })
@@ -70,6 +80,9 @@ pub struct YtDlpRelease {
     pub asset: String,
     pub url: url::Url,
     pub sha256: String,
+    /// When yt-dlp's key signed the checksum file (unix seconds), from the
+    /// signature itself rather than from GitHub.
+    pub signed_at: u64,
 }
 
 #[derive(Deserialize)]
@@ -92,8 +105,8 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// If a GitHub answer means "limited", the unix time to try again.
-/// A 429, or a 403 that carries rate-limit headers, counts.
+/// If a GitHub answer means "limited", the unix time to try again, never more
+/// than an hour away. A 429, or a 403 that carries rate-limit headers, counts.
 fn rate_limit_until(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -> Option<u64> {
     let number = |name: &str| -> Option<u64> {
         headers
@@ -101,13 +114,17 @@ fn rate_limit_until(status: u16, headers: &reqwest::header::HeaderMap, now: u64)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse().ok())
     };
-    if let Some(wait) = number("retry-after") {
-        return Some(now + wait);
-    }
-    if number("x-ratelimit-remaining") == Some(0) {
-        return Some(number("x-ratelimit-reset").unwrap_or(now + DEFAULT_RATE_LIMIT_WAIT_SECS));
-    }
-    (status == 429).then_some(now + DEFAULT_RATE_LIMIT_WAIT_SECS)
+    let until = if let Some(wait) = number("retry-after") {
+        now.saturating_add(wait)
+    } else if number("x-ratelimit-remaining") == Some(0) {
+        number("x-ratelimit-reset")
+            .unwrap_or_else(|| now.saturating_add(DEFAULT_RATE_LIMIT_WAIT_SECS))
+    } else if status == 429 {
+        now.saturating_add(DEFAULT_RATE_LIMIT_WAIT_SECS)
+    } else {
+        return None;
+    };
+    Some(until.min(now.saturating_add(MAX_RATE_LIMIT_WAIT_SECS)))
 }
 
 /// GET `url`, reading at most `cap` bytes.
@@ -183,48 +200,86 @@ fn asset_url(sources: &Sources, assets: &[ApiAsset], name: &str) -> Result<url::
     Ok(url)
 }
 
-/// Look up the newest yt-dlp release and verify its checksum file against the
-/// pinned key. Nothing is downloaded except the release record, `SHA2-256SUMS`
-/// and its signature.
-pub async fn latest_ytdlp(
+/// The release record GitHub gives for the newest yt-dlp, with a tag that is
+/// safe to use as a folder name.
+async fn release_record(
     client: &reqwest::Client,
     sources: &Sources,
-) -> Result<YtDlpRelease, ToolError> {
-    let tool = Tool::YtDlp;
-    let wanted_asset = sources
-        .ytdlp_asset
-        .clone()
-        .ok_or_else(|| ToolError::Unusable("yt-dlp isn't available for this system".into()))?;
-
+) -> Result<ApiRelease, ToolError> {
     let release_url = format!(
         "{}/repos/{}/releases/latest",
         sources.api_base.trim_end_matches('/'),
         sources.ytdlp_repo
     );
-    let body = get_capped(client, tool, &release_url, RELEASE_CAP_BYTES).await?;
+    let body = get_capped(client, Tool::YtDlp, &release_url, RELEASE_CAP_BYTES).await?;
     let release: ApiRelease = serde_json::from_slice(&body).map_err(|_| {
         ToolError::Unusable("GitHub's release record for yt-dlp is unreadable".into())
     })?;
 
     // The tag becomes a folder name, so it must be plain dotted numbers.
-    if version::parse(&release.tag_name).is_none() {
+    let Some(parsed) = version::parse(&release.tag_name) else {
         return Err(ToolError::Unusable(format!(
             "the latest yt-dlp release has an unexpected version ({})",
             release.tag_name.chars().take(40).collect::<String>()
         )));
+    };
+    // The tag is unsigned, so an old release could be offered under a new tag; it
+    // is checked again against what the program itself reports. This floor
+    // refuses anything older than the oldest release rustdm has seen.
+    let floor = version::parse(&sources.ytdlp_min_version).unwrap_or_default();
+    if version::compare(&parsed, &floor) == std::cmp::Ordering::Less {
+        return Err(ToolError::Unusable(format!(
+            "yt-dlp {} is older than the oldest version rustdm accepts ({}); ignoring it",
+            release.tag_name, sources.ytdlp_min_version
+        )));
     }
+    Ok(release)
+}
 
-    let sums_url = asset_url(sources, &release.assets, SUMS_ASSET)?;
-    let sig_url = asset_url(sources, &release.assets, SIG_ASSET)?;
-    let url = asset_url(sources, &release.assets, &wanted_asset)?;
+/// Fetch `SHA2-256SUMS` and its signature and check them against the pinned
+/// keys. Returns the file's text and when it was signed.
+async fn signed_sums(
+    client: &reqwest::Client,
+    sources: &Sources,
+    assets: &[ApiAsset],
+) -> Result<(String, u64), ToolError> {
+    let tool = Tool::YtDlp;
+    let sums_url = asset_url(sources, assets, SUMS_ASSET)?;
+    let sig_url = asset_url(sources, assets, SIG_ASSET)?;
     let sums = get_capped(client, tool, sums_url.as_str(), SUMS_CAP_BYTES).await?;
     let sig = get_capped(client, tool, sig_url.as_str(), SUMS_CAP_BYTES).await?;
-    verify_detached(&sources.key, &sums, &sig).map_err(|e| ToolError::BadSignature {
-        detail: e.to_string(),
+    let verified =
+        verify_detached_any(&sources.keys, &sums, &sig).map_err(|e| ToolError::BadSignature {
+            detail: e.to_string(),
+        })?;
+    let text = String::from_utf8(sums).map_err(|_| {
+        ToolError::Unusable("the signed checksum list for yt-dlp isn't text".into())
     })?;
+    Ok((text, verified.created_unix))
+}
 
-    let sums_text = String::from_utf8_lossy(&sums);
-    let sha256 = expected_for(&sums_text, &wanted_asset).ok_or_else(|| {
+/// Look up the newest yt-dlp release and verify its checksum file against the
+/// pinned keys. Nothing is downloaded except the release record, `SHA2-256SUMS`
+/// and its signature.
+pub async fn latest_ytdlp(
+    client: &reqwest::Client,
+    sources: &Sources,
+) -> Result<YtDlpRelease, ToolError> {
+    let wanted_asset = sources
+        .ytdlp_asset
+        .clone()
+        .ok_or_else(|| ToolError::Unusable("yt-dlp isn't available for this system".into()))?;
+    let release = release_record(client, sources).await?;
+    let url = asset_url(sources, &release.assets, &wanted_asset)?;
+    let (sums_text, signed_at) = signed_sums(client, sources, &release.assets).await?;
+
+    let lines = parse_strict_sums(&sums_text).ok_or_else(|| {
+        ToolError::Unusable(format!(
+            "the signed checksum list for yt-dlp {} isn't in the expected format",
+            release.tag_name
+        ))
+    })?;
+    let sha256 = unique_hash(&lines, &wanted_asset).ok_or_else(|| {
         ToolError::Unusable(format!(
             "the signed checksum list for yt-dlp {} doesn't mention {wanted_asset}",
             release.tag_name
@@ -235,6 +290,7 @@ pub async fn latest_ytdlp(
         asset: wanted_asset,
         url,
         sha256,
+        signed_at,
     })
 }
 
@@ -266,5 +322,18 @@ mod tests {
         assert_eq!(rate_limit_until(403, &HeaderMap::new(), now), None);
         let plenty = headers(&[("x-ratelimit-remaining", "40")]);
         assert_eq!(rate_limit_until(403, &plenty, now), None);
+    }
+
+    #[test]
+    fn the_wait_is_capped_at_an_hour_and_cannot_overflow() {
+        let now = 1_000;
+        let far = headers(&[
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "99999999999"),
+        ]);
+        assert_eq!(rate_limit_until(403, &far, now), Some(now + 3600));
+        let forever = headers(&[("retry-after", "18446744073709551615")]);
+        assert_eq!(rate_limit_until(429, &forever, now), Some(now + 3600));
+        assert_eq!(rate_limit_until(429, &forever, u64::MAX), Some(u64::MAX));
     }
 }

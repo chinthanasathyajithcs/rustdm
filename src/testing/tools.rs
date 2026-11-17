@@ -23,8 +23,47 @@ pub struct SigSpec {
     pub hash_algo: u8,
     /// Fingerprint named in the hashed issuer subpacket; `None` leaves it out.
     pub issuer: Option<Fingerprint>,
+    /// Set the critical bit on the issuer subpacket (a known type, so it is fine).
+    pub issuer_critical: bool,
+    /// A second issuer subpacket in the hashed area.
+    pub second_issuer: Option<Fingerprint>,
+    /// Signature creation time in the hashed area; `None` leaves it out.
+    pub creation_time: Option<u32>,
+    /// Put the creation time in the hashed area twice.
+    pub duplicate_creation_time: bool,
+    /// A signature-expiration-time subpacket (seconds after creation).
+    pub expiration: Option<u32>,
     /// Add a critical subpacket of an unknown type to the hashed area.
     pub unknown_critical: bool,
+    /// Raw subpacket bytes appended to the hashed area as they are.
+    pub extra_hashed: Vec<u8>,
+    /// The raw bytes of the unhashed area, which the signature does not cover.
+    pub unhashed: Vec<u8>,
+    /// Bytes placed after the signature integer, inside the packet body.
+    pub trailing_in_body: Vec<u8>,
+    /// How the packet header is written.
+    pub header: HeaderForm,
+}
+
+/// The ways a packet header can be written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderForm {
+    /// `0x89` and a two-octet length, what gpg writes.
+    Old,
+    /// `0xC2` and a new-format length.
+    New,
+    /// `0xC2` with a partial body length, which must be refused.
+    NewPartial,
+}
+
+/// The default creation time of a test signature.
+pub const TEST_CREATION_TIME: u32 = 0x6adf_d329;
+
+/// A hashed or unhashed issuer-fingerprint subpacket naming `fingerprint`.
+pub fn issuer_subpacket(fingerprint: &Fingerprint) -> Vec<u8> {
+    let mut out = vec![22, 33, 4];
+    out.extend(fingerprint);
+    out
 }
 
 impl Default for SigSpec {
@@ -35,7 +74,16 @@ impl Default for SigSpec {
             pk_algo: 1,
             hash_algo: 10,
             issuer: Some(test_fingerprint()),
+            issuer_critical: false,
+            second_issuer: None,
+            creation_time: Some(TEST_CREATION_TIME),
+            duplicate_creation_time: false,
+            expiration: None,
             unknown_critical: false,
+            extra_hashed: Vec::new(),
+            unhashed: Vec::new(),
+            trailing_in_body: Vec::new(),
+            header: HeaderForm::Old,
         }
     }
 }
@@ -107,15 +155,38 @@ pub fn test_pinned_key() -> PinnedKey {
 
 /// A detached signature of `data` made by the test key, as a binary packet.
 pub fn sign(data: &[u8], spec: &SigSpec) -> Vec<u8> {
+    build(data, spec).0
+}
+
+/// Like `sign`, also saying whether the signature integer lost a leading zero
+/// byte (an OpenPGP integer has none, so it is shorter than the modulus).
+fn build(data: &[u8], spec: &SigSpec) -> (Vec<u8>, bool) {
     let mut hashed = Vec::new();
     if let Some(issuer) = &spec.issuer {
-        hashed.extend([22, 33, 4]);
-        hashed.extend(issuer);
+        let mut subpacket = issuer_subpacket(issuer);
+        if spec.issuer_critical {
+            subpacket[1] |= 0x80;
+        }
+        hashed.extend(subpacket);
     }
-    hashed.extend([5, 2, 0x6a, 0xdf, 0xd3, 0x29]);
+    if let Some(issuer) = &spec.second_issuer {
+        hashed.extend(issuer_subpacket(issuer));
+    }
+    if let Some(created) = spec.creation_time {
+        let times = if spec.duplicate_creation_time { 2 } else { 1 };
+        for _ in 0..times {
+            hashed.extend([5, 2]);
+            hashed.extend(created.to_be_bytes());
+        }
+    }
+    if let Some(seconds) = spec.expiration {
+        hashed.extend([5, 3]);
+        hashed.extend(seconds.to_be_bytes());
+    }
     if spec.unknown_critical {
         hashed.extend([2, 0x80 | 100, 0]);
     }
+    hashed.extend(&spec.extra_hashed);
 
     let mut header = vec![spec.version, spec.class, spec.pk_algo, spec.hash_algo];
     header.extend((hashed.len() as u16).to_be_bytes());
@@ -142,16 +213,49 @@ pub fn sign(data: &[u8], spec: &SigSpec) -> Vec<u8> {
     let mut signature = vec![0u8; key.public().modulus_len()];
     key.sign(sign_alg, &SystemRandom::new(), &message, &mut signature)
         .expect("sign with the test key");
+    let short = signature[0] == 0;
 
     let mut body = header;
-    body.extend([0, 0]); // no unhashed subpackets
+    body.extend((spec.unhashed.len() as u16).to_be_bytes());
+    body.extend(&spec.unhashed);
     body.extend(left16);
     body.extend(mpi(&signature));
+    body.extend(&spec.trailing_in_body);
+    (packet(&body, spec.header), short)
+}
 
-    let mut packet = vec![0x89];
-    packet.extend((body.len() as u16).to_be_bytes());
+/// `body` as a signature packet (tag 2) with the chosen header.
+fn packet(body: &[u8], form: HeaderForm) -> Vec<u8> {
+    let mut packet = match form {
+        HeaderForm::Old => {
+            let mut head = vec![0x89];
+            head.extend((body.len() as u16).to_be_bytes());
+            head
+        }
+        HeaderForm::New => {
+            // Two-octet new-format length: 192 + ((first - 192) << 8) + second.
+            let n = body.len() - 192;
+            vec![0xC2, (n >> 8) as u8 + 192, n as u8]
+        }
+        HeaderForm::NewPartial => vec![0xC2, 0xE9],
+    };
     packet.extend(body);
     packet
+}
+
+/// A signature whose integer is shorter than the modulus, with the data it
+/// signs. Signs `prefix` plus a counter until one comes out short (about one
+/// in 256 does).
+pub fn sign_with_short_integer(prefix: &[u8], spec: &SigSpec) -> (Vec<u8>, Vec<u8>) {
+    for counter in 0u32..100_000 {
+        let mut data = prefix.to_vec();
+        data.extend(counter.to_be_bytes());
+        let (packet, short) = build(&data, spec);
+        if short {
+            return (data, packet);
+        }
+    }
+    panic!("no short signature in 100000 tries");
 }
 
 /// A good signature of `data` by the test key, as `SHA2-256SUMS.sig` would be.

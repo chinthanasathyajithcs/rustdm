@@ -8,11 +8,14 @@
 //!   extra packets, no trailing bytes);
 //! - version 4, signature class 0x00 (binary document), RSA, hashed with
 //!   SHA-256 or SHA-512;
-//! - an issuer-fingerprint subpacket, inside the *hashed* area, equal to the
-//!   pinned fingerprint; unknown critical subpackets are refused;
-//! - the key is one v4 RSA public-key packet whose recomputed fingerprint equals
-//!   the pin. The key bytes are compiled into rustdm and never come from the
-//!   network.
+//! - in the *hashed* area, exactly one issuer-fingerprint subpacket naming one
+//!   of the pinned keys, and exactly one signature-creation-time subpacket;
+//!   unknown critical subpackets are refused, and so is any signature that
+//!   carries an expiration time (yt-dlp's never do, and refusing needs no clock);
+//! - each key is one v4 RSA public-key packet whose recomputed fingerprint equals
+//!   its pin. The key bytes are compiled into rustdm and never come from the
+//!   network. More than one key may be pinned, so a successor can be added
+//!   before the old key is retired.
 //!
 //! Everything else is an error. The RSA PKCS#1 v1.5 check itself is `ring`'s.
 
@@ -25,6 +28,7 @@ use ring::signature::{
 const TAG_SIGNATURE: u8 = 2;
 const TAG_PUBLIC_KEY: u8 = 6;
 const SUBPACKET_CREATION_TIME: u8 = 2;
+const SUBPACKET_EXPIRATION_TIME: u8 = 3;
 const SUBPACKET_ISSUER_FINGERPRINT: u8 = 33;
 const VERSION_4: u8 = 4;
 const CLASS_BINARY_DOCUMENT: u8 = 0x00;
@@ -51,7 +55,15 @@ pub enum SignatureError {
     BadSignature,
 }
 
-/// The one key rustdm trusts, with `n` and `e` as big-endian bytes.
+/// What a good signature tells the caller besides "it is good".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verified {
+    /// When the signer says the signature was made, in unix seconds. It is
+    /// covered by the signature, so it cannot be changed without the key.
+    pub created_unix: u64,
+}
+
+/// A key rustdm trusts, with `n` and `e` as big-endian bytes.
 #[derive(Debug, Clone)]
 pub struct PinnedKey {
     n: Vec<u8>,
@@ -127,7 +139,17 @@ pub fn verify_detached(
     key: &PinnedKey,
     data: &[u8],
     signature: &[u8],
-) -> Result<(), SignatureError> {
+) -> Result<Verified, SignatureError> {
+    verify_detached_any(std::slice::from_ref(key), data, signature)
+}
+
+/// Check that `signature` is a detached signature of `data` made by one of
+/// `keys`: the one its issuer-fingerprint subpacket names.
+pub fn verify_detached_any(
+    keys: &[PinnedKey],
+    data: &[u8],
+    signature: &[u8],
+) -> Result<Verified, SignatureError> {
     let (tag, body, rest) = read_packet(signature)?;
     if tag != TAG_SIGNATURE {
         return Err(SignatureError::Malformed("not a signature packet"));
@@ -154,7 +176,11 @@ pub fn verify_detached(
     };
     let hashed_len = usize::from(reader.u16()?);
     let hashed_area = reader.take(hashed_len)?;
-    check_hashed_area(hashed_area, &key.fingerprint)?;
+    let hashed = check_hashed_area(hashed_area)?;
+    let key = keys
+        .iter()
+        .find(|key| key.fingerprint == hashed.issuer)
+        .ok_or(SignatureError::WrongSigner)?;
     // The unhashed area is not covered by the signature, so nothing in it is trusted.
     let unhashed_len = usize::from(reader.u16()?);
     reader.take(unhashed_len)?;
@@ -194,14 +220,25 @@ pub fn verify_detached(
     };
     components
         .verify(rsa_params, &message, &padded)
-        .map_err(|_| SignatureError::BadSignature)
+        .map_err(|_| SignatureError::BadSignature)?;
+    Ok(Verified {
+        created_unix: u64::from(hashed.created),
+    })
 }
 
-/// Walk the hashed subpackets: each must be well formed, no unknown critical
-/// one may be present, and an issuer fingerprint equal to `pinned` must be there.
-fn check_hashed_area(area: &[u8], pinned: &Fingerprint) -> Result<(), SignatureError> {
+/// What the hashed subpackets must say.
+struct HashedFields {
+    issuer: Fingerprint,
+    created: u32,
+}
+
+/// Walk the hashed subpackets: each must be well formed and no unknown critical
+/// one may be present. There must be exactly one issuer fingerprint and exactly
+/// one creation time, and no expiration time.
+fn check_hashed_area(area: &[u8]) -> Result<HashedFields, SignatureError> {
     let mut reader = Reader::new(area);
-    let mut issuer_seen = false;
+    let mut issuer: Option<Fingerprint> = None;
+    let mut created: Option<u32> = None;
     while !reader.is_empty() {
         let length = reader.subpacket_length()?;
         if length == 0 {
@@ -214,21 +251,34 @@ fn check_hashed_area(area: &[u8], pinned: &Fingerprint) -> Result<(), SignatureE
                 if content.len() != 2 + FINGERPRINT_LEN || content[1] != VERSION_4 {
                     return Err(SignatureError::Malformed("issuer fingerprint subpacket"));
                 }
-                if content[2..] != pinned[..] {
-                    return Err(SignatureError::WrongSigner);
+                if issuer.is_some() {
+                    return Err(SignatureError::Malformed(
+                        "more than one issuer fingerprint",
+                    ));
                 }
-                issuer_seen = true;
+                let mut fingerprint = [0u8; FINGERPRINT_LEN];
+                fingerprint.copy_from_slice(&content[2..]);
+                issuer = Some(fingerprint);
             }
-            SUBPACKET_CREATION_TIME => {}
+            SUBPACKET_CREATION_TIME => {
+                let [_, a, b, c, d] = content[..] else {
+                    return Err(SignatureError::Malformed("creation time subpacket"));
+                };
+                if created.is_some() {
+                    return Err(SignatureError::Malformed("more than one creation time"));
+                }
+                created = Some(u32::from_be_bytes([a, b, c, d]));
+            }
+            SUBPACKET_EXPIRATION_TIME => {
+                return Err(SignatureError::Unsupported("signature expiration time"))
+            }
             _ if critical => return Err(SignatureError::Unsupported("critical subpacket")),
             _ => {}
         }
     }
-    if issuer_seen {
-        Ok(())
-    } else {
-        Err(SignatureError::WrongSigner)
-    }
+    let issuer = issuer.ok_or(SignatureError::WrongSigner)?;
+    let created = created.ok_or(SignatureError::Malformed("no creation time"))?;
+    Ok(HashedFields { issuer, created })
 }
 
 /// Split one packet off the front of `data`: its tag, body, and what follows.
@@ -240,7 +290,7 @@ fn read_packet(data: &[u8]) -> Result<(u8, &[u8], &[u8]), SignatureError> {
         return Err(SignatureError::Malformed("not a binary OpenPGP packet"));
     }
     let (tag, length) = if header & 0x40 != 0 {
-        (header & 0x3f, reader.subpacket_length()?)
+        (header & 0x3f, reader.packet_length()?)
     } else {
         let length = match header & 0x03 {
             0 => usize::from(reader.u8()?),
@@ -302,9 +352,24 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
-    /// A length as used by subpackets and new-format packets. The partial-length
-    /// form (224..=254) is not accepted.
+    /// A subpacket's length (RFC 4880 section 5.2.3.1): one octet up to 191,
+    /// two octets for 192..=254 in the first, and 255 then four octets. Subpackets
+    /// have no partial lengths.
     fn subpacket_length(&mut self) -> Result<usize, SignatureError> {
+        let first = self.u8()?;
+        match first {
+            0..=191 => Ok(usize::from(first)),
+            192..=254 => {
+                let second = self.u8()?;
+                Ok(((usize::from(first) - 192) << 8) + usize::from(second) + 192)
+            }
+            255 => Ok(self.u32()? as usize),
+        }
+    }
+
+    /// A new-format packet's length (RFC 4880 section 4.2.2). The first-octet
+    /// range 224..=254 means a partial length, which is not accepted.
+    fn packet_length(&mut self) -> Result<usize, SignatureError> {
         let first = self.u8()?;
         match first {
             0..=191 => Ok(usize::from(first)),
@@ -312,8 +377,8 @@ impl<'a> Reader<'a> {
                 let second = self.u8()?;
                 Ok(((usize::from(first) - 192) << 8) + usize::from(second) + 192)
             }
+            224..=254 => Err(SignatureError::Unsupported("partial length")),
             255 => Ok(self.u32()? as usize),
-            _ => Err(SignatureError::Unsupported("partial length")),
         }
     }
 
@@ -354,7 +419,10 @@ mod tests {
     fn the_real_ytdlp_release_verifies() {
         let key = pinned();
         assert_eq!(key.fingerprint_hex(), YTDLP_FINGERPRINT);
-        assert_eq!(verify_detached(&key, SUMS, SIG), Ok(()));
+        let verified = verify_detached(&key, SUMS, SIG).unwrap();
+        // The real file is signed after the key existed and before the date of
+        // this pin check.
+        assert!(verified.created_unix > 1_600_000_000, "{verified:?}");
     }
 
     #[test]

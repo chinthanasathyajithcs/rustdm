@@ -85,11 +85,46 @@ pub fn parse_sums(text: &str) -> Vec<SumLine> {
 
 /// The hash recorded for `name`, if the file lists it exactly once.
 pub fn expected_for(text: &str, name: &str) -> Option<String> {
-    let mut matches = parse_sums(text)
-        .into_iter()
-        .filter(|line| line.name == name);
+    unique_hash(&parse_sums(text), name)
+}
+
+/// The hash recorded for `name` in `lines`, if it is listed exactly once.
+pub fn unique_hash(lines: &[SumLine], name: &str) -> Option<String> {
+    let mut matches = lines.iter().filter(|line| line.name == name);
     let first = matches.next()?;
-    matches.next().is_none().then_some(first.sha256)
+    matches.next().is_none().then(|| first.sha256.clone())
+}
+
+/// Read a checksum file that must be exactly yt-dlp's `SHA2-256SUMS`: every
+/// non-empty line is `<64 lower-case hex digits>  <file name>` (two spaces; the
+/// name only letters, digits, `.`, `_` and `-`; a trailing CR is allowed). One
+/// line of any other shape makes the whole file unreadable (`None`), so nothing
+/// in a signed file is guessed at.
+pub fn parse_strict_sums(text: &str) -> Option<Vec<SumLine>> {
+    let mut found = Vec::new();
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        let (hash, name) = line.split_once("  ")?;
+        let lower_hex = hash.len() == HEX_LEN
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let plain_name = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !lower_hex || !plain_name {
+            return None;
+        }
+        found.push(SumLine {
+            name: name.to_string(),
+            sha256: hash.to_string(),
+        });
+    }
+    Some(found)
 }
 
 fn parse_coreutils_line(line: &str) -> Option<SumLine> {
@@ -175,6 +210,41 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].name, "tool.zip");
         assert_eq!(parse_sums(""), vec![]);
+    }
+
+    #[test]
+    fn the_strict_reader_takes_the_real_ytdlp_file_and_nothing_loose() {
+        let lines = parse_strict_sums(YTDLP_SUMS).expect("the real file is strict");
+        assert_eq!(lines.len(), 19);
+        assert_eq!(
+            unique_hash(&lines, "yt-dlp_linux").as_deref(),
+            Some("767ba9dce7052aa196f8b12652f433d76de128ba168966fa84b6394d5e6c6795")
+        );
+        let hash = "a".repeat(64);
+        // CRLF line ends and a missing final newline are fine.
+        assert_eq!(
+            parse_strict_sums(&format!("{hash}  a.exe\r\n{hash}  b\r\n\r\n{hash}  c"))
+                .map(|l| l.len()),
+            Some(3)
+        );
+        let upper = "A".repeat(64);
+        for bad in [
+            format!("{hash} *a.exe"),
+            format!("{hash} a.exe"),
+            format!("{hash}   a.exe"),
+            format!("{hash}  dir/a.exe"),
+            format!("{hash}  dir\\a.exe"),
+            format!("{upper}  a.exe"),
+            format!("{}  a.exe", "a".repeat(63)),
+            format!("{hash}  a.exe\nnot a line"),
+            format!("{hash}  a b.exe"),
+            format!("{hash}  "),
+            format!("Hash : {upper}\nPath : C:\\a.exe"),
+            format!("{hash}  a.exe \n"),
+        ] {
+            assert_eq!(parse_strict_sums(&bad), None, "{bad:?}");
+        }
+        assert_eq!(parse_strict_sums(""), Some(vec![]));
     }
 
     #[test]

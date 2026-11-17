@@ -22,6 +22,15 @@ use super::Tool;
 /// Source: `public.key` in the yt-dlp repository, dearmored with `gpg --dearmor`.
 pub const YTDLP_FINGERPRINT: &str = "AC0CBBE6848D6A873464AF4E57CF65933B5A7581";
 pub const YTDLP_KEY: &[u8] = include_bytes!("keys/yt-dlp.gpg");
+/// Every key that may sign yt-dlp's checksum file, as (fingerprint, dearmored
+/// key). A signature must be made by one of them. To prepare for a key change,
+/// add the successor here (and ship) before yt-dlp starts signing with it.
+pub const YTDLP_KEYS: &[(&str, &[u8])] = &[(YTDLP_FINGERPRINT, YTDLP_KEY)];
+/// The oldest yt-dlp rustdm will ever install: the newest version this
+/// repository has seen published (the checksum file in `tests/fixtures/yt-dlp`).
+/// It stops an old, genuinely signed release from being passed off as new.
+/// Bump it to a recent release at every rustdm release.
+pub const YTDLP_MIN_VERSION: &str = "2026.10.26";
 /// Where yt-dlp nightly builds are published.
 pub const YTDLP_REPO: &str = "yt-dlp/yt-dlp-nightly-builds";
 pub const GITHUB_API: &str = "https://api.github.com";
@@ -191,6 +200,15 @@ mod tests {
         let fingerprint = parse_fingerprint(YTDLP_FINGERPRINT).unwrap();
         let key = PinnedKey::load(YTDLP_KEY, &fingerprint).unwrap();
         assert_eq!(key.fingerprint_hex(), YTDLP_FINGERPRINT);
+    }
+
+    #[test]
+    fn every_trusted_ytdlp_key_loads_and_the_minimum_version_is_a_version() {
+        for (fingerprint, key) in YTDLP_KEYS {
+            let fingerprint = parse_fingerprint(fingerprint).unwrap();
+            assert!(PinnedKey::load(key, &fingerprint).is_ok());
+        }
+        assert!(crate::tools::version::parse(YTDLP_MIN_VERSION).is_some());
     }
 
     #[test]
