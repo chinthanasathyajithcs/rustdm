@@ -487,3 +487,49 @@ async fn plain_mode_prints_changing_rows_until_nothing_is_left_to_do() {
     assert!(last.contains("plain.bin"), "{text}");
     assert_eq!(std::fs::read(dir.path().join("plain.bin")).unwrap(), body);
 }
+
+#[tokio::test]
+async fn settings_screen_polls_tools_and_u_requests_an_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let releases = TestServer::start_routes(vec![]).await;
+    let store = std::sync::Arc::new(
+        rustdm::tools::ToolStore::with_sources(
+            dir.path().join("tools"),
+            rustdm::engine::build_client(),
+            rustdm::testing::fake_releases::test_sources(&releases),
+        )
+        .unwrap(),
+    );
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let endpoint = IpcEndpoint::test_endpoint(&format!("tui_tools_{id}"));
+    let core = DaemonCore::new().with_tools(store);
+    let server = DaemonServer::bind_with_core(&endpoint, core)
+        .await
+        .expect("bind daemon");
+    tokio::spawn(async move { server.run().await.unwrap() });
+
+    let (events, dashboard) = start_dashboard(&endpoint);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Switch to Settings
+    events.send(key(KeyCode::Char('s'))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Navigate to yt-dlp: MaxActive -> TotalSpeed -> Folder -> Connections -> Speed -> YtDlp
+    for _ in 0..5 {
+        events.send(key(KeyCode::Down)).await.unwrap();
+    }
+    // Press 'u' to update tool
+    events.send(key(KeyCode::Char('u'))).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    events.send(key(KeyCode::Char('q'))).await.unwrap();
+    let terminal = tokio::time::timeout(WAIT_TIMEOUT, dashboard)
+        .await
+        .expect("dashboard did not quit")
+        .unwrap();
+    let text = screen_text(&terminal);
+    assert!(text.contains("Tools"), "{text}");
+    assert!(text.contains("yt-dlp"), "{text}");
+    assert!(text.contains("Checking yt-dlp"), "{text}");
+}

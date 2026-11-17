@@ -25,6 +25,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Tests on Windows use a copy of this program as a pretend tool.
+    #[cfg(feature = "testing")]
+    if rustdm::testing::fake_releases::answer_version_if_fake() {
+        return ExitCode::SUCCESS;
+    }
     let args = Args::parse();
     let endpoint = args
         .endpoint

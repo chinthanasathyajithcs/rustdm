@@ -129,6 +129,9 @@ pub struct DaemonCore {
     store: Option<Arc<QueueStore>>,
     /// Folder holding the queue file and the log, when the queue is saved.
     data_dir: Option<std::path::PathBuf>,
+    /// Fetches and updates yt-dlp, ffmpeg and deno. `None` for a core that keeps
+    /// its queue in memory only.
+    pub(crate) tools: Option<Arc<crate::tools::ToolStore>>,
     /// Browser cookies of downloads that came with them, when the queue is saved.
     pub(super) secrets: Option<Arc<SecretStore>>,
 }
@@ -201,6 +204,14 @@ impl DaemonCore {
             sign_in::sweep(secrets, &records);
         }
 
+        let client = build_client();
+        let tools = data_dir.as_deref().and_then(|dir| {
+            crate::tools::ToolStore::open(dir.join("tools"), client.clone())
+                .map(Arc::new)
+                .map_err(|e| tracing::warn!("tools folder unavailable: {e}"))
+                .ok()
+        });
+
         let (telemetry_tx, _) = broadcast::channel(1024);
         let core = Self {
             state: Arc::new(Mutex::new(DaemonState {
@@ -212,12 +223,13 @@ impl DaemonCore {
                 limits,
                 defaults,
             })),
-            client: build_client(),
+            client,
             telemetry_tx,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             data_dir,
-            secrets,
             store: store.map(Arc::new),
+            tools,
+            secrets,
         };
         if restored_changes {
             core.persist();
