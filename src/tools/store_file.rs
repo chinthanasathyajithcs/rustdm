@@ -32,6 +32,15 @@ pub struct ToolEntry {
     /// Do not ask GitHub again before this time (rate limit), in unix seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_not_before: Option<u64>,
+    /// When yt-dlp's key signed the checksum list of the current version
+    /// (unix seconds). An update must carry a later one, so an old signed
+    /// release cannot be passed off as a new one. Missing in an older file,
+    /// which accepts any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_at: Option<u64>,
+    /// The same for `previous`, so a rollback can swap them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_signed_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,6 +139,8 @@ mod tests {
                 last_check: Some(1_794_000_000),
                 skip_version: Some("2026.11.12".into()),
                 retry_not_before: None,
+                signed_at: Some(1_794_000_100),
+                previous_signed_at: Some(1_793_000_000),
             },
         )
     }
@@ -192,5 +203,7 @@ mod tests {
         let entry = loaded.entry(Tool::Ffmpeg);
         assert_eq!(entry.current.as_deref(), Some("8.1.3"));
         assert_eq!(entry.previous, None);
+        assert_eq!(entry.signed_at, None);
+        assert_eq!(entry.previous_signed_at, None);
     }
 }

@@ -30,8 +30,15 @@ pub enum ToolError {
         needed: u64,
         available: u64,
     },
-    #[error("{file} was removed or blocked right after it was saved; Windows Security may have quarantined it (see Protection history).")]
+    #[error("{}", quarantined_message(file, cfg!(windows)))]
     Quarantined { file: String },
+    /// The program says it is not the version it was published as.
+    #[error("{tool} {expected} reports itself as {reported:?}, so it was not installed.")]
+    VersionMismatch {
+        tool: Tool,
+        expected: String,
+        reported: String,
+    },
     #[error("{}", run_check_message(*tool, version, *code, kept.as_deref()))]
     RunCheckFailed {
         tool: Tool,
@@ -68,9 +75,30 @@ fn rate_limited_message(tool: Tool, until_unix: Option<u64>, installed: Option<&
     }
 }
 
+fn quarantined_message(file: &str, windows: bool) -> String {
+    if windows {
+        format!("{file} was removed or blocked right after it was saved; Windows Security may have quarantined it (see Protection history).")
+    } else {
+        format!("{file} was removed or blocked right after it was saved.")
+    }
+}
+
+/// An exit code as the system shows it: Windows reports 32-bit unsigned
+/// values (3221225781, not -1073741515).
+fn exit_code_text(code: i32, windows: bool) -> String {
+    if windows {
+        (code as u32).to_string()
+    } else {
+        code.to_string()
+    }
+}
+
 fn run_check_message(tool: Tool, version: &str, code: Option<i32>, kept: Option<&str>) -> String {
     let outcome = match code {
-        Some(code) => format!("didn't start (exit {code})"),
+        Some(code) => format!(
+            "didn't start (exit {})",
+            exit_code_text(code, cfg!(windows))
+        ),
         None => "didn't start".to_string(),
     };
     match kept {
@@ -87,6 +115,37 @@ fn clock_utc(unix: u64) -> String {
 }
 
 impl ToolError {
+    /// Not enough room, from what the disk check reported. `target` is the path
+    /// that was checked and `required` includes the safety margin; the message
+    /// names the drive or mount point and the space needed without the margin.
+    pub fn disk_full(tool: Tool, target: &str, required: u64, available: u64) -> Self {
+        ToolError::DiskFull {
+            tool,
+            target: crate::disk::volume_label(std::path::Path::new(target)),
+            needed: required.saturating_sub(crate::disk::SAFETY_MARGIN_BYTES),
+            available,
+        }
+    }
+
+    /// `file` was removed or blocked right after it was saved.
+    pub fn quarantined(file: &std::path::Path) -> Self {
+        ToolError::Quarantined {
+            file: file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file.display().to_string()),
+        }
+    }
+
+    /// What went wrong underneath, for the log and for the line shown after the
+    /// message in `rdm tools`; the message itself stays short.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            ToolError::Network { detail, .. } | ToolError::BadSignature { detail } => Some(detail),
+            _ => None,
+        }
+    }
+
     /// Trouble that may go away by itself, so a task should try again later.
     pub fn is_transient(&self) -> bool {
         matches!(self, ToolError::Network { .. })
@@ -165,6 +224,10 @@ mod tests {
             kept: Some("8.1.2".into()),
         };
         assert!(failed.to_string().ends_with("still using 8.1.2."));
+        assert_eq!(exit_code_text(-1073741515, true), "3221225781");
+        assert_eq!(exit_code_text(3, true), "3");
+        assert_eq!(exit_code_text(-1, false), "-1");
+        assert_eq!(exit_code_text(3, false), "3");
         assert!(failed.to_string().starts_with("ffmpeg 8.1.3 didn't start"));
 
         let full = ToolError::DiskFull {
@@ -177,6 +240,48 @@ mod tests {
             full.to_string(),
             "Not enough space on C: for ffmpeg (needs 210 MB, 80 MB free)."
         );
+    }
+
+    #[test]
+    fn the_quarantine_hint_is_only_for_windows() {
+        assert!(quarantined_message("yt-dlp.exe", true).contains("Windows Security"));
+        let elsewhere = quarantined_message("yt-dlp", false);
+        assert_eq!(
+            elsewhere,
+            "yt-dlp was removed or blocked right after it was saved."
+        );
+    }
+
+    #[test]
+    fn the_disk_message_names_the_drive_and_leaves_out_the_margin() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("tools/.staging/ffmpeg-8.1.3");
+        let required = 210_000_000 + crate::disk::SAFETY_MARGIN_BYTES;
+        let full = ToolError::disk_full(
+            Tool::Ffmpeg,
+            &target.display().to_string(),
+            required,
+            80_000_000,
+        );
+        let text = full.to_string();
+        assert!(text.starts_with("Not enough space on "), "{text}");
+        assert!(
+            text.ends_with(" for ffmpeg (needs 210 MB, 80 MB free)."),
+            "{text}"
+        );
+        assert!(!text.contains("staging"), "{text}");
+    }
+
+    #[test]
+    fn network_and_signature_errors_keep_their_detail_out_of_the_message() {
+        let net = ToolError::network(Tool::Deno, "connection reset");
+        assert_eq!(net.detail(), Some("connection reset"));
+        assert!(!net.to_string().contains("reset"));
+        let bad = ToolError::BadSignature {
+            detail: "the signature was not made by the pinned key".into(),
+        };
+        assert!(bad.detail().unwrap().contains("pinned key"));
+        assert_eq!(ToolError::Cancelled.detail(), None);
     }
 
     #[test]

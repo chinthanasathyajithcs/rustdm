@@ -1,26 +1,20 @@
 //! Putting one tool in place: download it with the engine into a staging
 //! folder, check its SHA-256, unpack it, make sure it starts, then rename the
-//! finished folder to `<root>/<tool>/<version>/`. Nothing in an existing
-//! version folder is ever overwritten, so a running tool never blocks this.
+//! finished folder to `<root>/<tool>/<version>/`. A folder that already holds
+//! that version is moved aside first and only deleted once the new one is in
+//! place, so a failed install never loses a version `tools.json` lists.
 
-use super::checksum::sha256_file;
 use super::extract::{self, Rules};
+use super::fetch::{fetch, hash_file, remove_download};
 use super::pins::{version_flag, Archive, Pin};
 use super::release::YtDlpRelease;
 use super::store_file::ToolsFile;
-use super::{FetchCtx, Tool, ToolError};
-use crate::engine::{self, DownloadRequest, Outcome, PauseReason};
-use crate::error::Error;
+use super::{version, FetchCtx, Tool, ToolError};
 use crate::ipc::protocol::ToolPhase;
-use crate::state;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How many connections a tool download opens.
-const DOWNLOAD_CONNECTIONS: u32 = 4;
-/// Times a download is resumed after GitHub's signed link expired.
-const MAX_LINK_RESUMES: u32 = 3;
 /// How long a tool may take to print its version.
 const RUN_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Tries at starting a file that was only just written (Linux says "text file busy").
@@ -29,11 +23,15 @@ const RUN_CHECK_SPAWN_RETRY_WAIT: Duration = Duration::from_millis(100);
 /// Windows Defender may hold a new folder for a moment while it scans.
 const RENAME_TRIES: u32 = 5;
 const RENAME_RETRY_WAIT: Duration = Duration::from_millis(200);
+/// The most of a tool's version output that is read.
+const VERSION_OUTPUT_CAP: usize = 256;
 /// `CREATE_NO_WINDOW`: do not flash a console window when running a tool.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub const STAGING_DIR: &str = ".staging";
+/// Staging folders named this plus an install's name hold a folder being replaced.
+const REPLACED_PREFIX: &str = "replaced-";
 
 /// Everything needed to install one version of one tool.
 #[derive(Clone, Debug)]
@@ -51,6 +49,12 @@ pub struct Plan {
     /// The folder holding the program, relative to the install folder.
     pub exe_dir: String,
     pub unpacked_bytes: u64,
+    /// What the program must print for its version flag (trimmed), or the
+    /// install is refused. Set for yt-dlp, whose version comes from an unsigned
+    /// release tag and so is checked against the program itself.
+    pub expected_output: Option<String>,
+    /// When yt-dlp's key signed this release's checksum list (unix seconds).
+    pub signed_at: Option<u64>,
 }
 
 /// What a finished install leaves behind.
@@ -59,6 +63,18 @@ pub struct Finished {
     pub version: String,
     /// SHA-256 of the program file.
     pub sha256: String,
+}
+
+/// What an install needs to know, lent for the length of the call.
+pub struct InstallCtx<'a> {
+    pub root: &'a Path,
+    pub client: &'a reqwest::Client,
+    pub plan: &'a Plan,
+    pub fetch: &'a FetchCtx,
+    /// The version still in use, for the message when the new one does not start.
+    pub kept: Option<&'a str>,
+    /// Told where the install is.
+    pub on_phase: &'a (dyn Fn(ToolPhase) + Send + Sync),
 }
 
 pub fn ytdlp_exe_name() -> &'static str {
@@ -83,6 +99,8 @@ impl Plan {
             exe: ytdlp_exe_name().to_string(),
             exe_dir: String::new(),
             unpacked_bytes: 0,
+            expected_output: Some(release.version.clone()),
+            signed_at: Some(release.signed_at),
         }
     }
 
@@ -102,6 +120,8 @@ impl Plan {
             exe: pin.exe.clone(),
             exe_dir: pin.exe_dir.clone(),
             unpacked_bytes: pin.unpacked_bytes,
+            expected_output: None,
+            signed_at: None,
         })
     }
 
@@ -117,142 +137,30 @@ pub fn version_dir(root: &Path, tool: Tool, version: &str) -> PathBuf {
     root.join(tool.name()).join(version)
 }
 
-/// Turn an engine failure into the tool error the user sees.
-fn engine_error(tool: Tool, err: Error) -> ToolError {
-    match err {
-        Error::Cancelled => ToolError::Cancelled,
-        Error::Http(e) => ToolError::network(tool, e),
-        Error::Protocol(detail) | Error::State(detail) => ToolError::network(tool, detail),
-        Error::FileChanged => ToolError::network(tool, "the file changed while downloading"),
-        Error::InsufficientDiskSpace {
-            target,
-            required,
-            available,
-        } => ToolError::DiskFull {
-            tool,
-            target,
-            needed: required,
-            available,
-        },
-        Error::Io(source) => ToolError::Io { tool, source },
-        Error::LinkExpired { status } => ToolError::Unusable(format!(
-            "GitHub refused the {tool} download (HTTP {status})"
-        )),
-        other => ToolError::Unusable(other.to_string()),
-    }
-}
-
-fn remove_download(target: &Path) {
-    let _ = std::fs::remove_file(target);
-    let _ = std::fs::remove_file(state::state_path(target));
-    let _ = std::fs::remove_file(state::part_path(target));
-}
-
-async fn hash_file(tool: Tool, path: PathBuf) -> Result<String, ToolError> {
-    tokio::task::spawn_blocking(move || sha256_file(&path))
-        .await
-        .map_err(|e| ToolError::Unusable(format!("hashing {tool} failed: {e}")))?
-        .map_err(|source| ToolError::Io { tool, source })
-}
-
-/// Download the plan's file into `staging`, resuming what an earlier try left.
-/// An already finished download with the right hash is reused as it is.
-async fn fetch(
-    client: &reqwest::Client,
-    plan: &Plan,
-    ctx: &FetchCtx,
-    staging: &Path,
-) -> Result<PathBuf, ToolError> {
-    let tool = plan.tool;
-    let target = staging.join(&plan.asset);
-    let state_path = state::state_path(&target);
-
-    if target.exists() {
-        if hash_file(tool, target.clone()).await? == plan.sha256 {
-            return Ok(target);
-        }
-        remove_download(&target);
-    }
-
-    let mut resumes = 0;
-    loop {
-        let outcome = if state_path.exists() {
-            engine::resume_with_options(
-                client,
-                &state_path,
-                None,
-                Some(ctx.progress.clone()),
-                ctx.cancel.clone(),
-            )
-            .await
-        } else {
-            // A part file with no state file cannot be continued.
-            let _ = std::fs::remove_file(state::part_path(&target));
-            engine::download(
-                client,
-                DownloadRequest {
-                    url: plan.url.clone(),
-                    template: "{downloads}/{name}".to_string(),
-                    file_name: Some(plan.asset.clone()),
-                    downloads_dir: staging.to_path_buf(),
-                    connections: DOWNLOAD_CONNECTIONS,
-                    progress: ctx.progress.clone(),
-                    cancel: ctx.cancel.clone(),
-                },
-            )
-            .await
-        };
-        match outcome.map_err(|e| engine_error(tool, e))? {
-            Outcome::Completed { path, .. } => return Ok(path),
-            Outcome::Paused {
-                reason: PauseReason::Cancelled,
-                ..
-            } => return Err(ToolError::Cancelled),
-            // The signed link behind github.com expired; asking again gets a new one.
-            Outcome::Paused {
-                reason: PauseReason::LinkExpired { status },
-                ..
-            } => {
-                resumes += 1;
-                if resumes > MAX_LINK_RESUMES {
-                    return Err(ToolError::network(
-                        tool,
-                        format!("the download link kept expiring (HTTP {status})"),
-                    ));
-                }
-            }
-        }
-    }
-}
-
-/// Start `exe` with the tool's version flag. It must exit 0 within 30 seconds.
-async fn run_check(
-    tool: Tool,
-    exe: &Path,
-    version: &str,
-    kept: Option<&str>,
-) -> Result<(), ToolError> {
+/// Start `exe` with the tool's version flag. It must exit 0 within 30 seconds,
+/// and when the plan says what it must print, print exactly that.
+async fn run_check(ctx: &InstallCtx<'_>, exe: &Path) -> Result<(), ToolError> {
+    let (plan, tool) = (ctx.plan, ctx.plan.tool);
     let failed = |code: Option<i32>| ToolError::RunCheckFailed {
         tool,
-        version: version.to_string(),
+        version: plan.version.clone(),
         code,
-        kept: kept.map(str::to_string),
+        kept: ctx.kept.map(str::to_string),
     };
-    let quarantined = || ToolError::Quarantined {
-        file: exe
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| tool.name().to_string()),
-    };
+    let wants_output = plan.expected_output.is_some();
 
     let mut tries = 0;
-    let mut child = loop {
+    let child = loop {
         tries += 1;
         let mut command = tokio::process::Command::new(exe);
         command
             .arg(version_flag(tool))
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(if wants_output {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
         #[cfg(windows)]
@@ -265,15 +173,34 @@ async fn run_check(
             {
                 tokio::time::sleep(RUN_CHECK_SPAWN_RETRY_WAIT).await;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(quarantined()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolError::quarantined(exe))
+            }
             Err(_) => return Err(failed(None)),
         }
     };
-    match tokio::time::timeout(RUN_CHECK_TIMEOUT, child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => Err(failed(status.code())),
+    match tokio::time::timeout(RUN_CHECK_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(output)) if output.status.success() => match &plan.expected_output {
+            Some(expected) => check_reported_version(tool, expected, &output.stdout),
+            None => Ok(()),
+        },
+        Ok(Ok(output)) => Err(failed(output.status.code())),
         Ok(Err(_)) | Err(_) => Err(failed(None)),
     }
+}
+
+/// The program must say it is `expected`, and nothing else.
+fn check_reported_version(tool: Tool, expected: &str, stdout: &[u8]) -> Result<(), ToolError> {
+    let shown = &stdout[..stdout.len().min(VERSION_OUTPUT_CAP)];
+    let reported = String::from_utf8_lossy(shown).trim().to_string();
+    if reported == expected && stdout.len() <= VERSION_OUTPUT_CAP {
+        return Ok(());
+    }
+    Err(ToolError::VersionMismatch {
+        tool,
+        expected: expected.to_string(),
+        reported,
+    })
 }
 
 async fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -296,10 +223,14 @@ async fn unpack(plan: &Plan, downloaded: &Path, out: &Path) -> Result<(), ToolEr
     let rules_wanted = plan.wanted.clone();
     match plan.archive {
         Archive::None => {
-            std::fs::create_dir_all(out).map_err(io)?;
+            tokio::fs::create_dir_all(out).await.map_err(io)?;
             let exe = out.join(&plan.exe);
-            std::fs::rename(downloaded, &exe).map_err(io)?;
-            extract::make_executable(&exe).map_err(io)
+            tokio::fs::rename(downloaded, &exe).await.map_err(io)?;
+            let for_mode = exe.clone();
+            tokio::task::spawn_blocking(move || extract::make_executable(&for_mode))
+                .await
+                .map_err(|e| ToolError::Unusable(format!("unpacking {tool} failed: {e}")))?
+                .map_err(io)
         }
         Archive::Zip => {
             let (downloaded, out) = (downloaded.to_path_buf(), out.to_path_buf());
@@ -334,119 +265,190 @@ async fn unpack(plan: &Plan, downloaded: &Path, out: &Path) -> Result<(), ToolEr
     }
 }
 
-/// Install `plan` under `root`. `kept` is the version still in use, for the
-/// message when the new one does not start. `on_phase` is told where we are.
+async fn remove_dir_quietly(dir: &Path) {
+    let _ = tokio::fs::remove_dir_all(dir).await;
+}
+
+/// Install `ctx.plan` under `ctx.root`.
 ///
 /// On success the new version's folder is in place and nothing else is touched;
 /// recording it in `tools.json` is the caller's job. On failure nothing is left
-/// under `root/<tool>/`; a download that can still be resumed (cancelled or cut
-/// off) stays in staging, and any other leftovers are removed.
-pub async fn install(
-    root: &Path,
-    client: &reqwest::Client,
-    plan: &Plan,
-    ctx: &FetchCtx,
-    kept: Option<&str>,
-    on_phase: &(dyn Fn(ToolPhase) + Send + Sync),
-) -> Result<Finished, ToolError> {
-    let tool = plan.tool;
-    let staging = root.join(STAGING_DIR).join(plan.staging_name());
+/// under `root/<tool>/` that was not there before; a download that can still be
+/// resumed (cancelled or cut off) stays in staging, and any other leftovers are
+/// removed.
+pub async fn install(ctx: &InstallCtx<'_>) -> Result<Finished, ToolError> {
+    let tool = ctx.plan.tool;
+    let staging = ctx.root.join(STAGING_DIR).join(ctx.plan.staging_name());
     let out = staging.join("out");
-    std::fs::create_dir_all(&staging).map_err(|source| ToolError::Io { tool, source })?;
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|source| ToolError::Io { tool, source })?;
 
-    let result = install_in(root, client, plan, ctx, kept, on_phase, &staging, &out).await;
+    let result = install_in(ctx, &staging, &out).await;
     match &result {
-        Ok(_) => {
-            let _ = std::fs::remove_dir_all(&staging);
-        }
+        Ok(_) => remove_dir_quietly(&staging).await,
         Err(err) => {
-            let _ = std::fs::remove_dir_all(&out);
+            remove_dir_quietly(&out).await;
             if !matches!(err, ToolError::Cancelled | ToolError::Network { .. }) {
-                let _ = std::fs::remove_dir_all(&staging);
+                remove_dir_quietly(&staging).await;
             }
         }
     }
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn install_in(
-    root: &Path,
-    client: &reqwest::Client,
-    plan: &Plan,
-    ctx: &FetchCtx,
-    kept: Option<&str>,
-    on_phase: &(dyn Fn(ToolPhase) + Send + Sync),
+    ctx: &InstallCtx<'_>,
     staging: &Path,
     out: &Path,
 ) -> Result<Finished, ToolError> {
-    let tool = plan.tool;
-    on_phase(ToolPhase::Downloading);
-    let downloaded = fetch(client, plan, ctx, staging).await?;
+    let (plan, tool) = (ctx.plan, ctx.plan.tool);
+    (ctx.on_phase)(ToolPhase::Downloading);
+    let downloaded = fetch(ctx, staging).await?;
 
-    on_phase(ToolPhase::Verifying);
+    (ctx.on_phase)(ToolPhase::Verifying);
     if hash_file(tool, downloaded.clone()).await? != plan.sha256 {
-        remove_download(&downloaded);
+        remove_download(&downloaded).await;
         return Err(ToolError::ChecksumMismatch {
             tool,
             version: plan.version.clone(),
         });
     }
 
-    on_phase(ToolPhase::Installing);
-    let _ = std::fs::remove_dir_all(out);
+    (ctx.on_phase)(ToolPhase::Installing);
+    remove_dir_quietly(out).await;
     unpack(plan, &downloaded, out).await?;
     let exe = out.join(&plan.exe);
-    if !exe.is_file() {
+    if !tokio::fs::metadata(&exe).await.is_ok_and(|m| m.is_file()) {
         return Err(ToolError::Unusable(format!(
             "the {tool} download doesn't contain {}",
             plan.exe
         )));
     }
-    run_check(tool, &exe, &plan.version, kept).await?;
+    run_check(ctx, &exe).await?;
     let sha256 = match plan.archive {
         Archive::None => plan.sha256.clone(),
         _ => hash_file(tool, exe.clone()).await?,
     };
-
-    let final_dir = version_dir(root, tool, &plan.version);
-    let io = |source| ToolError::Io { tool, source };
-    if final_dir.exists() {
-        // A damaged copy of this same version, being replaced.
-        std::fs::remove_dir_all(&final_dir).map_err(io)?;
-    }
-    std::fs::create_dir_all(root.join(tool.name())).map_err(io)?;
-    rename_with_retry(out, &final_dir).await.map_err(io)?;
-    if !final_dir.join(&plan.exe).is_file() {
-        let _ = std::fs::remove_dir_all(&final_dir);
-        return Err(ToolError::Quarantined {
-            file: Path::new(&plan.exe)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| plan.exe.clone()),
-        });
-    }
+    put_in_place(ctx, out).await?;
     Ok(Finished {
         version: plan.version.clone(),
         sha256,
     })
 }
 
+/// Rename `out` to the version's folder. An existing folder of that version (a
+/// damaged copy being replaced, or one `tools.json` still lists) is moved aside
+/// first and deleted only once the new one is in place; if that fails it is put
+/// back.
+async fn put_in_place(ctx: &InstallCtx<'_>, out: &Path) -> Result<(), ToolError> {
+    let (plan, tool) = (ctx.plan, ctx.plan.tool);
+    let io = |source| ToolError::Io { tool, source };
+    let final_dir = version_dir(ctx.root, tool, &plan.version);
+    let aside = ctx
+        .root
+        .join(STAGING_DIR)
+        .join(format!("{REPLACED_PREFIX}{}", plan.staging_name()));
+
+    let had_old = tokio::fs::try_exists(&final_dir).await.unwrap_or(false);
+    if had_old {
+        remove_dir_quietly(&aside).await;
+        rename_with_retry(&final_dir, &aside).await.map_err(io)?;
+    }
+    let placed = place(ctx, out, &final_dir).await;
+    match (&placed, had_old) {
+        (Ok(()), true) => remove_dir_quietly(&aside).await,
+        (Err(_), true) => {
+            remove_dir_quietly(&final_dir).await;
+            let _ = rename_with_retry(&aside, &final_dir).await;
+        }
+        _ => {}
+    }
+    placed
+}
+
+async fn place(ctx: &InstallCtx<'_>, out: &Path, final_dir: &Path) -> Result<(), ToolError> {
+    let (plan, tool) = (ctx.plan, ctx.plan.tool);
+    let io = |source| ToolError::Io { tool, source };
+    tokio::fs::create_dir_all(ctx.root.join(tool.name()))
+        .await
+        .map_err(io)?;
+    rename_with_retry(out, final_dir).await.map_err(io)?;
+    let program = final_dir.join(&plan.exe);
+    if !tokio::fs::metadata(&program)
+        .await
+        .is_ok_and(|m| m.is_file())
+    {
+        remove_dir_quietly(final_dir).await;
+        return Err(ToolError::quarantined(Path::new(&plan.exe)));
+    }
+    Ok(())
+}
+
+/// What `cleanup` must not touch beyond what `tools.json` lists.
+pub struct Keep<'a> {
+    /// Whether a staging name is an install in progress. Asked again for each
+    /// folder just before it would be removed, so an install that starts while
+    /// the clean-up runs is not caught.
+    pub is_active: &'a dyn Fn(&str) -> bool,
+    /// The build each pinned tool would install, whose half-finished download
+    /// is kept so a cancelled one can be resumed.
+    pub pinned: &'a HashMap<Tool, String>,
+}
+
 /// Best effort tidy-up, after each switch and at startup: remove version
 /// folders that are neither `current` nor `previous`, and staging folders that
-/// are not in `active` (names like `yt-dlp-2026.11.14`). A folder that cannot be
-/// removed (on Windows, a running program holds it) is left for next time.
-pub fn cleanup(root: &Path, file: &ToolsFile, active: &HashSet<String>) {
+/// are not in progress. Staging is kept for what could still be resumed: the
+/// pinned build of ffmpeg or deno, and the newest yt-dlp newer than the one
+/// installed. A folder that cannot be removed (on Windows, a running program
+/// holds it) is left for next time.
+pub fn cleanup(root: &Path, file: &ToolsFile, keep: &Keep<'_>) {
     for tool in Tool::ALL {
         let entry = file.entry(tool);
-        let keep = |name: &str| {
+        let listed = |name: &str| {
             entry.current.as_deref() == Some(name)
                 || entry.previous.as_deref() == Some(name)
-                || active.contains(&format!("{tool}-{name}"))
+                || (keep.is_active)(&format!("{tool}-{name}"))
         };
-        remove_unlisted(&root.join(tool.name()), keep);
+        remove_unlisted(&root.join(tool.name()), listed);
     }
-    remove_unlisted(&root.join(STAGING_DIR), |name| active.contains(name));
+    let staging = root.join(STAGING_DIR);
+    let ytdlp_current = file.entry(Tool::YtDlp).current;
+    let resumable_ytdlp = newest_ytdlp_staging(&staging, ytdlp_current.as_deref());
+    remove_unlisted(&staging, |name| {
+        let name = name.strip_prefix(REPLACED_PREFIX).unwrap_or(name);
+        (keep.is_active)(name)
+            || resumable_ytdlp.as_deref() == Some(name)
+            || keep
+                .pinned
+                .iter()
+                .any(|(tool, version)| name == format!("{tool}-{version}"))
+    });
+}
+
+/// The staging folder of the newest yt-dlp that is newer than `current`.
+fn newest_ytdlp_staging(staging: &Path, current: Option<&str>) -> Option<String> {
+    let prefix = format!("{}-", Tool::YtDlp);
+    let mut best: Option<(Vec<u64>, String)> = None;
+    for entry in std::fs::read_dir(staging).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(found) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some(parsed) = version::parse(found) else {
+            continue;
+        };
+        if current.is_some_and(|current| !version::is_newer(found, current)) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(top, _)| version::compare(&parsed, top).is_gt())
+        {
+            best = Some((parsed, name));
+        }
+    }
+    best.map(|(_, name)| name)
 }
 
 fn remove_unlisted(dir: &Path, keep: impl Fn(&str) -> bool) {
@@ -474,6 +476,7 @@ fn remove_unlisted(dir: &Path, keep: impl Fn(&str) -> bool) {
 mod tests {
     use super::*;
     use crate::tools::store_file::ToolEntry;
+    use std::collections::HashSet;
 
     fn make_dirs(root: &Path, names: &[&str]) {
         for name in names {
@@ -507,7 +510,14 @@ mod tests {
         );
         let active: HashSet<String> = ["yt-dlp-2026.11.15".to_string()].into();
 
-        cleanup(root, &file, &active);
+        cleanup(
+            root,
+            &file,
+            &Keep {
+                is_active: &|name| active.contains(name),
+                pinned: &HashMap::new(),
+            },
+        );
 
         assert!(root.join("yt-dlp/2026.11.14").exists());
         assert!(root.join("yt-dlp/2026.11.10").exists());
@@ -519,5 +529,133 @@ mod tests {
         );
         assert!(root.join(".staging/yt-dlp-2026.11.15").exists());
         assert!(!root.join(".staging/deno-2.9.8").exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_what_a_cancelled_download_could_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        make_dirs(
+            root,
+            &[
+                ".staging/yt-dlp-2026.11.14",
+                ".staging/yt-dlp-2026.11.15",
+                ".staging/yt-dlp-2026.11.16",
+                ".staging/yt-dlp-2026.11.10",
+                ".staging/deno-2.9.8",
+                ".staging/deno-2.9.7",
+                ".staging/ffmpeg-8.1.3",
+                ".staging/replaced-yt-dlp-2026.11.20",
+            ],
+        );
+        let file = ToolsFile::default().with_entry(
+            Tool::YtDlp,
+            ToolEntry {
+                current: Some("2026.11.14".into()),
+                ..ToolEntry::default()
+            },
+        );
+        let pinned: HashMap<Tool, String> = [(Tool::Deno, "2.9.8".to_string())].into();
+
+        cleanup(
+            root,
+            &file,
+            &Keep {
+                is_active: &|_| false,
+                pinned: &pinned,
+            },
+        );
+
+        let left = |name: &str| root.join(".staging").join(name).exists();
+        // Only the newest yt-dlp that is newer than the installed one stays.
+        assert!(left("yt-dlp-2026.11.16"));
+        assert!(!left("yt-dlp-2026.11.15"));
+        assert!(!left("yt-dlp-2026.11.14"), "already installed");
+        assert!(!left("yt-dlp-2026.11.10"));
+        // The pinned build stays; other versions and unpinned tools do not.
+        assert!(left("deno-2.9.8"));
+        assert!(!left("deno-2.9.7"));
+        assert!(!left("ffmpeg-8.1.3"));
+        assert!(!left("replaced-yt-dlp-2026.11.20"));
+    }
+
+    #[test]
+    fn a_program_must_print_exactly_the_version_it_is_installed_as() {
+        let ok = |out: &[u8]| check_reported_version(Tool::YtDlp, "2026.11.14.1", out);
+        assert!(ok(b"2026.11.14.1\n").is_ok());
+        assert!(ok(b"2026.11.14.1\r\n").is_ok());
+        for bad in [
+            &b"9999.12.31\n"[..],
+            b"",
+            b"2026.11.14.1 extra\n",
+            b"2026.11.14\n",
+            b"x\n2026.11.14.1\n",
+        ] {
+            assert!(
+                matches!(ok(bad), Err(ToolError::VersionMismatch { .. })),
+                "{bad:?}"
+            );
+        }
+        let flood = vec![b'1'; 10_000];
+        assert!(ok(&flood).is_err());
+    }
+
+    fn test_plan(version: &str) -> Plan {
+        Plan {
+            tool: Tool::Deno,
+            version: version.to_string(),
+            url: url::Url::parse("http://127.0.0.1:1/deno.zip").unwrap(),
+            asset: "deno.zip".into(),
+            sha256: String::new(),
+            archive: Archive::Zip,
+            strip_components: 0,
+            wanted: vec!["deno".into()],
+            exe: "deno".into(),
+            exe_dir: String::new(),
+            unpacked_bytes: 0,
+            expected_output: None,
+            signed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_listed_folder_is_replaced_only_when_the_new_one_is_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (client, fetch, plan) = (reqwest::Client::new(), FetchCtx::new(), test_plan("2.9.8"));
+        let ctx = InstallCtx {
+            root,
+            client: &client,
+            plan: &plan,
+            fetch: &fetch,
+            kept: None,
+            on_phase: &|_| {},
+        };
+        let listed = root.join("deno/2.9.8");
+        std::fs::create_dir_all(&listed).unwrap();
+        std::fs::write(listed.join("deno"), b"old").unwrap();
+
+        // The new folder is not there to be renamed: the old one comes back.
+        let missing = root.join(".staging/deno-2.9.8/out");
+        assert!(put_in_place(&ctx, &missing).await.is_err());
+        assert_eq!(std::fs::read(listed.join("deno")).unwrap(), b"old");
+
+        // With a good one, it takes over and the moved-aside copy is gone.
+        let out = root.join(".staging/deno-2.9.8/out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("deno"), b"new").unwrap();
+        put_in_place(&ctx, &out).await.unwrap();
+        assert_eq!(std::fs::read(listed.join("deno")).unwrap(), b"new");
+        assert!(!root.join(".staging/replaced-deno-2.9.8").exists());
+
+        // A folder that comes without the program is refused and the old one stays.
+        let empty = root.join(".staging/deno-2.9.8/out");
+        std::fs::create_dir_all(&empty).unwrap();
+        let refused = put_in_place(&ctx, &empty).await.unwrap_err();
+        assert!(
+            matches!(refused, ToolError::Quarantined { .. }),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(listed.join("deno")).unwrap(), b"new");
     }
 }

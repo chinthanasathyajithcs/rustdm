@@ -22,7 +22,7 @@
 use super::checksum::to_hex;
 use ring::digest::{self, SHA1_FOR_LEGACY_USE_ONLY};
 use ring::signature::{
-    RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA512,
+    RsaParameters, RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256, RSA_PKCS1_2048_8192_SHA512,
 };
 
 const TAG_SIGNATURE: u8 = 2;
@@ -150,6 +150,71 @@ pub fn verify_detached_any(
     data: &[u8],
     signature: &[u8],
 ) -> Result<Verified, SignatureError> {
+    let parsed = parse_signature(signature)?;
+    let hashed = check_hashed_area(parsed.hashed_area)?;
+    let key = keys
+        .iter()
+        .find(|key| key.fingerprint == hashed.issuer)
+        .ok_or(SignatureError::WrongSigner)?;
+
+    // The signed message: the data, then the signature's own header fields
+    // (version through the hashed area), then 04 FF and that header's length.
+    let header = &parsed.body[..6 + parsed.hashed_area.len()];
+    let mut message = Vec::with_capacity(data.len() + header.len() + 6);
+    message.extend_from_slice(data);
+    message.extend_from_slice(header);
+    message.extend_from_slice(&[VERSION_4, 0xFF]);
+    message.extend_from_slice(
+        &u32::try_from(header.len())
+            .unwrap_or(u32::MAX)
+            .to_be_bytes(),
+    );
+
+    // The two stored hash bytes are a quick check; a mismatch means a damaged file.
+    if digest::digest(parsed.hash.digest, &message).as_ref()[..2] != parsed.digest_start {
+        return Err(SignatureError::BadSignature);
+    }
+
+    // ring wants the signature as long as the modulus; an MPI drops leading zeros.
+    if parsed.value.len() > key.n.len() {
+        return Err(SignatureError::BadSignature);
+    }
+    let mut padded = vec![0u8; key.n.len() - parsed.value.len()];
+    padded.extend_from_slice(parsed.value);
+
+    let components = RsaPublicKeyComponents {
+        n: key.n.as_slice(),
+        e: key.e.as_slice(),
+    };
+    components
+        .verify(parsed.hash.rsa, &message, &padded)
+        .map_err(|_| SignatureError::BadSignature)?;
+    Ok(Verified {
+        created_unix: u64::from(hashed.created),
+    })
+}
+
+/// The hash a signature uses, as `ring` wants it for hashing and for RSA.
+struct SignatureHash {
+    digest: &'static digest::Algorithm,
+    rsa: &'static RsaParameters,
+}
+
+/// A signature packet split into the parts the check uses.
+struct ParsedSignature<'a> {
+    /// The packet body: version, class, algorithms, hashed area, and the rest.
+    body: &'a [u8],
+    hash: SignatureHash,
+    hashed_area: &'a [u8],
+    digest_start: [u8; 2],
+    /// The RSA signature as an OpenPGP integer, without leading zeros.
+    value: &'a [u8],
+}
+
+/// Read the one signature packet in `signature`, refusing anything but a
+/// version 4, binary-document, RSA signature with SHA-256 or SHA-512, and
+/// nothing after it.
+fn parse_signature(signature: &[u8]) -> Result<ParsedSignature<'_>, SignatureError> {
     let (tag, body, rest) = read_packet(signature)?;
     if tag != TAG_SIGNATURE {
         return Err(SignatureError::Malformed("not a signature packet"));
@@ -168,61 +233,34 @@ pub fn verify_detached_any(
     if reader.u8()? != ALGO_RSA {
         return Err(SignatureError::Unsupported("signature algorithm"));
     }
-    let hash_algo = reader.u8()?;
-    let rsa_params = match hash_algo {
-        HASH_SHA256 => &RSA_PKCS1_2048_8192_SHA256,
-        HASH_SHA512 => &RSA_PKCS1_2048_8192_SHA512,
+    let hash = match reader.u8()? {
+        HASH_SHA256 => SignatureHash {
+            digest: &digest::SHA256,
+            rsa: &RSA_PKCS1_2048_8192_SHA256,
+        },
+        HASH_SHA512 => SignatureHash {
+            digest: &digest::SHA512,
+            rsa: &RSA_PKCS1_2048_8192_SHA512,
+        },
         _ => return Err(SignatureError::Unsupported("hash algorithm")),
     };
     let hashed_len = usize::from(reader.u16()?);
     let hashed_area = reader.take(hashed_len)?;
-    let hashed = check_hashed_area(hashed_area)?;
-    let key = keys
-        .iter()
-        .find(|key| key.fingerprint == hashed.issuer)
-        .ok_or(SignatureError::WrongSigner)?;
     // The unhashed area is not covered by the signature, so nothing in it is trusted.
     let unhashed_len = usize::from(reader.u16()?);
     reader.take(unhashed_len)?;
-    let digest_start = reader.take(2)?.to_vec();
-    let signature_value = reader.mpi()?;
+    let digest_start = match reader.take(2)? {
+        &[a, b] => [a, b],
+        _ => return Err(SignatureError::Malformed("truncated")),
+    };
+    let value = reader.mpi()?;
     reader.finish()?;
-
-    // The signed message: the data, then the signature's own header fields
-    // (version through the hashed area), then 04 FF and that header's length.
-    let header_len = 6 + hashed_len;
-    let mut message = Vec::with_capacity(data.len() + header_len + 6);
-    message.extend_from_slice(data);
-    message.extend_from_slice(&body[..header_len]);
-    message.extend_from_slice(&[VERSION_4, 0xFF]);
-    message.extend_from_slice(&u32::try_from(header_len).unwrap_or(u32::MAX).to_be_bytes());
-
-    // The two stored hash bytes are a quick check; a mismatch means a damaged file.
-    let hash_alg = if hash_algo == HASH_SHA256 {
-        &digest::SHA256
-    } else {
-        &digest::SHA512
-    };
-    if digest::digest(hash_alg, &message).as_ref()[..2] != digest_start[..] {
-        return Err(SignatureError::BadSignature);
-    }
-
-    // ring wants the signature as long as the modulus; an MPI drops leading zeros.
-    if signature_value.len() > key.n.len() {
-        return Err(SignatureError::BadSignature);
-    }
-    let mut padded = vec![0u8; key.n.len() - signature_value.len()];
-    padded.extend_from_slice(signature_value);
-
-    let components = RsaPublicKeyComponents {
-        n: key.n.as_slice(),
-        e: key.e.as_slice(),
-    };
-    components
-        .verify(rsa_params, &message, &padded)
-        .map_err(|_| SignatureError::BadSignature)?;
-    Ok(Verified {
-        created_unix: u64::from(hashed.created),
+    Ok(ParsedSignature {
+        body,
+        hash,
+        hashed_area,
+        digest_start,
+        value,
     })
 }
 

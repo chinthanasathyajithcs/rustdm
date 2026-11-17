@@ -8,8 +8,8 @@ use rustdm::ipc::client::DaemonClient;
 use rustdm::ipc::protocol::ToolName;
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::testing::fake_releases::*;
-use rustdm::testing::TestServer;
-use rustdm::tools::cli::{run, ToolsCommand};
+use rustdm::testing::{Route, TestServer};
+use rustdm::tools::cli::{run, ToolsCommand, Wait};
 use rustdm::tools::ToolStore;
 use std::path::Path;
 use std::process::Output;
@@ -20,7 +20,10 @@ use std::time::Duration;
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const V1: &str = "2026.11.10.100000";
 const V2: &str = "2026.11.14.200000";
-const POLL: Duration = Duration::from_millis(20);
+const WAIT: Wait = Wait {
+    poll: Duration::from_millis(20),
+    limit: Duration::from_secs(60),
+};
 
 fn endpoint(dir: &Path, name: &str) -> IpcEndpoint {
     let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -110,7 +113,7 @@ async fn run_to_string(
     command: ToolsCommand,
 ) -> (Result<(), String>, String) {
     let mut out = Vec::new();
-    let result = run(client, command, &mut out, POLL)
+    let result = run(client, command, &mut out, WAIT)
         .await
         .map_err(|e| e.to_string());
     (result, String::from_utf8(out).unwrap())
@@ -177,4 +180,50 @@ async fn status_prints_the_table() {
     let (result, text) = run_to_string(&mut setup.client, ToolsCommand::Status).await;
     assert_eq!(result, Ok(()));
     assert_eq!(text.lines().count(), 4, "{text}");
+}
+
+#[tokio::test]
+async fn update_shows_what_went_wrong_underneath_in_parentheses() {
+    let mut setup = setup().await;
+    setup.releases.set_route(LATEST_PATH, Route::status(502));
+
+    let (result, text) = run_to_string(
+        &mut setup.client,
+        ToolsCommand::Update(Some(ToolName::YtDlp)),
+    )
+    .await;
+
+    assert_eq!(result, Err("could not update yt-dlp".to_string()));
+    assert!(
+        text.contains("Couldn't reach github.com to get yt-dlp; will retry. (HTTP 502"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn update_stops_waiting_after_its_time_limit() {
+    let mut setup = setup().await;
+    let mut program = fake_program(V1);
+    program.extend(std::iter::repeat_n(b'#', 300_000));
+    publish_ytdlp(&setup.releases, V1, &program);
+    let asset = format!("/{TEST_REPO}/releases/download/{V1}/{TEST_ASSET}");
+    setup
+        .releases
+        .set_route(&asset, Route::ok(program).throttled(100_000));
+    let wait = Wait {
+        poll: Duration::from_millis(10),
+        limit: Duration::from_millis(200),
+    };
+
+    let mut out = Vec::new();
+    let result = run(
+        &mut setup.client,
+        ToolsCommand::Update(Some(ToolName::YtDlp)),
+        &mut out,
+        wait,
+    )
+    .await;
+
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("gave up waiting"), "{message}");
 }

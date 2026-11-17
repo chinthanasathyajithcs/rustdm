@@ -9,8 +9,20 @@ use std::error::Error;
 use std::io::Write;
 use std::time::Duration;
 
-/// How often `rdm tools update` asks how far the daemon has got.
-pub const UPDATE_POLL_INTERVAL: Duration = Duration::from_millis(400);
+/// How `rdm tools update` waits for the daemon to finish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wait {
+    /// How often to ask how far the daemon has got.
+    pub poll: Duration,
+    /// How long to wait in all before giving up (the update carries on in the daemon).
+    pub limit: Duration,
+}
+
+/// What the command line uses: ask every 400 ms, give up after 30 minutes.
+pub const UPDATE_WAIT: Wait = Wait {
+    poll: Duration::from_millis(400),
+    limit: Duration::from_secs(30 * 60),
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolsCommand {
@@ -28,7 +40,7 @@ pub async fn run(
     client: &mut DaemonClient,
     command: ToolsCommand,
     out: &mut dyn Write,
-    poll: Duration,
+    wait: Wait,
 ) -> CliResult {
     match command {
         ToolsCommand::Status => {
@@ -52,17 +64,17 @@ pub async fn run(
             )?;
             Ok(())
         }
-        ToolsCommand::Update(tool) => update(client, tool, out, poll).await,
+        ToolsCommand::Update(tool) => update(client, tool, out, wait).await,
     }
 }
 
 /// Start the update, then wait for it, printing each new step. Fails when a
-/// tool that was asked for ends with a problem.
+/// tool that was asked for ends with a problem, or the wait runs out.
 async fn update(
     client: &mut DaemonClient,
     tool: Option<ToolName>,
     out: &mut dyn Write,
-    poll: Duration,
+    wait: Wait,
 ) -> CliResult {
     let started = client.tools_update(tool).await?;
     let targets: Vec<ToolName> = match tool {
@@ -81,24 +93,7 @@ async fn update(
         return Ok(());
     }
 
-    let mut last_line = String::new();
-    let status = loop {
-        let status = client.tools_status().await?;
-        let working: Vec<&ToolInfo> = status
-            .iter()
-            .filter(|i| targets.contains(&i.tool) && i.phase != ToolPhase::Idle)
-            .collect();
-        let Some(first) = working.first() else {
-            break status;
-        };
-        let line = state_text(first);
-        if line != last_line {
-            writeln!(out, "{line}")?;
-            last_line = line;
-        }
-        tokio::time::sleep(poll).await;
-    };
-
+    let status = wait_until_idle(client, &targets, out, wait).await?;
     writeln!(out, "{}", table(&status, now_unix()))?;
     let failed: Vec<&str> = status
         .iter()
@@ -109,5 +104,37 @@ async fn update(
         Ok(())
     } else {
         Err(format!("could not update {}", failed.join(", ")).into())
+    }
+}
+
+/// Poll until none of `targets` is busy, printing each new line of progress.
+async fn wait_until_idle(
+    client: &mut DaemonClient,
+    targets: &[ToolName],
+    out: &mut dyn Write,
+    wait: Wait,
+) -> Result<Vec<ToolInfo>, Box<dyn Error + Send + Sync>> {
+    let started = tokio::time::Instant::now();
+    let mut last_line = String::new();
+    loop {
+        let status = client.tools_status().await?;
+        let working: Vec<&ToolInfo> = status
+            .iter()
+            .filter(|i| targets.contains(&i.tool) && i.phase != ToolPhase::Idle)
+            .collect();
+        let Some(first) = working.first() else {
+            return Ok(status);
+        };
+        let line = state_text(first);
+        if line != last_line {
+            writeln!(out, "{line}")?;
+            last_line = line;
+        }
+        if started.elapsed() >= wait.limit {
+            return Err(
+                "gave up waiting for the update; it may still be running (see `rdm tools`)".into(),
+            );
+        }
+        tokio::time::sleep(wait.poll).await;
     }
 }

@@ -586,6 +586,7 @@ mod tests {
                 downloaded_bytes: 0,
                 total_bytes: None,
                 error: None,
+                detail: None,
             },
             ToolInfo {
                 tool: ToolName::Ffmpeg,
@@ -593,9 +594,10 @@ mod tests {
                 previous: None,
                 last_checked_unix: None,
                 phase: ToolPhase::Downloading,
-                downloaded_bytes: 12 * 1024 * 1024,
-                total_bytes: Some(24 * 1024 * 1024),
+                downloaded_bytes: 12_000_000,
+                total_bytes: Some(24_000_000),
                 error: None,
+                detail: None,
             },
             ToolInfo {
                 tool: ToolName::Deno,
@@ -606,6 +608,7 @@ mod tests {
                 downloaded_bytes: 0,
                 total_bytes: None,
                 error: Some("checksum mismatch".into()),
+                detail: None,
             },
         ];
 
@@ -624,7 +627,7 @@ mod tests {
             "shows yt-dlp previous version: {text}"
         );
         assert!(
-            text.contains("Getting ffmpeg: 12/24 MiB"),
+            text.contains("Getting ffmpeg: 12/24 MB"),
             "shows ffmpeg downloading: {text}"
         );
         assert!(

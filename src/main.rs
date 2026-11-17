@@ -12,7 +12,7 @@ use rustdm::ipc::protocol::{
     SetDefaultsParams, SetLimitsParams, ToolName,
 };
 use rustdm::ipc::transport::IpcEndpoint;
-use rustdm::tools::cli::{run as run_tools, ToolsCommand, UPDATE_POLL_INTERVAL};
+use rustdm::tools::cli::{run as run_tools, ToolsCommand, UPDATE_WAIT};
 use rustdm::tui::format::{
     format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
 };
@@ -319,13 +319,7 @@ async fn run(cli: Cli) -> CliResult {
                 Some(ToolsAction::Rollback { tool }) => ToolsCommand::Rollback(tool.into()),
             };
             let mut client = start_daemon(&endpoint).await?;
-            run_tools(
-                &mut client,
-                command,
-                &mut std::io::stdout(),
-                UPDATE_POLL_INTERVAL,
-            )
-            .await
+            run_tools(&mut client, command, &mut std::io::stdout(), UPDATE_WAIT).await
         }
         Commands::Tui { plain } => tui(&endpoint, plain).await,
         Commands::Daemon { action } => match action {

@@ -76,11 +76,30 @@ pub fn unpack_zip(tool: Tool, archive: &Path, dest: &Path, rules: &Rules) -> Res
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| ToolError::Unusable(format!("the {tool} download is not a valid zip: {e}")))?;
 
+    let wanted = wanted_entries(tool, &mut zip, dest, rules)?;
+    let needed: u64 = wanted.iter().map(|w| w.size).sum();
+    crate::disk::ensure_disk_space(dest, needed, crate::disk::SAFETY_MARGIN_BYTES)
+        .map_err(|e| disk_error(tool, e))?;
+    for item in &wanted {
+        write_entry(tool, &mut zip, item)?;
+    }
+    Ok(())
+}
+
+fn damaged(tool: Tool, e: zip::result::ZipError) -> ToolError {
+    ToolError::Unusable(format!("the {tool} zip is damaged: {e}"))
+}
+
+/// The entries to keep, after checking every entry's name.
+fn wanted_entries(
+    tool: Tool,
+    zip: &mut zip::ZipArchive<File>,
+    dest: &Path,
+    rules: &Rules,
+) -> Result<Vec<Wanted>, ToolError> {
     let mut wanted = Vec::new();
     for index in 0..zip.len() {
-        let entry = zip
-            .by_index(index)
-            .map_err(|e| ToolError::Unusable(format!("the {tool} zip is damaged: {e}")))?;
+        let entry = zip.by_index(index).map_err(|e| damaged(tool, e))?;
         let Some(safe) = entry.enclosed_name() else {
             return Err(unsafe_entry(
                 tool,
@@ -109,30 +128,29 @@ pub fn unpack_zip(tool: Tool, archive: &Path, dest: &Path, rules: &Rules) -> Res
             unix_mode: entry.unix_mode(),
         });
     }
+    Ok(wanted)
+}
 
-    let needed: u64 = wanted.iter().map(|w| w.size).sum();
-    crate::disk::ensure_disk_space(dest, needed, crate::disk::SAFETY_MARGIN_BYTES)
-        .map_err(|e| disk_error(tool, e))?;
-
-    for item in &wanted {
-        if let Some(parent) = item.target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io_error(tool, e))?;
-        }
-        let mut entry = zip
-            .by_index(item.index)
-            .map_err(|e| ToolError::Unusable(format!("the {tool} zip is damaged: {e}")))?;
-        let mut out = File::create(&item.target).map_err(|e| io_error(tool, e))?;
-        // Never write more than the entry says it holds.
-        let copied =
-            io::copy(&mut (&mut entry).take(item.size), &mut out).map_err(|e| io_error(tool, e))?;
-        if copied != item.size {
-            return Err(ToolError::Unusable(format!(
-                "the {tool} zip is damaged: an entry ended early"
-            )));
-        }
-        drop(out);
-        make_executable_if_needed(&item.target, item.unix_mode);
+fn write_entry(
+    tool: Tool,
+    zip: &mut zip::ZipArchive<File>,
+    item: &Wanted,
+) -> Result<(), ToolError> {
+    if let Some(parent) = item.target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io_error(tool, e))?;
     }
+    let mut entry = zip.by_index(item.index).map_err(|e| damaged(tool, e))?;
+    let mut out = File::create(&item.target).map_err(|e| io_error(tool, e))?;
+    // Never write more than the entry says it holds.
+    let copied =
+        io::copy(&mut (&mut entry).take(item.size), &mut out).map_err(|e| io_error(tool, e))?;
+    if copied != item.size {
+        return Err(ToolError::Unusable(format!(
+            "the {tool} zip is damaged: an entry ended early"
+        )));
+    }
+    drop(out);
+    make_executable_if_needed(&item.target, item.unix_mode);
     Ok(())
 }
 
@@ -166,30 +184,14 @@ fn disk_error(tool: Tool, err: Error) -> ToolError {
             target,
             required,
             available,
-        } => ToolError::DiskFull {
-            tool,
-            target,
-            needed: required,
-            available,
-        },
+        } => ToolError::disk_full(tool, &target, required, available),
         Error::Io(source) => ToolError::Io { tool, source },
         other => ToolError::Unusable(other.to_string()),
     }
 }
 
-/// Unpack a `.tar.xz` with the system `tar`, keeping only entries that match
-/// `rules`. `unpacked_bytes` is the expected size, for the free-space check.
-pub async fn unpack_tar_xz(
-    tool: Tool,
-    archive: &Path,
-    dest: &Path,
-    rules: &Rules<'_>,
-    unpacked_bytes: u64,
-) -> Result<(), ToolError> {
-    crate::disk::ensure_disk_space(dest, unpacked_bytes, crate::disk::SAFETY_MARGIN_BYTES)
-        .map_err(|e| disk_error(tool, e))?;
-    std::fs::create_dir_all(dest).map_err(|e| io_error(tool, e))?;
-
+/// The `tar` command that unpacks `archive` into `dest`, keeping what `rules` want.
+fn tar_command(archive: &Path, dest: &Path, rules: &Rules<'_>) -> tokio::process::Command {
     // tar matches member names before stripping, so each pattern gets a `*/`
     // for every folder that will be stripped.
     let prefix = "*/".repeat(rules.strip_components);
@@ -207,6 +209,28 @@ pub async fn unpack_tar_xz(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
+    command
+}
+
+/// Unpack a `.tar.xz` with the system `tar`, keeping only entries that match
+/// `rules`. `unpacked_bytes` is the expected size, for the free-space check.
+pub async fn unpack_tar_xz(
+    tool: Tool,
+    archive: &Path,
+    dest: &Path,
+    rules: &Rules<'_>,
+    unpacked_bytes: u64,
+) -> Result<(), ToolError> {
+    let room_for = dest.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::disk::ensure_disk_space(&room_for, unpacked_bytes, crate::disk::SAFETY_MARGIN_BYTES)
+            .map_err(|e| disk_error(tool, e))?;
+        std::fs::create_dir_all(&room_for).map_err(|e| io_error(tool, e))
+    })
+    .await
+    .map_err(|e| ToolError::Unusable(format!("unpacking {tool} failed: {e}")))??;
+
+    let mut command = tar_command(archive, dest, rules);
     let child = command.spawn().map_err(|e| {
         ToolError::Unusable(format!(
             "could not run `tar` to unpack {tool} ({e}); install tar and try again."

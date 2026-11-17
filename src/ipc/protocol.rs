@@ -632,6 +632,9 @@ pub struct ToolInfo {
     pub total_bytes: Option<u64>,
     /// Why the last attempt failed, in words fit to show the user.
     pub error: Option<String>,
+    /// What went wrong underneath `error`, for the command line to show after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// `tools.update`: check one tool (installing it if missing), or every installed tool.
@@ -1025,6 +1028,7 @@ mod tests {
             downloaded_bytes: 0,
             total_bytes: None,
             error: None,
+            detail: Some("dns error".into()),
         };
         let back: ToolInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(back, info);

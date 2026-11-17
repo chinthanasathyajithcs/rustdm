@@ -85,6 +85,42 @@ fn os_available_space(_existing_path: &Path) -> io::Result<u64> {
     compile_error!("unsupported target platform");
 }
 
+/// The drive or mount point that holds `path`, for messages ("C:", "/mnt/data").
+/// A path that does not exist yet is looked up through its nearest existing parent.
+#[cfg(windows)]
+pub fn volume_label(path: &Path) -> String {
+    use std::path::{Component, Prefix};
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                format!("{}:", char::from(letter))
+            }
+            _ => prefix.as_os_str().to_string_lossy().into_owned(),
+        },
+        _ => path.display().to_string(),
+    }
+}
+
+#[cfg(unix)]
+pub fn volume_label(path: &Path) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(start) = find_existing_ancestor(path) else {
+        return path.display().to_string();
+    };
+    let Ok(device) = start.metadata().map(|m| m.dev()) else {
+        return start.display().to_string();
+    };
+    // The topmost folder still on the same device is the mount point.
+    let mut top = start;
+    for parent in start.ancestors().skip(1) {
+        match parent.metadata() {
+            Ok(meta) if meta.dev() == device => top = parent,
+            _ => break,
+        }
+    }
+    top.display().to_string()
+}
+
 /// Returns the free bytes available to an unprivileged caller at the target path or its nearest existing ancestor.
 pub fn available_space(path: &Path) -> io::Result<u64> {
     let existing = find_existing_ancestor(path)?;
@@ -113,6 +149,17 @@ pub fn ensure_disk_space(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_volume_label_is_a_folder_above_the_path_on_the_same_device() {
+        let dir = tempdir().unwrap();
+        let deep = dir.path().join("a/b/c");
+        let label = volume_label(&deep);
+        assert!(deep.starts_with(&label), "{label}");
+        assert!(Path::new(&label).is_dir());
+        assert!(!label.contains("a/b"), "{label}");
+    }
 
     #[test]
     fn available_space_reports_non_zero_for_tempdir() {

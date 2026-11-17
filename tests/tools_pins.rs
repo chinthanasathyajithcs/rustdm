@@ -89,3 +89,35 @@ async fn pins_still_resolve() {
     let key = PinnedKey::load(YTDLP_KEY, &parse_fingerprint(YTDLP_FINGERPRINT).unwrap()).unwrap();
     verify_detached(&key, &sums, &sig).expect("latest yt-dlp release verifies");
 }
+
+/// The whole yt-dlp path against the real nightly: the signature, the strict
+/// checksum list, the minimum version, and the program printing exactly its tag.
+#[tokio::test]
+#[ignore = "touches github.com and downloads yt-dlp; run by hand before a release"]
+async fn the_latest_ytdlp_installs_and_reports_its_tag() {
+    use rustdm::tools::{FetchCtx, Freshness, ToolStore};
+    if rustdm::tools::pins::Platform::current().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let client = reqwest::Client::builder()
+        .user_agent("rustdm-pin-check")
+        .build()
+        .unwrap();
+    let store = ToolStore::open(dir.path().join("tools"), client).unwrap();
+
+    let installed = store
+        .ensure(Tool::YtDlp, Freshness::CheckNow, FetchCtx::new())
+        .await
+        .expect("the latest yt-dlp installs");
+
+    assert!(
+        rustdm::tools::version::parse(&installed.version).is_some(),
+        "{}",
+        installed.version
+    );
+    assert!(!rustdm::tools::version::is_newer(
+        rustdm::tools::pins::YTDLP_MIN_VERSION,
+        &installed.version
+    ));
+}

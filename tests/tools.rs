@@ -2,8 +2,9 @@
 //! touches the internet.
 
 use rustdm::engine::build_client;
+use rustdm::ipc::protocol::ToolPhase;
 use rustdm::testing::fake_releases::*;
-use rustdm::testing::{RequestLog, Route, TestServer};
+use rustdm::testing::{Mode, RequestLog, Route, TestServer};
 use rustdm::tools::checksum::sha256_hex;
 use rustdm::tools::pins::{Archive, Pin};
 use rustdm::tools::{FetchCtx, Freshness, Tool, ToolError, ToolStore};
@@ -193,6 +194,181 @@ async fn an_update_keeps_the_previous_version_and_rollback_goes_back() {
     assert_eq!(version_folders(&world.root(), "yt-dlp"), vec![V1, V3]);
 }
 
+async fn wait_until_idle(store: &ToolStore, tool: Tool) {
+    let started = std::time::Instant::now();
+    while info(store, tool).phase != ToolPhase::Idle {
+        assert!(started.elapsed() < Duration::from_secs(30), "still busy");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_user_can_update_to_a_version_they_rolled_back_from() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let store = world.store();
+    ensure_now(&store, Tool::YtDlp).await.unwrap();
+    publish_ytdlp(&world.server, V2, &fake_program(V2));
+    ensure_now(&store, Tool::YtDlp).await.unwrap();
+    store.rollback(Tool::YtDlp).unwrap();
+    assert_eq!(world.tools_json()["tools"]["yt-dlp"]["skip_version"], V2);
+    assert_eq!(ensure_now(&store, Tool::YtDlp).await.unwrap().version, V1);
+
+    store.start_update(Some(Tool::YtDlp));
+    wait_until_idle(&store, Tool::YtDlp).await;
+
+    let shown = info(&store, Tool::YtDlp);
+    assert_eq!(shown.installed.as_deref(), Some(V2));
+    assert_eq!(shown.previous.as_deref(), Some(V1));
+    assert_eq!(shown.error, None);
+    assert!(world.tools_json()["tools"]["yt-dlp"]
+        .get("skip_version")
+        .is_none());
+}
+
+#[tokio::test]
+async fn a_release_that_reports_another_version_than_its_tag_is_refused() {
+    // An old, genuinely signed release published under a future tag.
+    let world = World::new().await;
+    publish_ytdlp(&world.server, "9999.12.31", &fake_program(V1));
+    let store = world.store();
+
+    let err = ensure_now(&store, Tool::YtDlp).await.unwrap_err();
+
+    assert!(matches!(err, ToolError::VersionMismatch { .. }), "{err}");
+    assert!(!err.is_transient());
+    assert!(version_folders(&world.root(), "yt-dlp").is_empty());
+    // It does not block the real release that comes after it.
+    publish_ytdlp(&world.server, V2, &fake_program(V2));
+    assert_eq!(ensure_now(&store, Tool::YtDlp).await.unwrap().version, V2);
+
+    // With a copy installed, the copy stays and the reason shows.
+    publish_ytdlp(&world.server, "9999.12.31", &fake_program(V1));
+    let kept = ensure_now(&store, Tool::YtDlp).await.unwrap();
+    assert_eq!(kept.version, V2);
+    let note = info(&store, Tool::YtDlp).error.unwrap();
+    assert!(note.contains("reports itself as"), "{note}");
+    assert_eq!(world.tools_json()["tools"]["yt-dlp"]["current"], V2);
+}
+
+#[tokio::test]
+async fn a_release_older_than_the_floor_is_never_installed() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let mut sources = test_sources(&world.server);
+    sources.ytdlp_min_version = "2026.11.12".to_string();
+    let store = ToolStore::with_sources(world.root(), build_client(), sources).unwrap();
+
+    let err = ensure_now(&store, Tool::YtDlp).await.unwrap_err();
+
+    assert!(
+        err.to_string().contains("older than the oldest version"),
+        "{err}"
+    );
+    assert!(version_folders(&world.root(), "yt-dlp").is_empty());
+}
+
+#[tokio::test]
+async fn an_update_signed_no_later_than_the_installed_one_is_refused() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let store = world.store();
+    ensure_now(&store, Tool::YtDlp).await.unwrap();
+    let signed = world.tools_json()["tools"]["yt-dlp"]["signed_at"]
+        .as_u64()
+        .expect("the signing time is stored");
+
+    // A newer-looking release whose signature is older than the installed one's.
+    publish_ytdlp_with(
+        &world.server,
+        ReleaseSpec {
+            version: V2.to_string(),
+            asset: fake_program(V2),
+            listed_sha256: None,
+            tamper_after_signing: false,
+            signed_at: Some(signed as u32),
+        },
+    );
+    let kept = ensure_now(&store, Tool::YtDlp).await.unwrap();
+    assert_eq!(kept.version, V1);
+    let note = info(&store, Tool::YtDlp).error.unwrap();
+    assert!(note.contains("signed no later than"), "{note}");
+
+    // A file from before the time was recorded accepts any signature time.
+    let mut json = world.tools_json();
+    json["tools"]["yt-dlp"]
+        .as_object_mut()
+        .unwrap()
+        .remove("signed_at");
+    std::fs::write(world.root().join("tools.json"), json.to_string()).unwrap();
+    let store = world.store();
+    assert_eq!(ensure_now(&store, Tool::YtDlp).await.unwrap().version, V2);
+    assert_eq!(world.tools_json()["tools"]["yt-dlp"]["signed_at"], signed);
+}
+
+#[tokio::test]
+async fn a_rate_limit_wait_is_never_held_longer_than_an_hour() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let store = world.store();
+    ensure_now(&store, Tool::YtDlp).await.unwrap();
+
+    let in_a_day = rustdm::tools::release::now_unix() + 86_400;
+    world.server.set_route(
+        LATEST_PATH,
+        Route::status(403)
+            .with_header("x-ratelimit-remaining", "0")
+            .with_header("x-ratelimit-reset", &in_a_day.to_string()),
+    );
+    ensure_now(&store, Tool::YtDlp).await.unwrap();
+
+    let stored = world.tools_json()["tools"]["yt-dlp"]["retry_not_before"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        stored <= rustdm::tools::release::now_unix() + 3600,
+        "{stored}"
+    );
+}
+
+#[tokio::test]
+async fn rollback_while_an_update_runs_is_refused_and_a_second_update_is_skipped() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let store = world.store();
+    ensure_now(&store, Tool::YtDlp).await.unwrap();
+
+    let mut slow = fake_program(V2);
+    slow.extend(std::iter::repeat_n(b'#', 300_000));
+    publish_ytdlp(&world.server, V2, &slow);
+    let asset = format!("/{TEST_REPO}/releases/download/{V2}/{TEST_ASSET}");
+    world
+        .server
+        .set_route(&asset, Route::ok(slow.clone()).throttled(150_000));
+    let before = world.api_calls();
+
+    store.start_update(Some(Tool::YtDlp));
+    let started = std::time::Instant::now();
+    while info(&store, Tool::YtDlp).phase != ToolPhase::Downloading {
+        assert!(started.elapsed() < Duration::from_secs(30));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let err = store.rollback(Tool::YtDlp).unwrap_err();
+    assert!(err.to_string().contains("is being updated"), "{err}");
+    let again = store.start_update(Some(Tool::YtDlp));
+    let busy = again.iter().find(|i| i.tool == Tool::YtDlp.into()).unwrap();
+    assert_ne!(busy.phase, ToolPhase::Idle);
+
+    wait_until_idle(&store, Tool::YtDlp).await;
+    assert_eq!(info(&store, Tool::YtDlp).installed.as_deref(), Some(V2));
+    assert_eq!(
+        world.api_calls() - before,
+        1,
+        "the second request was skipped"
+    );
+}
+
 #[tokio::test]
 async fn rollback_without_a_previous_version_says_so() {
     let world = World::new().await;
@@ -258,6 +434,7 @@ async fn a_checksum_list_signed_by_the_wrong_key_installs_nothing() {
             asset: fake_program(V1),
             listed_sha256: None,
             tamper_after_signing: true,
+            signed_at: None,
         },
     );
     let store = world.store();
@@ -361,6 +538,10 @@ async fn cancelling_a_download_and_trying_again_resumes_it() {
         kept.iter().any(|n| n.ends_with(".part.rdm")),
         "the download state is kept for a resume: {kept:?}"
     );
+
+    // A new daemon run tidies the folder at startup, but not what could resume.
+    let store = world.store();
+    assert!(staging.join(format!("{TEST_ASSET}.part.rdm")).exists());
 
     let before = world.server.requests().len();
     let installed = ensure_now(&store, Tool::YtDlp).await.unwrap();
@@ -515,12 +696,14 @@ async fn startup_removes_folders_nothing_refers_to() {
     let world = World::new().await;
     let root = world.root();
     std::fs::create_dir_all(root.join("yt-dlp/2026.01.01")).unwrap();
-    std::fs::create_dir_all(root.join(".staging/yt-dlp-2026.01.02")).unwrap();
+    std::fs::create_dir_all(root.join(".staging/ffmpeg-1.0")).unwrap();
+    std::fs::create_dir_all(root.join(".staging/leftover")).unwrap();
 
     let _store = world.store();
 
     assert!(!root.join("yt-dlp/2026.01.01").exists());
-    assert!(!root.join(".staging/yt-dlp-2026.01.02").exists());
+    assert!(!root.join(".staging/ffmpeg-1.0").exists());
+    assert!(!root.join(".staging/leftover").exists());
 }
 
 #[cfg(unix)]
@@ -554,15 +737,17 @@ async fn a_program_that_will_not_start_is_not_installed() {
 #[tokio::test]
 async fn a_program_that_vanishes_after_starting_is_reported_as_quarantined() {
     let world = World::new().await;
-    let vanishing = b"#!/bin/sh\nrm -- \"$0\"\n".to_vec();
+    let vanishing = format!("#!/bin/sh\necho {V1}\nrm -- \"$0\"\n").into_bytes();
     publish_ytdlp(&world.server, V1, &vanishing);
 
     let err = ensure_now(&world.store(), Tool::YtDlp).await.unwrap_err();
 
     assert!(matches!(err, ToolError::Quarantined { .. }), "{err}");
-    assert!(err
-        .to_string()
-        .contains("Windows Security may have quarantined it"));
+    assert_eq!(
+        err.to_string()
+            .contains("Windows Security may have quarantined it"),
+        cfg!(windows)
+    );
     assert!(version_folders(&world.root(), "yt-dlp").is_empty());
 }
 
@@ -751,4 +936,164 @@ async fn a_tool_with_no_build_for_this_system_says_so() {
         .await
         .unwrap_err();
     assert_eq!(err.to_string(), "ffmpeg isn't available for this system");
+}
+
+// --- a saved download that cannot be continued ---
+
+fn staging_of(world: &World, version: &str) -> PathBuf {
+    world
+        .root()
+        .join(".staging")
+        .join(format!("yt-dlp-{version}"))
+}
+
+#[tokio::test]
+async fn an_unreadable_saved_download_is_started_over() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let store = world.store();
+    let staging = staging_of(&world, V1);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join(format!("{TEST_ASSET}.part.rdm")), b"{not json").unwrap();
+    std::fs::write(staging.join(format!("{TEST_ASSET}.part")), b"junk").unwrap();
+
+    let installed = ensure_now(&store, Tool::YtDlp).await.unwrap();
+
+    assert_eq!(installed.version, V1);
+    assert_eq!(std::fs::read(&installed.exe).unwrap(), fake_program(V1));
+    assert_eq!(info(&store, Tool::YtDlp).error, None);
+}
+
+#[tokio::test]
+async fn a_saved_download_of_a_file_that_changed_is_started_over() {
+    let world = World::new().await;
+    publish_ytdlp(&world.server, V1, &fake_program(V1));
+    let store = world.store();
+    let staging = staging_of(&world, V1);
+    std::fs::create_dir_all(&staging).unwrap();
+    let output = staging.join(TEST_ASSET);
+    let url = format!(
+        "{}{TEST_REPO}/releases/download/{V1}/{TEST_ASSET}",
+        world.server.url()
+    );
+    // Saved from a file of another size: resuming it reports "file changed".
+    let state = rustdm::state::State {
+        version: rustdm::state::STATE_VERSION,
+        url: url.clone(),
+        final_url: url,
+        total: 4242,
+        validator: Default::default(),
+        completed: vec![],
+        output: output.clone(),
+        connections: Some(4),
+    };
+    rustdm::state::save_atomic(&rustdm::state::state_path(&output), &state).unwrap();
+    std::fs::write(rustdm::state::part_path(&output), vec![0u8; 4242]).unwrap();
+
+    let installed = ensure_now(&store, Tool::YtDlp).await.unwrap();
+
+    assert_eq!(installed.version, V1);
+    assert_eq!(std::fs::read(&installed.exe).unwrap(), fake_program(V1));
+}
+
+// --- links that expire part-way ---
+
+#[tokio::test]
+async fn a_link_that_keeps_expiring_stops_after_a_few_tries() {
+    let world = World::new().await;
+    let archive = zip_bytes(&[("deno", fake_program("2.9.8"))]);
+    // The probe is answered, then every data request is refused with 403.
+    let expiring = TestServer::start(archive.clone(), Mode::ExpireAfter(1)).await;
+    let mut sources = test_sources(&world.server);
+    sources.download_base = expiring.url().as_str().trim_end_matches('/').to_string();
+    sources.pins.insert(
+        Tool::Deno,
+        zip_pin(&archive, "2.9.8", 0, &["deno"], "deno", ""),
+    );
+    let store = ToolStore::with_sources(world.root(), build_client(), sources).unwrap();
+
+    let err = store
+        .ensure(Tool::Deno, Freshness::AsInstalled, FetchCtx::new())
+        .await
+        .unwrap_err();
+
+    let text = err.to_string();
+    assert!(
+        text.contains("kept expiring") || text.contains("refused the deno download"),
+        "{text}"
+    );
+    assert!(version_folders(&world.root(), "deno").is_empty());
+    // It gave up after a handful of tries, not for ever.
+    assert!(
+        expiring.requests().len() < 40,
+        "{}",
+        expiring.requests().len()
+    );
+}
+
+// --- rolling back a pinned tool ---
+
+#[cfg(unix)]
+#[tokio::test]
+async fn rolling_back_a_pinned_tool_sticks_until_the_user_updates() {
+    let world = World::new().await;
+    let pin_of = |version: &str| {
+        let archive = zip_bytes(&[("deno", fake_program(version))]);
+        let pin = zip_pin(&archive, version, 0, &["deno"], "deno", "");
+        (archive, pin)
+    };
+    let (v1, pin1) = pin_of("2.9.7");
+    world.server.set_route("/pins/tool.zip", Route::ok(v1));
+    store_with_pin(&world, Tool::Deno, pin1)
+        .ensure(Tool::Deno, Freshness::AsInstalled, FetchCtx::new())
+        .await
+        .unwrap();
+    let (v2, pin2) = pin_of("2.9.8");
+    world.server.set_route("/pins/tool.zip", Route::ok(v2));
+    let store = store_with_pin(&world, Tool::Deno, pin2.clone());
+    store
+        .ensure(Tool::Deno, Freshness::AsInstalled, FetchCtx::new())
+        .await
+        .unwrap();
+
+    let rolled = store.rollback(Tool::Deno).unwrap();
+    assert_eq!(rolled.installed.as_deref(), Some("2.9.7"));
+
+    // Neither this run nor the next downloads the rolled-back version again.
+    let calls = world.server.requests().len();
+    for fresh in [Freshness::AsInstalled, Freshness::CheckNow] {
+        let kept = store.ensure(Tool::Deno, fresh, FetchCtx::new()).await;
+        assert_eq!(kept.unwrap().version, "2.9.7");
+    }
+    let next_run = store_with_pin(&world, Tool::Deno, pin2);
+    let kept = next_run
+        .ensure(Tool::Deno, Freshness::AsInstalled, FetchCtx::new())
+        .await;
+    assert_eq!(kept.unwrap().version, "2.9.7");
+    assert_eq!(world.server.requests().len(), calls, "no new request");
+    assert_eq!(
+        version_folders(&world.root(), "deno"),
+        vec!["2.9.7", "2.9.8"]
+    );
+    assert_eq!(
+        info(&next_run, Tool::Deno).previous.as_deref(),
+        Some("2.9.8")
+    );
+
+    // Asking for the update is a choice to go forward again; the folder that
+    // was listed as previous is replaced only once the new one is in place.
+    next_run.start_update(Some(Tool::Deno));
+    wait_until_idle(&next_run, Tool::Deno).await;
+    let shown = info(&next_run, Tool::Deno);
+    assert_eq!(shown.installed.as_deref(), Some("2.9.8"), "{shown:?}");
+    assert_eq!(shown.previous.as_deref(), Some("2.9.7"));
+    assert_eq!(
+        version_folders(&world.root(), "deno"),
+        vec!["2.9.7", "2.9.8"]
+    );
+    assert!(!world
+        .root()
+        .join(".staging")
+        .join("replaced-deno-2.9.8")
+        .exists());
 }

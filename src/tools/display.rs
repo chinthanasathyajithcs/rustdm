@@ -2,7 +2,8 @@
 
 use crate::ipc::protocol::{ToolInfo, ToolName, ToolPhase};
 
-const MIB: f64 = 1024.0 * 1024.0;
+/// Sizes are shown in megabytes (1,000,000 bytes), as in the other messages.
+const MB: f64 = 1_000_000.0;
 
 /// "yt-dlp", "ffmpeg", "deno".
 pub fn tool_label(tool: ToolName) -> &'static str {
@@ -35,19 +36,22 @@ pub fn state_text(info: &ToolInfo) -> String {
         ToolPhase::Checking => format!("Checking for a newer {name}"),
         ToolPhase::Downloading => match info.total_bytes {
             Some(total) => format!(
-                "Getting {name}: {:.0}/{:.0} MiB",
-                info.downloaded_bytes as f64 / MIB,
-                total as f64 / MIB
+                "Getting {name}: {:.0}/{:.0} MB",
+                info.downloaded_bytes as f64 / MB,
+                total as f64 / MB
             ),
             None => format!(
-                "Getting {name}: {:.0} MiB",
-                info.downloaded_bytes as f64 / MIB
+                "Getting {name}: {:.0} MB",
+                info.downloaded_bytes as f64 / MB
             ),
         },
         ToolPhase::Verifying => format!("Verifying {name}"),
         ToolPhase::Installing => format!("Installing {name}"),
         ToolPhase::Idle => match (&info.error, &info.installed) {
-            (Some(error), _) => error.clone(),
+            (Some(error), _) => match &info.detail {
+                Some(detail) => format!("{error} ({detail})"),
+                None => error.clone(),
+            },
             (None, Some(_)) => "installed".to_string(),
             (None, None) => "not installed; downloaded when first needed".to_string(),
         },
@@ -108,6 +112,7 @@ mod tests {
             downloaded_bytes: 0,
             total_bytes: None,
             error: None,
+            detail: None,
         }
     }
 
@@ -129,14 +134,23 @@ mod tests {
         tool.installed = Some("2026.11.14".into());
         assert_eq!(state_text(&tool), "installed");
         tool.error = Some("Couldn't reach github.com to get yt-dlp; will retry.".into());
-        assert!(state_text(&tool).starts_with("Couldn't reach"));
+        assert_eq!(
+            state_text(&tool),
+            "Couldn't reach github.com to get yt-dlp; will retry."
+        );
+        tool.detail = Some("dns error".into());
+        assert_eq!(
+            state_text(&tool),
+            "Couldn't reach github.com to get yt-dlp; will retry. (dns error)"
+        );
+        tool.detail = None;
 
         tool.phase = ToolPhase::Downloading;
-        tool.downloaded_bytes = 12 * 1024 * 1024;
-        tool.total_bytes = Some(24 * 1024 * 1024);
-        assert_eq!(state_text(&tool), "Getting yt-dlp: 12/24 MiB");
+        tool.downloaded_bytes = 12_000_000;
+        tool.total_bytes = Some(24_000_000);
+        assert_eq!(state_text(&tool), "Getting yt-dlp: 12/24 MB");
         tool.total_bytes = None;
-        assert_eq!(state_text(&tool), "Getting yt-dlp: 12 MiB");
+        assert_eq!(state_text(&tool), "Getting yt-dlp: 12 MB");
         tool.phase = ToolPhase::Verifying;
         assert_eq!(state_text(&tool), "Verifying yt-dlp");
     }

@@ -10,8 +10,10 @@
 pub mod checksum;
 pub mod cli;
 pub mod display;
+mod ensure;
 pub mod error;
 pub mod extract;
+mod fetch;
 pub mod install;
 pub mod openpgp;
 pub mod pins;
@@ -24,12 +26,12 @@ pub use release::Sources;
 
 use crate::engine::Progress;
 use crate::ipc::protocol::{ToolInfo, ToolName, ToolPhase};
-use install::{ytdlp_exe_name, Plan};
+use install::ytdlp_exe_name;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use store_file::{StoreFile, ToolEntry, ToolsFile};
 use tokio::sync::watch;
 
@@ -102,6 +104,9 @@ pub enum Freshness {
     CheckIfStale,
     /// Ask GitHub now.
     CheckNow,
+    /// The user asked for the update: ask GitHub now, and a version that was
+    /// rolled back from may be installed again.
+    UserRequested,
 }
 
 /// What a caller lends to a fetch: the progress counters to count into (their
@@ -126,12 +131,43 @@ impl Default for FetchCtx {
     }
 }
 
+/// Lock a mutex even if a panic poisoned it: what these guard stays usable.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Run file work on the blocking pool so it does not hold up the async runtime.
+async fn blocking<T: Send + 'static>(
+    tool: Tool,
+    work: impl FnOnce() -> Result<T, ToolError> + Send + 'static,
+) -> Result<T, ToolError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| ToolError::Unusable(format!("work on {tool} stopped unexpectedly: {e}")))?
+}
+
+/// Why the last attempt failed or fell back: a message fit for the user, and
+/// what went wrong underneath for the log and the command line.
+#[derive(Clone, Debug)]
+struct Note {
+    message: String,
+    detail: Option<String>,
+}
+
+impl From<&ToolError> for Note {
+    fn from(error: &ToolError) -> Self {
+        Self {
+            message: error.to_string(),
+            detail: error.detail().map(str::to_string),
+        }
+    }
+}
+
 /// What the store is doing with one tool, for `status`.
 struct Live {
     phase: ToolPhase,
     progress: Option<Arc<Progress>>,
-    /// Why the last attempt failed or fell back, in words fit for the user.
-    error: Option<String>,
+    error: Option<Note>,
 }
 
 impl Default for Live {
@@ -144,32 +180,77 @@ impl Default for Live {
     }
 }
 
+/// `tools.json` and the lock that makes read-change-write one step. Shared
+/// with blocking work, so it lives behind an `Arc`.
+struct FileGate {
+    file: StoreFile,
+    lock: Mutex<()>,
+}
+
+impl FileGate {
+    fn load(&self, tool: Tool) -> Result<ToolsFile, ToolError> {
+        let _guard = lock(&self.lock);
+        self.file.load().map_err(io_error(tool))
+    }
+
+    /// Read, change and write back one tool's entry.
+    fn update(&self, tool: Tool, change: impl FnOnce(&mut ToolEntry)) -> Result<(), ToolError> {
+        let _guard = lock(&self.lock);
+        let file = self.file.load().map_err(io_error(tool))?;
+        let mut entry = file.entry(tool);
+        change(&mut entry);
+        self.file
+            .save(&file.with_entry(tool, entry))
+            .map_err(io_error(tool))
+    }
+}
+
 /// The tools folder: what is installed, how to get more, how to go back.
 pub struct ToolStore {
     root: PathBuf,
     client: reqwest::Client,
     sources: Sources,
-    file: StoreFile,
-    /// Held while `tools.json` is read, changed and written back.
-    file_lock: Mutex<()>,
+    files: Arc<FileGate>,
     /// One at a time per tool: a second caller waits, then finds it installed.
     locks: HashMap<Tool, tokio::sync::Mutex<()>>,
     /// Tools whose program file was hashed in this run.
     verified: Mutex<HashSet<Tool>>,
     live: Mutex<HashMap<Tool, Live>>,
     /// Staging names of installs in progress, which cleanup must leave alone.
-    active: Mutex<HashSet<String>>,
+    active: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Removes an install from the in-progress set when it ends, however it ends.
-struct ActiveInstall<'a> {
-    store: &'a ToolStore,
+struct ActiveInstall {
+    active: Arc<Mutex<HashSet<String>>>,
     name: String,
 }
 
-impl Drop for ActiveInstall<'_> {
+impl Drop for ActiveInstall {
     fn drop(&mut self) {
-        self.store.active.lock().unwrap().remove(&self.name);
+        lock(&self.active).remove(&self.name);
+    }
+}
+
+/// Sets a tool back to idle when dropped, so a task that is cancelled or panics
+/// cannot leave it looking busy for ever. `note` is what `status` shows after.
+struct EndOnDrop<'a> {
+    store: &'a ToolStore,
+    tool: Tool,
+    note: Option<Note>,
+}
+
+impl Drop for EndOnDrop<'_> {
+    fn drop(&mut self) {
+        let note = if std::thread::panicking() {
+            Some(Note {
+                message: format!("Something went wrong with {}; try again.", self.tool),
+                detail: None,
+            })
+        } else {
+            self.note.take()
+        };
+        self.store.end(self.tool, note);
     }
 }
 
@@ -191,20 +272,27 @@ impl ToolStore {
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(&root)?;
         let store = Self {
-            file: StoreFile::in_dir(&root),
+            files: Arc::new(FileGate {
+                file: StoreFile::in_dir(&root),
+                lock: Mutex::new(()),
+            }),
             root,
             client,
             sources,
-            file_lock: Mutex::new(()),
             locks: Tool::ALL
                 .into_iter()
                 .map(|t| (t, tokio::sync::Mutex::new(())))
                 .collect(),
             verified: Mutex::new(HashSet::new()),
             live: Mutex::new(HashMap::new()),
-            active: Mutex::new(HashSet::new()),
+            active: Arc::new(Mutex::new(HashSet::new())),
         };
-        store.tidy();
+        tidy_up(
+            &store.root,
+            &store.files,
+            &store.active,
+            &store.pinned_versions(),
+        );
         Ok(store)
     }
 
@@ -212,33 +300,41 @@ impl ToolStore {
         &self.root
     }
 
-    /// Remove version and staging folders nothing refers to. Best effort.
-    fn tidy(&self) {
-        let _guard = self.file_lock.lock().unwrap();
-        match self.file.load() {
-            Ok(file) => install::cleanup(&self.root, &file, &self.active.lock().unwrap()),
-            Err(e) => tracing::warn!("could not read tools.json to tidy up: {e}"),
+    /// The version of each pinned tool this build would install.
+    fn pinned_versions(&self) -> HashMap<Tool, String> {
+        self.sources
+            .pins
+            .iter()
+            .map(|(tool, pin)| (*tool, pin.version.clone()))
+            .collect()
+    }
+
+    /// Remove version and staging folders nothing refers to, off the async runtime.
+    async fn tidy(&self) {
+        let (root, files, active) = (
+            self.root.clone(),
+            Arc::clone(&self.files),
+            Arc::clone(&self.active),
+        );
+        let pinned = self.pinned_versions();
+        let done = tokio::task::spawn_blocking(move || tidy_up(&root, &files, &active, &pinned));
+        if let Err(e) = done.await {
+            tracing::warn!("tidying the tools folder stopped unexpectedly: {e}");
         }
     }
 
-    /// Read, change and write back one tool's entry.
-    fn update_entry(
+    /// Read, change and write back one tool's entry, off the async runtime.
+    async fn update_entry(
         &self,
         tool: Tool,
-        change: impl FnOnce(&mut ToolEntry),
+        change: impl FnOnce(&mut ToolEntry) + Send + 'static,
     ) -> Result<(), ToolError> {
-        let _guard = self.file_lock.lock().unwrap();
-        let file = self.file.load().map_err(io_error(tool))?;
-        let mut entry = file.entry(tool);
-        change(&mut entry);
-        self.file
-            .save(&file.with_entry(tool, entry))
-            .map_err(io_error(tool))
+        let files = Arc::clone(&self.files);
+        blocking(tool, move || files.update(tool, change)).await
     }
 
     fn load_file(&self, tool: Tool) -> Result<ToolsFile, ToolError> {
-        let _guard = self.file_lock.lock().unwrap();
-        self.file.load().map_err(io_error(tool))
+        self.files.load(tool)
     }
 
     /// Where `tool`'s program sits inside a version folder: (file, folder), both relative.
@@ -276,7 +372,7 @@ impl ToolStore {
             );
             return None;
         }
-        if self.verified.lock().unwrap().contains(&tool) {
+        if lock(&self.verified).contains(&tool) {
             return Some(installed);
         }
         if let Some(expected) = &entry.sha256 {
@@ -290,207 +386,32 @@ impl ToolStore {
                 return None;
             }
         }
-        self.verified.lock().unwrap().insert(tool);
+        lock(&self.verified).insert(tool);
         Some(installed)
     }
 
     fn set_phase(&self, tool: Tool, phase: ToolPhase) {
-        self.live.lock().unwrap().entry(tool).or_default().phase = phase;
+        lock(&self.live).entry(tool).or_default().phase = phase;
     }
 
     fn begin(&self, tool: Tool, phase: ToolPhase, progress: Option<Arc<Progress>>) {
-        let mut live = self.live.lock().unwrap();
+        let mut live = lock(&self.live);
         let slot = live.entry(tool).or_default();
         slot.phase = phase;
         slot.progress = progress;
     }
 
-    fn end(&self, tool: Tool, note: Option<String>) {
-        let mut live = self.live.lock().unwrap();
+    fn end(&self, tool: Tool, note: Option<Note>) {
+        let mut live = lock(&self.live);
         let slot = live.entry(tool).or_default();
         slot.phase = ToolPhase::Idle;
         slot.progress = None;
         slot.error = note;
     }
 
-    /// Make sure `tool` is installed, getting or updating it if needed.
-    ///
-    /// If an update fails but a copy is installed, that copy is returned and the
-    /// reason is shown in `status`; with nothing installed the error is returned.
-    pub async fn ensure(
-        &self,
-        tool: Tool,
-        fresh: Freshness,
-        ctx: FetchCtx,
-    ) -> Result<Installed, ToolError> {
-        let _turn = self.locks[&tool].lock().await;
-        let result = self.ensure_locked(tool, fresh, &ctx).await;
-        match &result {
-            Ok((_, note)) => self.end(tool, note.clone()),
-            Err(ToolError::Cancelled) => self.end(tool, None),
-            Err(e) => self.end(tool, Some(e.to_string())),
-        }
-        result.map(|(installed, _)| installed)
-    }
-
-    async fn ensure_locked(
-        &self,
-        tool: Tool,
-        fresh: Freshness,
-        ctx: &FetchCtx,
-    ) -> Result<(Installed, Option<String>), ToolError> {
-        let entry = self.load_file(tool)?.entry(tool);
-        let installed = self.current(tool, &entry).await;
-        let outcome = match tool {
-            Tool::YtDlp => {
-                self.ensure_ytdlp(&entry, installed.clone(), fresh, ctx)
-                    .await
-            }
-            _ => self.ensure_pinned(tool, installed.clone(), ctx).await,
-        };
-        match (outcome, installed) {
-            (Err(ToolError::Cancelled), _) => Err(ToolError::Cancelled),
-            // An update that did not work leaves the working copy in use.
-            (Err(e), Some(installed)) => {
-                tracing::warn!("keeping {tool} {}: {e}", installed.version);
-                Ok((installed, Some(e.to_string())))
-            }
-            (outcome, _) => outcome,
-        }
-    }
-
-    async fn ensure_pinned(
-        &self,
-        tool: Tool,
-        installed: Option<Installed>,
-        ctx: &FetchCtx,
-    ) -> Result<(Installed, Option<String>), ToolError> {
-        let pin = self.sources.pins.get(&tool).ok_or_else(|| {
-            ToolError::Unusable(format!("{tool} isn't available for this system"))
-        })?;
-        if let Some(installed) = &installed {
-            if !version::is_newer(&pin.version, &installed.version) {
-                return Ok((installed.clone(), None));
-            }
-        }
-        let plan = Plan::for_pin(tool, pin, &self.sources.download_base)?;
-        let kept = installed.map(|i| i.version);
-        Ok((self.run_install(plan, kept, ctx).await?, None))
-    }
-
-    async fn ensure_ytdlp(
-        &self,
-        entry: &ToolEntry,
-        installed: Option<Installed>,
-        fresh: Freshness,
-        ctx: &FetchCtx,
-    ) -> Result<(Installed, Option<String>), ToolError> {
-        let tool = Tool::YtDlp;
-        let now = release::now_unix();
-
-        if let Some(current) = &installed {
-            let stale = entry
-                .last_check
-                .is_none_or(|at| now.saturating_sub(at) > STALE_AFTER_SECS);
-            let skip_check = match fresh {
-                Freshness::AsInstalled => true,
-                Freshness::CheckIfStale => !stale,
-                Freshness::CheckNow => false,
-            };
-            if skip_check {
-                return Ok((current.clone(), None));
-            }
-        }
-        // Do not ask again while GitHub has said to wait.
-        if let Some(until) = entry.retry_not_before.filter(|until| *until > now) {
-            let limited = ToolError::RateLimited {
-                tool,
-                until_unix: Some(until),
-                installed: installed.as_ref().map(|i| i.version.clone()),
-            };
-            return match installed {
-                Some(current) => Ok((current, Some(limited.to_string()))),
-                None => Err(limited),
-            };
-        }
-
-        self.begin(tool, ToolPhase::Checking, None);
-        let release = match release::latest_ytdlp(&self.client, &self.sources).await {
-            Ok(release) => release,
-            Err(ToolError::RateLimited { until_unix, .. }) => {
-                self.update_entry(tool, |e| e.retry_not_before = until_unix)?;
-                return Err(ToolError::RateLimited {
-                    tool,
-                    until_unix,
-                    installed: installed.as_ref().map(|i| i.version.clone()),
-                });
-            }
-            Err(e) => return Err(e),
-        };
-        self.update_entry(tool, |e| {
-            e.last_check = Some(now);
-            e.retry_not_before = None;
-        })?;
-
-        let wanted = match &installed {
-            Some(current) => {
-                version::is_newer(&release.version, &current.version)
-                    && entry.skip_version.as_deref() != Some(release.version.as_str())
-            }
-            None => true,
-        };
-        match installed {
-            Some(current) if !wanted => Ok((current, None)),
-            current => {
-                let kept = current.map(|c| c.version);
-                let plan = Plan::for_ytdlp(&release);
-                Ok((self.run_install(plan, kept, ctx).await?, None))
-            }
-        }
-    }
-
-    /// Download and put `plan` in place, then record it in `tools.json`.
-    /// `kept` is the working version it replaces, which becomes `previous`.
-    async fn run_install(
-        &self,
-        plan: Plan,
-        kept: Option<String>,
-        ctx: &FetchCtx,
-    ) -> Result<Installed, ToolError> {
-        let tool = plan.tool;
-        let name = plan.staging_name();
-        self.active.lock().unwrap().insert(name.clone());
-        let _in_progress = ActiveInstall { store: self, name };
-
-        self.begin(tool, ToolPhase::Downloading, Some(ctx.progress.clone()));
-        let finished = install::install(
-            &self.root,
-            &self.client,
-            &plan,
-            ctx,
-            kept.as_deref(),
-            &|phase| self.set_phase(tool, phase),
-        )
-        .await?;
-
-        let version = finished.version.clone();
-        self.update_entry(tool, |entry| {
-            if let Some(old) = kept.filter(|old| *old != version) {
-                entry.previous = Some(old);
-                entry.previous_sha256 = entry.sha256.take();
-            }
-            entry.current = Some(version.clone());
-            entry.sha256 = Some(finished.sha256.clone());
-        })?;
-        self.verified.lock().unwrap().insert(tool);
-        self.tidy();
-        self.installed_at(tool, &finished.version)
-            .ok_or_else(|| ToolError::Unusable(format!("{tool} isn't available for this system")))
-    }
-
     fn info(&self, tool: Tool, file: &ToolsFile) -> ToolInfo {
         let entry = file.entry(tool);
-        let live = self.live.lock().unwrap();
+        let live = lock(&self.live);
         let live = live.get(&tool);
         let (downloaded, total) = live
             .and_then(|l| l.progress.as_ref())
@@ -501,6 +422,7 @@ impl ToolStore {
                 )
             })
             .unwrap_or((0, 0));
+        let note = live.and_then(|l| l.error.as_ref());
         ToolInfo {
             tool: tool.into(),
             installed: entry.current,
@@ -509,13 +431,14 @@ impl ToolStore {
             phase: live.map_or(ToolPhase::Idle, |l| l.phase),
             downloaded_bytes: downloaded,
             total_bytes: (total > 0).then_some(total),
-            error: live.and_then(|l| l.error.clone()),
+            error: note.map(|n| n.message.clone()),
+            detail: note.and_then(|n| n.detail.clone()),
         }
     }
 
     /// Every tool's state, for `tools.status`.
     pub fn status(&self) -> Vec<ToolInfo> {
-        let file = self.file.load().unwrap_or_default();
+        let file = self.files.file.load().unwrap_or_default();
         Tool::ALL
             .iter()
             .map(|&tool| self.info(tool, &file))
@@ -528,8 +451,8 @@ impl ToolStore {
         let _turn = self.locks[&tool].try_lock().map_err(|_| {
             ToolError::Unusable(format!("{tool} is being updated; try again in a moment."))
         })?;
-        let _guard = self.file_lock.lock().unwrap();
-        let file = self.file.load().map_err(io_error(tool))?;
+        let _guard = lock(&self.files.lock);
+        let file = self.files.file.load().map_err(io_error(tool))?;
         let entry = file.entry(tool);
         let Some(previous) = entry.previous.clone() else {
             return Err(ToolError::Unusable(format!(
@@ -549,12 +472,14 @@ impl ToolStore {
             previous: entry.current.clone(),
             sha256: entry.previous_sha256.clone(),
             previous_sha256: entry.sha256.clone(),
+            signed_at: entry.previous_signed_at,
+            previous_signed_at: entry.signed_at,
             skip_version: entry.current,
             ..entry
         };
         let file = file.with_entry(tool, swapped);
-        self.file.save(&file).map_err(io_error(tool))?;
-        self.verified.lock().unwrap().remove(&tool);
+        self.files.file.save(&file).map_err(io_error(tool))?;
+        lock(&self.verified).remove(&tool);
         self.end(tool, None);
         Ok(self.info(tool, &file))
     }
@@ -562,9 +487,10 @@ impl ToolStore {
     /// Start checking `tool` (installing it if missing), or every installed tool
     /// when `tool` is `None`, in the background. Returns the state at once; the
     /// work shows up in later `status` calls. A tool already being worked on is
-    /// left to finish.
+    /// left to finish. This is what the user asked for, so a version they rolled
+    /// back from may be installed again.
     pub fn start_update(self: &Arc<Self>, tool: Option<Tool>) -> Vec<ToolInfo> {
-        let file = self.file.load().unwrap_or_default();
+        let file = self.files.file.load().unwrap_or_default();
         let targets: Vec<Tool> = match tool {
             Some(tool) => vec![tool],
             None => Tool::ALL
@@ -574,7 +500,7 @@ impl ToolStore {
         };
         for tool in targets {
             {
-                let mut live = self.live.lock().unwrap();
+                let mut live = lock(&self.live);
                 let slot = live.entry(tool).or_default();
                 if slot.phase != ToolPhase::Idle {
                     continue;
@@ -585,12 +511,33 @@ impl ToolStore {
             let store = Arc::clone(self);
             tokio::spawn(async move {
                 let ctx = FetchCtx::new();
-                if let Err(e) = store.ensure(tool, Freshness::CheckNow, ctx).await {
-                    tracing::warn!("updating {tool} failed: {e}");
+                if let Err(e) = store.ensure(tool, Freshness::UserRequested, ctx).await {
+                    tracing::warn!("updating {tool} failed: {e:?}");
                 }
             });
         }
         self.status()
+    }
+}
+
+/// Remove version and staging folders nothing refers to. Best effort.
+fn tidy_up(
+    root: &Path,
+    files: &FileGate,
+    active: &Mutex<HashSet<String>>,
+    pinned: &HashMap<Tool, String>,
+) {
+    let _guard = lock(&files.lock);
+    match files.file.load() {
+        Ok(file) => install::cleanup(
+            root,
+            &file,
+            &install::Keep {
+                is_active: &|name| lock(active).contains(name),
+                pinned,
+            },
+        ),
+        Err(e) => tracing::warn!("could not read tools.json to tidy up: {e}"),
     }
 }
 
@@ -614,5 +561,55 @@ mod tests {
             serde_json::to_string(&ToolName::YtDlp).unwrap(),
             serde_json::to_string(&Tool::YtDlp).unwrap()
         );
+    }
+
+    #[test]
+    fn a_dropped_guard_sets_the_tool_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = Sources {
+            api_base: String::new(),
+            download_base: String::new(),
+            ytdlp_repo: String::new(),
+            keys: Vec::new(),
+            ytdlp_min_version: String::new(),
+            ytdlp_asset: None,
+            pins: HashMap::new(),
+        };
+        let store =
+            ToolStore::with_sources(dir.path().join("tools"), reqwest::Client::new(), sources)
+                .unwrap();
+        store.begin(Tool::Deno, ToolPhase::Downloading, None);
+        {
+            let _guard = EndOnDrop {
+                store: &store,
+                tool: Tool::Deno,
+                note: None,
+            };
+        }
+        let shown = store
+            .status()
+            .into_iter()
+            .find(|i| i.tool == ToolName::Deno);
+        assert_eq!(shown.unwrap().phase, ToolPhase::Idle);
+
+        // Even when the work panics, and a poisoned lock does not stop it.
+        store.begin(Tool::Deno, ToolPhase::Installing, None);
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = EndOnDrop {
+                store: &store,
+                tool: Tool::Deno,
+                note: None,
+            };
+            let _held = store.live.lock().unwrap();
+            panic!("boom");
+        }));
+        assert!(crashed.is_err());
+        let shown = store
+            .status()
+            .into_iter()
+            .find(|i| i.tool == ToolName::Deno);
+        let shown = shown.unwrap();
+        assert_eq!(shown.phase, ToolPhase::Idle);
+        assert!(shown.error.is_some());
     }
 }

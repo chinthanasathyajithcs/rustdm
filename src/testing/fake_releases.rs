@@ -1,11 +1,17 @@
 //! A pretend release host for the tools manager: serve a yt-dlp release the
 //! way the real one is laid out, signed by the test key, and break any part of it.
 
-use super::tools::{sign_sums, test_pinned_key};
+use super::tools::{sign, test_pinned_key, SigSpec, TEST_CREATION_TIME};
 use super::{Route, TestServer};
 use crate::tools::checksum::sha256_hex;
 use crate::tools::release::Sources;
 use std::collections::HashMap;
+use std::io::Write;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// The signing time of the next release published without one: every release
+/// is signed a little later than the one before, as real ones are.
+static NEXT_SIGNED_AT: AtomicU32 = AtomicU32::new(TEST_CREATION_TIME);
 
 /// The repository the test sources look yt-dlp up in.
 pub const TEST_REPO: &str = "yt-dlp/yt-dlp-nightly-builds";
@@ -28,15 +34,48 @@ pub fn test_sources(server: &TestServer) -> Sources {
     }
 }
 
+/// Marks the version a fake program built from `rdmd` prints.
+const FAKE_VERSION_MARKER: &[u8] = b"\0rdm-fake-version=";
+
+/// The version appended to a fake program (see `fake_program`), if it has one.
+pub fn fake_version_in(program: &[u8]) -> Option<String> {
+    let at = program
+        .windows(FAKE_VERSION_MARKER.len())
+        .rposition(|window| window == FAKE_VERSION_MARKER)?;
+    String::from_utf8(program[at + FAKE_VERSION_MARKER.len()..].to_vec()).ok()
+}
+
+/// For `rdmd` in a test build: when it was started as a fake program (see
+/// `fake_program`) with just `--version`, print that version and say so.
+pub fn answer_version_if_fake() -> bool {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() != Some("--version") || args.next().is_some() {
+        return false;
+    }
+    let version = std::env::current_exe()
+        .and_then(std::fs::read)
+        .ok()
+        .and_then(|bytes| fake_version_in(&bytes));
+    match version {
+        Some(version) => {
+            let _ = writeln!(std::io::stdout(), "{version}");
+            true
+        }
+        None => false,
+    }
+}
+
 /// A fake program that prints `version` and exits 0, for any arguments. On
-/// Unix it is a shell script; Windows has no shell, so it is `rdmd` itself,
-/// which answers `--version`.
+/// Unix it is a shell script; Windows has no shell, so it is `rdmd` itself
+/// with the version appended, which `rdmd --version` prints (see
+/// `answer_version_if_fake`).
 pub fn fake_program(version: &str) -> Vec<u8> {
     if cfg!(windows) {
         let rdmd = std::env::var_os("CARGO_BIN_EXE_rdmd")
             .expect("CARGO_BIN_EXE_rdmd is set when integration tests run");
         let mut bytes = std::fs::read(rdmd).expect("read rdmd");
-        // Make each version's file different.
+        // Makes each version's file different, and is what `--version` prints.
+        bytes.extend_from_slice(FAKE_VERSION_MARKER);
         bytes.extend_from_slice(version.as_bytes());
         bytes
     } else {
@@ -58,6 +97,9 @@ pub struct ReleaseSpec {
     pub listed_sha256: Option<String>,
     /// Change the checksum file after it was signed.
     pub tamper_after_signing: bool,
+    /// When the signature says it was made (unix seconds); `None` means a
+    /// time later than any earlier release published this way.
+    pub signed_at: Option<u32>,
 }
 
 /// Serve a yt-dlp release on `server`, which must have been started with
@@ -72,6 +114,7 @@ pub fn publish_ytdlp(server: &TestServer, version: &str, asset: &[u8]) {
             asset: asset.to_vec(),
             listed_sha256: None,
             tamper_after_signing: false,
+            signed_at: None,
         },
     );
 }
@@ -84,7 +127,16 @@ pub fn publish_ytdlp_with(server: &TestServer, spec: ReleaseSpec) {
         .clone()
         .unwrap_or_else(|| sha256_hex(&spec.asset));
     let sums = format!("{listed}  {TEST_ASSET}\n").into_bytes();
-    let sig = sign_sums(&sums);
+    let signed_at = spec
+        .signed_at
+        .unwrap_or_else(|| NEXT_SIGNED_AT.fetch_add(60, Ordering::SeqCst));
+    let sig = sign(
+        &sums,
+        &SigSpec {
+            creation_time: Some(signed_at),
+            ..SigSpec::default()
+        },
+    );
     let served_sums = if spec.tamper_after_signing {
         format!("{}  {TEST_ASSET}\n", "0".repeat(64)).into_bytes()
     } else {
@@ -103,4 +155,21 @@ pub fn publish_ytdlp_with(server: &TestServer, spec: ReleaseSpec) {
     server.set_route(&format!("{download}/SHA2-256SUMS"), Route::ok(served_sums));
     server.set_route(&format!("{download}/SHA2-256SUMS.sig"), Route::ok(sig));
     server.set_route(&format!("{download}/{TEST_ASSET}"), Route::ok(spec.asset));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fake_windows_program_carries_its_version_at_the_end() {
+        let mut program = b"MZ....rdmd bytes".to_vec();
+        program.extend_from_slice(FAKE_VERSION_MARKER);
+        program.extend_from_slice(b"2026.11.14.200000");
+        assert_eq!(
+            fake_version_in(&program).as_deref(),
+            Some("2026.11.14.200000")
+        );
+        assert_eq!(fake_version_in(b"plain program"), None);
+    }
 }
