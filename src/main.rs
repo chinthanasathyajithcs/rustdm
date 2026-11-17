@@ -12,6 +12,8 @@ use rustdm::ipc::protocol::{
     SetDefaultsParams, SetLimitsParams, ToolName,
 };
 use rustdm::ipc::transport::IpcEndpoint;
+use rustdm::nmhost::install;
+use rustdm::request_context::RequestContext;
 use rustdm::tools::cli::{run as run_tools, ToolsCommand, UPDATE_WAIT};
 use rustdm::tui::format::{
     format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
@@ -82,6 +84,12 @@ enum Commands {
         /// Speed cap for this download alone, such as 500K or 2M
         #[arg(long, value_parser = parse_speed)]
         max_speed: Option<u64>,
+        /// Page the link came from, sent as the Referer
+        #[arg(long)]
+        referer: Option<String>,
+        /// User-Agent to send instead of rustdm's own
+        #[arg(long)]
+        user_agent: Option<String>,
     },
     /// List the background daemon's downloads in queue order
     List,
@@ -145,6 +153,11 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Connect Chrome and Edge so they hand downloads to rustdm
+    Browser {
+        #[command(subcommand)]
+        action: BrowserAction,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -207,6 +220,16 @@ enum DaemonAction {
     Stop,
 }
 
+#[derive(Subcommand)]
+enum BrowserAction {
+    /// Register the rustdm browser host (run again after moving the program folder)
+    Install,
+    /// Remove the registration
+    Uninstall,
+    /// Show what is registered
+    Status,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -259,13 +282,23 @@ async fn run(cli: Cli) -> CliResult {
             name,
             connections,
             max_speed,
+            referer,
+            user_agent,
         } => {
+            // No --cookie: a value on the command line lands in shell history
+            // and in the process list. Cookies come from the browser link.
+            let context = (referer.is_some() || user_agent.is_some()).then(|| RequestContext {
+                referer,
+                user_agent,
+                ..Default::default()
+            });
             let params = AddDownloadParams {
                 url,
                 destination: dir,
                 filename: name,
                 connections,
                 max_bytes_per_sec: max_speed,
+                context,
             };
             add(&endpoint, params).await
         }
@@ -327,6 +360,7 @@ async fn run(cli: Cli) -> CliResult {
             DaemonAction::Status => daemon_status(&endpoint).await,
             DaemonAction::Stop => daemon_stop(&endpoint).await,
         },
+        Commands::Browser { action } => browser(action),
     }
 }
 
@@ -608,6 +642,45 @@ async fn daemon_stop(endpoint: &IpcEndpoint) -> CliResult {
         tokio::time::sleep(STOP_POLL_INTERVAL).await;
     }
     println!("rdmd stopped");
+    Ok(())
+}
+
+fn browser(action: BrowserAction) -> CliResult {
+    let host = install::host_exe_path()?;
+    match action {
+        BrowserAction::Install => {
+            if !host.is_file() {
+                return Err(format!("{} not found; keep it next to rdm", host.display()).into());
+            }
+            let done = install::install(&host)?;
+            if done.is_empty() {
+                println!("No supported browser found; open Chrome or Edge once, then try again.");
+            }
+            for entry in &done {
+                println!("Registered with {}", entry.browser);
+            }
+            println!("Next: load the rustdm extension in your browser.");
+        }
+        BrowserAction::Uninstall => {
+            let report = install::uninstall()?;
+            for entry in &report.removed {
+                println!("Removed from {}", entry.browser);
+            }
+            for problem in &report.problems {
+                eprintln!("{problem}");
+            }
+            if !report.problems.is_empty() {
+                return Err("some registrations could not be removed".into());
+            }
+        }
+        BrowserAction::Status => {
+            let host_state = if host.is_file() { "found" } else { "MISSING" };
+            println!("Host: {} ({host_state})", host.display());
+            for entry in install::status()? {
+                println!("{}", install::describe(&entry, &host));
+            }
+        }
+    }
     Ok(())
 }
 

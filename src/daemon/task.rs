@@ -1,9 +1,12 @@
 use crate::daemon::queue_store::SavedDownload;
 use crate::daemon::speed::SpeedMeter;
 use crate::engine::{Outcome, PauseReason, Progress};
-use crate::error::{link_status_message, Error};
+use crate::error::{
+    is_sign_in_status, link_status_message, sign_in_expired_message, sign_in_page_message, Error,
+};
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
 use crate::limiter::RateLimiter;
+use crate::request_context::RequestContext;
 use crate::state::{part_path, state_path};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -66,6 +69,19 @@ pub struct TaskRecord {
     pub resume_after_restart: bool,
     /// Delete the partial files once the engine has stopped.
     pub delete_on_stop: bool,
+    /// The download came with browser cookies, kept in the secret store.
+    pub has_cookies: bool,
+    /// Page the download came from, sent as the Referer.
+    pub referer: Option<String>,
+    /// The browser's User-Agent, sent with every request.
+    pub user_agent: Option<String>,
+    /// A client holding the cookies, Referer and User-Agent; none means the
+    /// daemon's shared client.
+    pub client: Option<reqwest::Client>,
+    /// The cookies were just dropped and the client, which still holds them, has
+    /// been let go; one with only the Referer and User-Agent is yet to be built.
+    /// The build is slow, so the caller does it outside the lock.
+    pub client_pending: bool,
 }
 
 impl TaskRecord {
@@ -111,6 +127,11 @@ impl TaskRecord {
             running: false,
             resume_after_restart: false,
             delete_on_stop: false,
+            has_cookies: false,
+            referer: None,
+            user_agent: None,
+            client: None,
+            client_pending: false,
         }
     }
 
@@ -128,6 +149,9 @@ impl TaskRecord {
         rec.downloaded_bytes = saved.downloaded_bytes;
         rec.error_message = saved.error_message;
         rec.speed_limiter.set_bytes_per_sec(saved.max_bytes_per_sec);
+        rec.has_cookies = saved.has_cookies;
+        rec.referer = saved.referer;
+        rec.user_agent = saved.user_agent;
         // Nothing runs right after a restart; anything that was running waits in the queue.
         rec.status = match saved.status {
             DownloadStatus::Active | DownloadStatus::Retrying | DownloadStatus::Pausing => {
@@ -152,7 +176,59 @@ impl TaskRecord {
             downloaded_bytes: self.downloaded_bytes,
             error_message: self.error_message.clone(),
             max_bytes_per_sec: self.max_bytes_per_sec(),
+            has_cookies: self.has_cookies,
+            referer: self.referer.clone(),
+            user_agent: self.user_agent.clone(),
         }
+    }
+
+    /// Give this download a new context: its client, Referer, User-Agent and
+    /// whether it holds cookies. The caller keeps the secret store in step.
+    pub fn set_context(&mut self, ctx: &RequestContext, client: Option<reqwest::Client>) {
+        self.has_cookies = !ctx.cookies.is_empty();
+        self.referer = ctx.referer.clone();
+        self.user_agent = ctx.user_agent.clone();
+        self.client = client;
+        self.client_pending = false;
+    }
+
+    /// Put a stopped download back in the queue as if the user had resumed it.
+    pub fn requeue(&mut self) {
+        self.status = DownloadStatus::Queued;
+        self.error_message = None;
+        self.resume_after_restart = false;
+        self.retries = 0;
+        self.retry_at = None;
+    }
+
+    /// Forget the cookies, keeping the Referer and User-Agent. Returns whether
+    /// there were any, so the caller knows to delete the secret. The client that
+    /// held the cookies goes too; the caller builds its replacement outside the
+    /// lock (see `pending_client_context`).
+    pub fn drop_cookies(&mut self) -> bool {
+        let had = self.has_cookies;
+        self.has_cookies = false;
+        self.client = None;
+        self.client_pending = self.referer.is_some() || self.user_agent.is_some();
+        had
+    }
+
+    /// What a replacement client must carry, when one is waited for.
+    pub fn pending_client_context(&self) -> Option<RequestContext> {
+        self.client_pending.then(|| RequestContext {
+            cookies: Vec::new(),
+            referer: self.referer.clone(),
+            user_agent: self.user_agent.clone(),
+        })
+    }
+
+    /// Take the replacement client, unless the download has taken a new
+    /// context since (then the pending one is moot).
+    pub fn finish_pending_client(&mut self, client: Option<reqwest::Client>) {
+        if self.client_pending && !self.has_cookies && self.client.is_none() {
+            self.client = client;
+        }
+        self.client_pending = false;
     }
 
     /// This download's own speed cap; 0 means none.
@@ -262,6 +338,9 @@ impl TaskRecord {
                 self.error_message = None;
                 self.retries = 0;
                 self.retry_at = None;
+                self.has_cookies = false;
+                self.client = None;
+                self.client_pending = false;
             }
             Ok(Outcome::Paused { reason, state: _ }) => {
                 let link_expired = matches!(reason, PauseReason::LinkExpired { .. });
@@ -269,7 +348,12 @@ impl TaskRecord {
                     self.status = DownloadStatus::Paused;
                 }
                 if let PauseReason::LinkExpired { status } = reason {
-                    self.error_message = Some(link_status_message(status));
+                    self.error_message = Some(if self.has_cookies && is_sign_in_status(status) {
+                        self.drop_cookies();
+                        sign_in_expired_message(status)
+                    } else {
+                        link_status_message(status)
+                    });
                 }
             }
             // Stopped during the server check, before any file existed: the
@@ -280,8 +364,24 @@ impl TaskRecord {
                 }
             }
             Err(e) if cancelled => self.error_message = Some(e.to_string()),
+            // The site turned the cookies down at the first request: they are
+            // no use any more, so they go, and the user is told what to do.
+            Err(Error::LinkExpired { status }) if self.has_cookies && is_sign_in_status(status) => {
+                self.fail_signed_out(sign_in_expired_message(status));
+            }
+            Err(Error::WebPage) if self.has_cookies => {
+                self.fail_signed_out(sign_in_page_message());
+            }
             Err(e) => self.fail_or_retry(e),
         }
+    }
+
+    /// Stop for good because the site no longer accepts the download's sign-in.
+    fn fail_signed_out(&mut self, message: String) {
+        self.drop_cookies();
+        self.status = DownloadStatus::Failed;
+        self.retry_at = None;
+        self.error_message = Some(message);
     }
 
     /// Schedule an automatic retry for network or server trouble, unless this
@@ -590,5 +690,137 @@ mod tests {
             state: PathBuf::from("/downloads/ubuntu.iso.part.rdm"),
         }));
         assert_eq!(rec.status, DownloadStatus::Cancelled);
+    }
+
+    fn with_cookies(status: DownloadStatus) -> TaskRecord {
+        let mut rec = record(status);
+        rec.has_cookies = true;
+        rec.referer = Some("https://example.com/page".to_string());
+        rec.user_agent = Some("TestBrowser/1".to_string());
+        rec
+    }
+
+    #[test]
+    fn request_context_survives_a_save_and_restore() {
+        let rec = with_cookies(DownloadStatus::Paused);
+        let restored = TaskRecord::from_saved(rec.to_saved());
+        assert!(restored.has_cookies);
+        assert_eq!(restored.referer, rec.referer);
+        assert_eq!(restored.user_agent, rec.user_agent);
+        assert!(restored.client.is_none(), "the core rebuilds the client");
+    }
+
+    #[test]
+    fn a_403_on_a_download_with_cookies_says_the_sign_in_expired_and_drops_them() {
+        let mut rec = with_cookies(DownloadStatus::Active);
+        rec.running = true;
+        rec.apply_outcome(Ok(Outcome::Paused {
+            reason: PauseReason::LinkExpired { status: 403 },
+            state: PathBuf::from("/downloads/ubuntu.iso.part.rdm"),
+        }));
+        assert_eq!(rec.status, DownloadStatus::Paused);
+        assert!(!rec.has_cookies);
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("sign-in expired (HTTP 403); start the download again from the browser to continue it")
+        );
+        assert_eq!(rec.referer.as_deref(), Some("https://example.com/page"));
+        assert!(
+            rec.client.is_none(),
+            "the client that held the cookies is gone"
+        );
+        let ctx = rec
+            .pending_client_context()
+            .expect("a client is waited for");
+        assert!(ctx.cookies.is_empty());
+        assert_eq!(ctx.referer.as_deref(), Some("https://example.com/page"));
+        assert_eq!(ctx.user_agent.as_deref(), Some("TestBrowser/1"));
+    }
+
+    #[test]
+    fn a_replacement_client_is_taken_once_and_only_while_it_is_waited_for() {
+        let mut rec = with_cookies(DownloadStatus::Paused);
+        rec.drop_cookies();
+        rec.finish_pending_client(Some(reqwest::Client::new()));
+        assert!(rec.client.is_some());
+        assert!(rec.pending_client_context().is_none());
+
+        // A new context arrived meanwhile: the late client is not wanted.
+        let mut rec = with_cookies(DownloadStatus::Paused);
+        rec.drop_cookies();
+        rec.set_context(&RequestContext::default(), None);
+        rec.finish_pending_client(Some(reqwest::Client::new()));
+        assert!(rec.client.is_none());
+    }
+
+    #[test]
+    fn dropping_cookies_from_a_download_with_no_referer_or_agent_waits_for_nothing() {
+        let mut rec = record(DownloadStatus::Paused);
+        rec.has_cookies = true;
+        assert!(rec.drop_cookies());
+        assert!(rec.pending_client_context().is_none());
+    }
+
+    #[test]
+    fn a_404_on_a_download_with_cookies_keeps_them_and_the_usual_message() {
+        let mut rec = with_cookies(DownloadStatus::Active);
+        rec.running = true;
+        rec.apply_outcome(Ok(Outcome::Paused {
+            reason: PauseReason::LinkExpired { status: 404 },
+            state: PathBuf::from("/downloads/ubuntu.iso.part.rdm"),
+        }));
+        assert!(rec.has_cookies);
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("link expired or removed (HTTP 404)")
+        );
+    }
+
+    #[test]
+    fn a_401_at_the_first_request_drops_the_cookies_too() {
+        let mut rec = with_cookies(DownloadStatus::Active);
+        rec.begin_run();
+        fail(&mut rec, Error::LinkExpired { status: 401 });
+        assert_eq!(rec.status, DownloadStatus::Failed);
+        assert!(!rec.has_cookies);
+        assert!(rec
+            .error_message
+            .as_deref()
+            .unwrap()
+            .starts_with("sign-in expired (HTTP 401)"));
+    }
+
+    #[test]
+    fn a_sign_in_page_on_a_download_with_cookies_asks_for_a_new_sign_in() {
+        let mut rec = with_cookies(DownloadStatus::Active);
+        rec.begin_run();
+        fail(&mut rec, Error::WebPage);
+        assert_eq!(rec.status, DownloadStatus::Failed);
+        assert!(!rec.has_cookies);
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("sign-in expired (the site sent a sign-in page); start the download again from the browser to continue it")
+        );
+    }
+
+    #[test]
+    fn network_trouble_keeps_the_cookies() {
+        let mut rec = with_cookies(DownloadStatus::Active);
+        rec.begin_run();
+        fail(&mut rec, Error::Protocol("status 500".into()));
+        assert_eq!(rec.status, DownloadStatus::Retrying);
+        assert!(rec.has_cookies);
+    }
+
+    #[test]
+    fn a_finished_download_lets_go_of_its_cookies_and_client() {
+        let mut rec = with_cookies(DownloadStatus::Active);
+        rec.running = true;
+        rec.apply_outcome(Ok(Outcome::Completed {
+            path: PathBuf::from("/downloads/ubuntu.iso"),
+            steals: 0,
+        }));
+        assert!(!rec.has_cookies);
+        assert!(rec.client.is_none());
     }
 }

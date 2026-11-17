@@ -28,6 +28,11 @@ pub enum Mode {
     IgnoreRange,
     Status(u16),
     Redirect,
+    /// Answer every request with a redirect to the same path on this server.
+    RedirectTo(url::Url),
+    /// Redirect once, setting a `sid=redirect-cookie` cookie on the way; the
+    /// redirected request is served like `Normal`, with ranges.
+    SetCookieThenRedirect,
     Chunked,
     FailThenOk {
         status: u16,
@@ -128,6 +133,41 @@ fn partial_header(
     )
 }
 
+/// Answer like `Mode::Normal`: the range asked for if the server may honour it, else the whole body.
+fn serve_normal(
+    body: &[u8],
+    range: Option<String>,
+    if_range: Option<String>,
+    etag: &str,
+    last_modified: &str,
+    content_type: &str,
+) -> Vec<u8> {
+    let total = body.len();
+    let mut serve_range = None;
+    if let Some(r) = range {
+        match if_range {
+            Some(ir) if ir != etag => {}
+            _ => serve_range = parse_range(&r, total),
+        }
+    }
+    if let Some((start, end)) = serve_range {
+        let slice_len = end - start + 1;
+        let mut resp = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\n{content_type}ETag: {etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        resp.extend_from_slice(&body[start..=end]);
+        resp
+    } else {
+        let mut resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n{content_type}ETag: {etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        resp.extend_from_slice(body);
+        resp
+    }
+}
+
 /// Write `body` at about `bytes_per_sec`, waiting before each piece so a finished
 /// answer stops counting as in flight right away.
 async fn write_throttled(socket: &mut tokio::net::TcpStream, body: &[u8], bytes_per_sec: u64) {
@@ -152,10 +192,14 @@ pub struct RequestLog {
     pub if_range: Option<String>,
     pub accept_encoding: Option<String>,
     pub user_agent: Option<String>,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
 }
 
 pub struct TestServer {
     url: url::Url,
+    /// Headers every request must carry; others get 403.
+    required: Arc<RwLock<Vec<(String, String)>>>,
     etag: Arc<RwLock<String>>,
     requests: Arc<Mutex<Vec<RequestLog>>>,
     peak_in_flight: Arc<AtomicUsize>,
@@ -216,6 +260,8 @@ impl TestServer {
 
         let etag = Arc::new(RwLock::new("\"v1\"".to_string()));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let required: Arc<RwLock<Vec<(String, String)>>> = Arc::new(RwLock::new(Vec::new()));
+        let server_required = Arc::clone(&required);
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak_in_flight = Arc::new(AtomicUsize::new(0));
         let server_peak = Arc::clone(&peak_in_flight);
@@ -239,6 +285,7 @@ impl TestServer {
 
                         let etag_lock = Arc::clone(&server_etag);
                         let reqs_lock = Arc::clone(&server_requests);
+                        let required_lock = Arc::clone(&server_required);
                         let body_ref = Arc::clone(&server_body);
                         let mode_clone = mode.clone();
                         let counter = Arc::clone(&mode_counter);
@@ -282,16 +329,22 @@ impl TestServer {
                             let mut if_range_hdr = None;
                             let mut accept_encoding_hdr = None;
                             let mut user_agent_hdr = None;
+                            let mut cookie_hdr = None;
+                            let mut referer_hdr = None;
+                            let mut all_headers = Vec::new();
 
                             for line in lines {
                                 if let Some((k, v)) = line.split_once(':') {
                                     let key = k.trim().to_ascii_lowercase();
                                     let val = v.trim().to_string();
+                                    all_headers.push((key.clone(), val.clone()));
                                     match key.as_str() {
                                         "range" => range_hdr = Some(val),
                                         "if-range" => if_range_hdr = Some(val),
                                         "accept-encoding" => accept_encoding_hdr = Some(val),
                                         "user-agent" => user_agent_hdr = Some(val),
+                                        "cookie" => cookie_hdr = Some(val),
+                                        "referer" => referer_hdr = Some(val),
                                         _ => {}
                                     }
                                 }
@@ -304,6 +357,8 @@ impl TestServer {
                                 if_range: if_range_hdr.clone(),
                                 accept_encoding: accept_encoding_hdr,
                                 user_agent: user_agent_hdr,
+                                cookie: cookie_hdr,
+                                referer: referer_hdr,
                             };
 
                             reqs_lock.lock().unwrap().push(log_entry);
@@ -312,6 +367,19 @@ impl TestServer {
                             let is_probe = range_hdr.as_deref() == Some(PROBE_RANGE);
                             let _in_flight =
                                 (!is_probe).then(|| InFlight::enter(&in_flight, &peak));
+
+                            let missing_header = required_lock.read().unwrap().iter().any(|(name, want)| {
+                                !all_headers
+                                    .iter()
+                                    .any(|(key, val)| key == name && val.contains(want.as_str()))
+                            });
+                            if missing_header {
+                                let _ = socket
+                                    .write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                                    .await;
+                                let _ = socket.shutdown().await;
+                                return;
+                            }
 
                             let current_etag = etag_lock.read().unwrap().clone();
                             let last_modified = "Sun, 06 Nov 1994 08:49:37 GMT";
@@ -380,6 +448,23 @@ impl TestServer {
                                         .into_bytes();
                                         resp.extend_from_slice(&body_ref);
                                         resp
+                                    }
+                                }
+                                Mode::RedirectTo(target) => {
+                                    let location = target.join(&path).map(|u| u.to_string()).unwrap_or_default();
+                                    format!(
+                                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                                    )
+                                    .into_bytes()
+                                }
+                                Mode::SetCookieThenRedirect => {
+                                    if path.starts_with("/moved/") {
+                                        serve_normal(&body_ref, range_hdr, if_range_hdr, &current_etag, last_modified, "")
+                                    } else {
+                                        format!(
+                                            "HTTP/1.1 302 Found\r\nSet-Cookie: sid=redirect-cookie; Path=/\r\nLocation: /moved{path}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                                        )
+                                        .into_bytes()
                                     }
                                 }
                                 Mode::Status(status) => {
@@ -659,35 +744,7 @@ impl TestServer {
                                         Mode::ContentType(value) => format!("Content-Type: {value}\r\n"),
                                         _ => String::new(),
                                     };
-                                    let total = body_ref.len();
-                                    let mut serve_range = None;
-
-                                    if let Some(r) = range_hdr {
-                                        if let Some(ir) = if_range_hdr {
-                                            if ir == current_etag {
-                                                serve_range = parse_range(&r, total);
-                                            }
-                                        } else {
-                                            serve_range = parse_range(&r, total);
-                                        }
-                                    }
-
-                                    if let Some((start, end)) = serve_range {
-                                        let slice_len = end - start + 1;
-                                        let mut resp = format!(
-                                            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {slice_len}\r\n{content_type}ETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
-                                        )
-                                        .into_bytes();
-                                        resp.extend_from_slice(&body_ref[start..=end]);
-                                        resp
-                                    } else {
-                                        let mut resp = format!(
-                                            "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\n{content_type}ETag: {current_etag}\r\nLast-Modified: {last_modified}\r\nConnection: close\r\n\r\n"
-                                        )
-                                        .into_bytes();
-                                        resp.extend_from_slice(&body_ref);
-                                        resp
-                                    }
+                                    serve_normal(&body_ref, range_hdr, if_range_hdr, &current_etag, last_modified, &content_type)
                                 }
                             };
 
@@ -701,6 +758,7 @@ impl TestServer {
 
         Ok(TestServer {
             url,
+            required,
             etag,
             requests,
             peak_in_flight,
@@ -711,6 +769,15 @@ impl TestServer {
 
     pub fn url(&self) -> url::Url {
         self.url.clone()
+    }
+
+    /// From now on, answer 403 to any request whose `name` header (any case)
+    /// does not contain `value`. The request is still logged.
+    pub fn require_header(&self, name: &str, value: &str) {
+        self.required
+            .write()
+            .unwrap()
+            .push((name.to_ascii_lowercase(), value.to_string()));
     }
 
     pub fn set_etag(&self, etag: &str) {

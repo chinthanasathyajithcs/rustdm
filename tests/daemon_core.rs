@@ -82,6 +82,7 @@ async fn test_daemon_add_download_and_complete() {
         filename: Some("downloaded.bin".to_string()),
         connections: Some(4),
         max_bytes_per_sec: None,
+        context: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(10),
@@ -150,6 +151,7 @@ async fn test_daemon_pause_and_resume() {
         filename: Some("pause_resume.bin".to_string()),
         connections: Some(2),
         max_bytes_per_sec: None,
+        context: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(20),
@@ -306,6 +308,7 @@ async fn test_daemon_telemetry_streaming() {
         filename: Some("telemetry_file.bin".to_string()),
         connections: Some(2),
         max_bytes_per_sec: None,
+        context: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(41),
@@ -493,6 +496,7 @@ fn add_to(
         filename: None,
         connections: None,
         max_bytes_per_sec: None,
+        context: None,
     })
 }
 
@@ -602,6 +606,7 @@ fn add_without_options(url: String) -> AddDownloadParams {
         filename: None,
         connections: None,
         max_bytes_per_sec: None,
+        context: None,
     }
 }
 

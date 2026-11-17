@@ -74,6 +74,7 @@ async fn client_skips_telemetry_between_responses() {
             filename: Some("ticks.bin".to_string()),
             connections: Some(2),
             max_bytes_per_sec: None,
+            context: None,
         })
         .await
         .expect("add");
@@ -176,6 +177,7 @@ async fn cancelled_download_stays_cancelled_after_the_engine_stops() {
             filename: Some("cancel_me.bin".to_string()),
             connections: Some(2),
             max_bytes_per_sec: None,
+            context: None,
         })
         .await
         .expect("add");

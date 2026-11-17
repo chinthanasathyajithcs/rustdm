@@ -231,3 +231,18 @@ async fn resume_never_opens_more_connections_than_saved_even_with_many_gaps() {
     assert_eq!(fs::read(dir.path().join("lanes.bin")).unwrap(), body);
     assert_eq!(srv.peak_concurrent_requests(), 2);
 }
+
+#[tokio::test]
+async fn resume_stops_when_the_link_now_answers_with_a_web_page() {
+    const MIB: u64 = 1024 * 1024;
+    let body = pattern_bytes(4 * MIB);
+    // A sign-in screen where the file used to be.
+    let srv = TestServer::start(body.clone(), Mode::ContentType("text/html".to_string())).await;
+    let dir = tempdir().unwrap();
+    let state_p = partial_download(&srv, dir.path(), &body, vec![ByteRange::new(0, MIB)], None);
+
+    let err = resume(&build_client(), &state_p, None).await.unwrap_err();
+
+    assert!(matches!(err, Error::WebPage), "{err:?}");
+    assert!(state_p.exists(), "the partial download is left as it was");
+}

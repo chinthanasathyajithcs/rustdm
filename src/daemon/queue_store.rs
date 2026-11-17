@@ -40,6 +40,16 @@ pub struct SavedDownload {
     /// This download's own speed cap; 0 means none. Missing from older queue files.
     #[serde(default)]
     pub max_bytes_per_sec: u64,
+    /// The download came with browser cookies, kept apart in the secret store.
+    /// Missing from older queue files.
+    #[serde(default)]
+    pub has_cookies: bool,
+    /// Page the download came from, sent as the Referer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referer: Option<String>,
+    /// The browser's User-Agent, sent with every request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
 }
 
 /// Reads and writes the queue file. Saves are serialized and atomic.
@@ -154,6 +164,9 @@ mod tests {
                 downloaded_bytes: 400,
                 error_message: None,
                 max_bytes_per_sec: 0,
+                has_cookies: true,
+                referer: Some("https://example.com/files".to_string()),
+                user_agent: Some("Mozilla/5.0".to_string()),
             }],
         }
     }
@@ -184,6 +197,34 @@ mod tests {
             std::fs::read(dir.path().join("queue.json.corrupt")).unwrap(),
             b"{ not json"
         );
+    }
+
+    #[test]
+    fn a_saved_download_without_request_context_fields_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::in_dir(dir.path());
+        std::fs::write(
+            store.path(),
+            br#"{"version":1,"next_id":1,"limits":{"max_active":3,"max_bytes_per_sec":0},
+                "downloads":[{"id":"dl_1","url":"http://example.com/a.iso","directory":"/d",
+                "requested_name":null,"filename":"a.iso","output":null,"connections":8,
+                "status":"queued","total_bytes":null,"downloaded_bytes":0,"error_message":null}]}"#,
+        )
+        .unwrap();
+        let saved = &store.load().unwrap().expect("loads").downloads[0];
+        assert!(!saved.has_cookies);
+        assert_eq!(saved.referer, None);
+        assert_eq!(saved.user_agent, None);
+    }
+
+    #[test]
+    fn the_queue_file_records_that_cookies_exist_but_never_what_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::in_dir(dir.path());
+        store.save(&sample()).unwrap();
+        let text = std::fs::read_to_string(store.path()).unwrap();
+        assert!(text.contains("\"has_cookies\": true"));
+        assert!(!text.contains("\"cookies\""));
     }
 
     #[test]

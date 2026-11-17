@@ -430,6 +430,9 @@ pub struct AddDownloadParams {
     /// Speed cap for this download alone in bytes per second; 0 or missing means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes_per_sec: Option<u64>,
+    /// Cookies, Referer and User-Agent to send with every request, from a browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::request_context::RequestContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +751,7 @@ mod tests {
             filename: Some("file.bin".to_string()),
             connections: Some(8),
             max_bytes_per_sec: None,
+            context: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),

@@ -38,6 +38,7 @@ fn add_params(mock: &TestServer, name: &str, dir: &Path) -> AddDownloadParams {
         filename: Some(name.to_string()),
         connections: Some(1),
         max_bytes_per_sec: None,
+        context: None,
     }
 }
 
@@ -463,6 +464,7 @@ async fn a_per_download_speed_cap_slows_only_that_download() {
     let slow = client
         .add(AddDownloadParams {
             max_bytes_per_sec: Some(64 * 1024),
+            context: None,
             ..add_params(&mock, "slow.bin", dir.path())
         })
         .await
@@ -535,6 +537,7 @@ async fn speed_caps_can_be_changed_and_are_validated() {
         client
             .add(AddDownloadParams {
                 max_bytes_per_sec: Some(1),
+                context: None,
                 ..add_params(&mock, "bad.bin", dir.path())
             })
             .await,
