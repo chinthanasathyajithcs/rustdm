@@ -346,3 +346,163 @@ async fn an_oversized_frame_gets_a_too_large_reply_and_the_host_exits() {
     assert_eq!(reply["error"]["kind"], "too_large");
     assert!(host.finish().await.success());
 }
+
+const SIGNED_IN_BODY_BYTES: u64 = 2 * 1024 * 1024;
+const COOKIE_VALUE: &str = "hush-hush";
+const PAGE: &str = "https://files.example.com/page";
+const BROWSER_AGENT: &str = "TestBrowser/1.0";
+
+fn extension_cookie(value: &str) -> Value {
+    json!({
+        "name": "sid", "value": value, "domain": "127.0.0.1", "path": "/",
+        "secure": false, "host_only": true, "expires": 4_102_444_800.5
+    })
+}
+
+#[tokio::test]
+async fn an_add_with_cookies_referer_and_user_agent_reaches_the_probe_and_every_worker() {
+    let body = pattern_bytes(SIGNED_IN_BODY_BYTES);
+    let server = TestServer::start(body.clone(), Mode::Normal).await;
+    server.require_header("cookie", &format!("sid={COOKIE_VALUE}"));
+    server.require_header("referer", PAGE);
+    server.require_header("user-agent", BROWSER_AGENT);
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+
+    let reply = host
+        .call(json!({
+            "type": "add", "id": 1, "url": server.url().to_string(), "filename": "signed.bin",
+            "context": {
+                "cookies": [extension_cookie(COOKIE_VALUE)],
+                "referer": PAGE, "user_agent": BROWSER_AGENT
+            }
+        }))
+        .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let id = reply["result"]["download_id"].as_str().unwrap().to_string();
+    wait_for_download(&mut client, &id, &env.downloads(), "signed.bin").await;
+    assert_eq!(
+        std::fs::read(env.downloads().join("signed.bin")).unwrap(),
+        body
+    );
+
+    let requests = server.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.range.as_deref() == Some("bytes=0-0")),
+        "the size probe was sent"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.range.as_deref().is_some_and(|range| range != "bytes=0-0")),
+        "at least one worker was sent"
+    );
+    for request in &requests {
+        let cookie = request.cookie.as_deref().unwrap_or_default();
+        assert!(
+            cookie.contains(&format!("sid={COOKIE_VALUE}")),
+            "{request:?}"
+        );
+        assert_eq!(request.referer.as_deref(), Some(PAGE), "{request:?}");
+        assert_eq!(
+            request.user_agent.as_deref(),
+            Some(BROWSER_AGENT),
+            "{request:?}"
+        );
+    }
+
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
+
+#[tokio::test]
+async fn an_invalid_context_is_refused_with_a_fixed_message_and_nothing_is_queued() {
+    let server = TestServer::start(pattern_bytes(32 * 1024), Mode::Normal).await;
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+
+    let too_many: Vec<Value> = (0..rustdm::request_context::MAX_COOKIES + 1)
+        .map(|_| extension_cookie(COOKIE_VALUE))
+        .collect();
+    let reply = host
+        .call(json!({
+            "type": "add", "id": 1, "url": server.url().to_string(),
+            "context": {"cookies": too_many}
+        }))
+        .await;
+
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["error"]["kind"], "invalid");
+    assert_eq!(
+        reply["error"]["message"],
+        format!(
+            "Invalid params: cookies: more than {} cookies",
+            rustdm::request_context::MAX_COOKIES
+        )
+    );
+    assert!(!reply.to_string().contains(COOKIE_VALUE));
+    assert!(client.list().await.unwrap().is_empty());
+    assert!(server.requests().is_empty(), "nothing was fetched");
+
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
+
+#[tokio::test]
+async fn a_cookie_of_the_wrong_shape_is_refused_by_the_host_without_quoting_it() {
+    let env = Env::new();
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+
+    let reply = host
+        .call(json!({
+            "type": "add", "id": 4, "url": "https://example.com/x",
+            "context": {"cookies": [{"value": COOKIE_VALUE, "domain": "example.com"}]}
+        }))
+        .await;
+
+    assert_eq!(reply["ok"], false);
+    assert_eq!(reply["id"], 4);
+    assert_eq!(reply["error"]["kind"], "invalid");
+    assert!(!reply.to_string().contains(COOKIE_VALUE), "{reply}");
+    assert!(host.finish().await.success());
+}
+
+#[tokio::test]
+async fn an_add_without_context_still_works_and_sends_no_cookies() {
+    let body = pattern_bytes(64 * 1024);
+    let server = TestServer::start(body.clone(), Mode::Normal).await;
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+
+    let reply = host
+        .call(json!({
+            "type": "add", "id": 1, "url": server.url().to_string(), "filename": "plain.bin"
+        }))
+        .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    let id = reply["result"]["download_id"].as_str().unwrap().to_string();
+    wait_for_download(&mut client, &id, &env.downloads(), "plain.bin").await;
+    assert_eq!(
+        std::fs::read(env.downloads().join("plain.bin")).unwrap(),
+        body
+    );
+    for request in server.requests() {
+        assert!(request.cookie.is_none(), "{request:?}");
+        assert!(request.referer.is_none(), "{request:?}");
+    }
+
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
