@@ -14,6 +14,11 @@ pub enum Error {
     Protocol(String),
     #[error("state error: {0}")]
     State(String),
+    /// A helper tool (yt-dlp, ffmpeg, deno) could not be fetched or installed.
+    /// `message` is shown to the user as it is; `transient` marks trouble that
+    /// may go away by itself.
+    #[error("{message}")]
+    Tool { message: String, transient: bool },
     #[error("insufficient disk space on {target}: required {required} bytes, available {available} bytes")]
     InsufficientDiskSpace {
         target: String,
@@ -75,7 +80,11 @@ impl Error {
     /// Network or server trouble that may go away by itself, so the download is
     /// worth trying again later. Disk, permission, and changed-file problems are not.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Error::Http(_) | Error::Protocol(_))
+        match self {
+            Error::Http(_) | Error::Protocol(_) => true,
+            Error::Tool { transient, .. } => *transient,
+            _ => false,
+        }
     }
 }
 

@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use crate::ipc::protocol::{AddDownloadParams, QueuePosition, SetDefaultsParams, SetLimitsParams};
+use crate::ipc::protocol::{
+    AddDownloadParams, QueuePosition, SetDefaultsParams, SetLimitsParams, ToolName,
+};
 
 /// Something the dashboard asks the daemon to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +27,10 @@ pub enum Action {
     SetLimits(SetLimitsParams),
     /// Change the defaults for new downloads; fields left out keep their value.
     SetDefaults(SetDefaultsParams),
+    /// Check a helper tool for a newer version, installing it if it is missing.
+    UpdateTool(ToolName),
+    /// Go back to a helper tool's previous version.
+    RollbackTool(ToolName),
     /// Stop rdmd, which pauses active downloads until it starts again.
     StopDaemon,
     Remove(String),

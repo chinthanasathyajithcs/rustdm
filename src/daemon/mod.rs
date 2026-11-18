@@ -14,6 +14,7 @@ pub mod sign_in;
 pub mod speed;
 pub mod stall;
 pub mod task;
+pub mod tools_rpc;
 
 pub use core::{DaemonCore, DaemonState};
 pub use server::DaemonServer;
