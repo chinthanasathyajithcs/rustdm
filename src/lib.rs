@@ -3,6 +3,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod cancel;
+pub mod console;
 pub mod daemon;
 pub mod dirs;
 pub mod disk;
@@ -16,6 +17,7 @@ pub mod ranges;
 pub mod request_context;
 pub mod retry;
 pub mod scheduler;
+pub mod shortcut;
 pub mod state;
 pub mod template;
 #[cfg(feature = "testing")]

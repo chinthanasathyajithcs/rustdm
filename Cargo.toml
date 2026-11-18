@@ -39,6 +39,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
 zip = { version = "9.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+[build-dependencies]
+# Embeds the icon and version info into the Windows .exe files (build time only).
+winresource = "0.1.34"
+
 [dev-dependencies]
 tempfile = "3.17"
 

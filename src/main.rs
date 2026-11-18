@@ -14,6 +14,7 @@ use rustdm::ipc::protocol::{
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::nmhost::install;
 use rustdm::request_context::RequestContext;
+use rustdm::shortcut;
 use rustdm::tools::cli::{run as run_tools, ToolsCommand, UPDATE_WAIT};
 use rustdm::tui::format::{
     format_bytes, format_eta, format_row, format_speed, format_speed_cap, status_label,
@@ -158,6 +159,11 @@ enum Commands {
         #[command(subcommand)]
         action: BrowserAction,
     },
+    /// Add or remove the rustdm shortcut on the Desktop and in the Start menu
+    Shortcut {
+        #[command(subcommand)]
+        action: shortcut::Action,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -243,6 +249,10 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
+            // Double-clicked: the window closes with rdm, so keep it readable.
+            if rustdm::console::started_on_its_own_window() {
+                rustdm::console::pause_before_closing();
+            }
             ExitCode::FAILURE
         }
     }
@@ -361,6 +371,10 @@ async fn run(cli: Cli) -> CliResult {
             DaemonAction::Stop => daemon_stop(&endpoint).await,
         },
         Commands::Browser { action } => browser(action),
+        Commands::Shortcut { action } => {
+            let this_exe = std::env::current_exe()?;
+            Ok(shortcut::run(action, &this_exe, &mut std::io::stdout())?)
+        }
     }
 }
 
