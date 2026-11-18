@@ -45,9 +45,13 @@ pub fn sign_in_expired_message(status: u16) -> String {
     format!("sign-in expired (HTTP {status}); {START_AGAIN_FROM_BROWSER}")
 }
 
-/// What to tell the user when a download with cookies was answered with a sign-in page.
-pub fn sign_in_page_message() -> String {
-    format!("sign-in expired (the site sent a sign-in page); {START_AGAIN_FROM_BROWSER}")
+/// What to tell the user when a download with cookies was answered with a web
+/// page. It may be a sign-in page, or the link may just lead to a page: browser
+/// cookies ride along on almost every caught download, so neither is assumed.
+pub fn web_page_with_cookies_message() -> String {
+    "the link opened a web page, not a file; \
+     if the site wants you to sign in, sign in and start the download again from the browser"
+        .to_string()
 }
 
 /// What to tell the user when the saved cookies ran out while the daemon was off.

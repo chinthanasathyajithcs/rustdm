@@ -2,7 +2,8 @@ use crate::daemon::queue_store::SavedDownload;
 use crate::daemon::speed::SpeedMeter;
 use crate::engine::{Outcome, PauseReason, Progress};
 use crate::error::{
-    is_sign_in_status, link_status_message, sign_in_expired_message, sign_in_page_message, Error,
+    is_sign_in_status, link_status_message, sign_in_expired_message, web_page_with_cookies_message,
+    Error,
 };
 use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
 use crate::limiter::RateLimiter;
@@ -370,7 +371,7 @@ impl TaskRecord {
                 self.fail_signed_out(sign_in_expired_message(status));
             }
             Err(Error::WebPage) if self.has_cookies => {
-                self.fail_signed_out(sign_in_page_message());
+                self.fail_signed_out(web_page_with_cookies_message());
             }
             Err(e) => self.fail_or_retry(e),
         }
@@ -791,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sign_in_page_on_a_download_with_cookies_asks_for_a_new_sign_in() {
+    fn a_web_page_on_a_download_with_cookies_says_it_is_a_web_page_and_may_need_sign_in() {
         let mut rec = with_cookies(DownloadStatus::Active);
         rec.begin_run();
         fail(&mut rec, Error::WebPage);
@@ -799,7 +800,7 @@ mod tests {
         assert!(!rec.has_cookies);
         assert_eq!(
             rec.error_message.as_deref(),
-            Some("sign-in expired (the site sent a sign-in page); start the download again from the browser to continue it")
+            Some("the link opened a web page, not a file; if the site wants you to sign in, sign in and start the download again from the browser")
         );
     }
 

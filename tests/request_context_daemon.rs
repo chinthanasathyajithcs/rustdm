@@ -839,7 +839,7 @@ async fn a_sign_in_page_on_resume_fails_the_download_and_deletes_the_secret() {
 
     assert_eq!(
         failed.error_message.as_deref(),
-        Some("sign-in expired (the site sent a sign-in page); start the download again from the browser to continue it")
+        Some("the link opened a web page, not a file; if the site wants you to sign in, sign in and start the download again from the browser")
     );
     assert!(!secret_file(data.path(), &paused.id).exists());
 }
