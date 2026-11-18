@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- rustdm icon, master (48 px and up). Light from the top left. -->
+  <defs>
+    <radialGradient id="shell" cx="0.36" cy="0.24" r="0.82">
+      <stop offset="0" stop-color="#ffd3a4"/>
+      <stop offset="0.26" stop-color="#ff9a4f"/>
+      <stop offset="0.6" stop-color="#f06e28"/>
+      <stop offset="0.88" stop-color="#c5450e"/>
+      <stop offset="1" stop-color="#97300a"/>
+    </radialGradient>
+    <linearGradient id="belly" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.5" stop-color="#5e1800" stop-opacity="0"/>
+      <stop offset="1" stop-color="#5e1800" stop-opacity="0.45"/>
+    </linearGradient>
+    <radialGradient id="claw" cx="0.32" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#ffc590"/>
+      <stop offset="0.45" stop-color="#f57a31"/>
+      <stop offset="1" stop-color="#a5360b"/>
+    </radialGradient>
+    <linearGradient id="limb" gradientUnits="userSpaceOnUse" x1="0" y1="60" x2="0" y2="235">
+      <stop offset="0" stop-color="#fa8a42"/>
+      <stop offset="1" stop-color="#b03f0e"/>
+    </linearGradient>
+    <radialGradient id="joint" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#f58440"/>
+      <stop offset="1" stop-color="#9b330b"/>
+    </radialGradient>
+    <radialGradient id="eye" cx="0.38" cy="0.32" r="0.72">
+      <stop offset="0" stop-color="#6e5d55"/>
+      <stop offset="0.5" stop-color="#231814"/>
+      <stop offset="1" stop-color="#060302"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#fff7de"/>
+      <stop offset="0.32" stop-color="#ffdc8e"/>
+      <stop offset="0.68" stop-color="#f2b246"/>
+      <stop offset="1" stop-color="#c47f22"/>
+    </linearGradient>
+    <clipPath id="arrowClip"><path d="M115 114 H141 V145 H160 L128 182 L96 145 H115 Z"/></clipPath>
+    <filter id="blur6" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="blur4" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4"/></filter>
+    <filter id="blur2" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2"/></filter>
+    <filter id="blur1" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="0.9"/></filter>
+    <path id="clawShape" d="M-15 4 C-17 -10 -16 -26 -9 -38 C-6 -41 -2 -39 -2.5 -35 C-4 -28 -3 -20 0 -14 C3 -20 5.5 -27 8 -33 C10 -36.5 14.5 -35.5 14 -31 C17 -20 18 -6 15 6 C13 15 7 19 0 19 C-8 19 -14 13 -15 4 Z"/>
+    <g id="clawLit">
+      <use href="#clawShape" fill="url(#claw)"/>
+      <ellipse cx="-6" cy="3" rx="5" ry="8" fill="#fff" opacity=".42" filter="url(#blur2)"/>
+      <path d="M-12 -6 C-13 -18 -12 -28 -8 -35" stroke="#fff" stroke-width="2" stroke-linecap="round" fill="none" opacity=".55" filter="url(#blur1)"/>
+    </g>
+  </defs>
+
+  <!-- ground shadow -->
+  <ellipse cx="128" cy="232" rx="88" ry="11" fill="#000" opacity=".28" filter="url(#blur6)"/>
+  <g fill="#000" opacity=".28" filter="url(#blur2)">
+    <ellipse cx="29" cy="193" rx="5" ry="2"/><ellipse cx="43" cy="216" rx="5" ry="2"/><ellipse cx="69" cy="232" rx="5" ry="2"/>
+    <ellipse cx="227" cy="193" rx="5" ry="2"/><ellipse cx="213" cy="216" rx="5" ry="2"/><ellipse cx="187" cy="232" rx="5" ry="2"/>
+  </g>
+
+  <!-- legs: two segments each, behind the shell -->
+  <g fill="none" stroke="url(#limb)" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke-width="11"><path d="M72 168 L48 168"/><path d="M78 182 L56 191"/><path d="M92 194 L76 208"/>
+      <path d="M184 168 L208 168"/><path d="M178 182 L200 191"/><path d="M164 194 L180 208"/></g>
+    <g stroke-width="7.5"><path d="M48 168 L30 190"/><path d="M56 191 L44 213"/><path d="M76 208 L70 229"/>
+      <path d="M208 168 L226 190"/><path d="M200 191 L212 213"/><path d="M180 208 L186 229"/></g>
+  </g>
+  <g fill="url(#joint)">
+    <circle cx="48" cy="168" r="6"/><circle cx="56" cy="191" r="6"/><circle cx="76" cy="208" r="6"/>
+    <circle cx="208" cy="168" r="6"/><circle cx="200" cy="191" r="6"/><circle cx="180" cy="208" r="6"/>
+  </g>
+
+  <!-- arms: upper arm, elbow, forearm -->
+  <g fill="none" stroke="url(#limb)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M64 142 L42 126" stroke-width="15"/><path d="M42 126 L47 102" stroke-width="13"/>
+    <path d="M192 142 L214 126" stroke-width="15"/><path d="M214 126 L209 102" stroke-width="13"/>
+  </g>
+  <circle cx="42" cy="126" r="9" fill="url(#joint)"/><circle cx="214" cy="126" r="9" fill="url(#joint)"/>
+  <path d="M60 136 L44 124" stroke="#ffb27a" stroke-width="2.5" stroke-linecap="round" opacity=".55"/>
+
+  <!-- pincers -->
+  <use href="#clawLit" transform="translate(46 94) rotate(-16)"/>
+  <g transform="translate(210 94) scale(-1 1) rotate(-16)">
+    <use href="#clawShape" fill="url(#claw)"/>
+    <ellipse cx="6" cy="3" rx="4" ry="7" fill="#fff" opacity=".2" filter="url(#blur2)"/>
+  </g>
+
+  <!-- eye stalks (behind the shell edge) -->
+  <path d="M108 96 L104.5 64 L109.5 64 L116 96 Z" fill="url(#limb)"/>
+  <path d="M140 96 L146.5 64 L151.5 64 L148 96 Z" fill="url(#limb)"/>
+
+  <!-- shell -->
+  <path d="M38 148 C38 106 80 86 128 86 C176 86 218 106 218 148 C218 186 178 206 128 206 C78 206 38 186 38 148 Z" fill="url(#shell)"/>
+  <path d="M38 148 C38 106 80 86 128 86 C176 86 218 106 218 148 C218 186 178 206 128 206 C78 206 38 186 38 148 Z" fill="url(#belly)"/>
+  <path d="M58 182 Q128 218 198 182" stroke="#ffb07a" stroke-width="3" fill="none" opacity=".35" filter="url(#blur2)"/>
+  <ellipse cx="98" cy="106" rx="44" ry="12" fill="#fff" opacity=".5" transform="rotate(-10 98 106)" filter="url(#blur4)"/>
+  <ellipse cx="80" cy="114" rx="11" ry="4" fill="#fff" opacity=".85" transform="rotate(-24 80 114)" filter="url(#blur1)"/>
+
+  <!-- the gold arrow, set into a bevelled recess -->
+  <g stroke-linejoin="round">
+    <path d="M115 114 H141 V145 H160 L128 182 L96 145 H115 Z" transform="translate(1.6 2.4)" fill="#ffd0a2" stroke="#ffd0a2" stroke-width="4.5" opacity=".55"/>
+    <path d="M115 114 H141 V145 H160 L128 182 L96 145 H115 Z" transform="translate(-1 -1.3)" fill="#7a2604" stroke="#7a2604" stroke-width="4.5" opacity=".6"/>
+    <path d="M115 114 H141 V145 H160 L128 182 L96 145 H115 Z" fill="url(#gold)" stroke="url(#gold)" stroke-width="4"/>
+  </g>
+  <g clip-path="url(#arrowClip)">
+    <path d="M115 114 H141 V145 H160 L128 182 L96 145 H115 Z" transform="translate(2.5 3)" fill="none" stroke="#8a4a08" stroke-width="5" opacity=".32" filter="url(#blur2)"/>
+  </g>
+  <path d="M119 118 V146" stroke="#fff" stroke-width="3" stroke-linecap="round" opacity=".75" filter="url(#blur1)"/>
+  <path d="M104 148 L126 172" stroke="#fff" stroke-width="2.4" stroke-linecap="round" opacity=".6" filter="url(#blur1)"/>
+
+  <!-- eyes -->
+  <circle cx="105" cy="54" r="15.5" fill="#d26a32"/><circle cx="105" cy="54" r="14" fill="url(#eye)"/>
+  <circle cx="151" cy="54" r="15.5" fill="#d26a32"/><circle cx="151" cy="54" r="14" fill="url(#eye)"/>
+  <ellipse cx="100" cy="48" rx="5.2" ry="4" fill="#fff" transform="rotate(-20 100 48)"/>
+  <ellipse cx="146" cy="48" rx="5.2" ry="4" fill="#fff" transform="rotate(-20 146 48)"/>
+  <circle cx="111" cy="61" r="2" fill="#fff" opacity=".55"/><circle cx="157" cy="61" r="2" fill="#fff" opacity=".55"/>
+</svg>

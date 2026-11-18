@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- rustdm icon, small (16-24 px): fewer, bolder shapes; same colours and light. -->
+  <defs>
+    <radialGradient id="shell" cx="0.36" cy="0.26" r="0.85">
+      <stop offset="0" stop-color="#ffc48c"/><stop offset="0.35" stop-color="#ff8a3d"/><stop offset="0.8" stop-color="#d4520f"/><stop offset="1" stop-color="#a3380b"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#fff4d2"/><stop offset="0.5" stop-color="#ffd27a"/><stop offset="1" stop-color="#e09a32"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="#d65a17" stroke-linecap="round" stroke-width="20">
+    <path d="M58 176 L22 204"/><path d="M198 176 L234 204"/>
+    <path d="M84 196 L66 232"/><path d="M172 196 L190 232"/>
+    <path d="M56 140 L30 104"/><path d="M200 140 L226 104"/>
+  </g>
+  <g fill="#f2742c">
+    <path d="M10 92 C6 60 18 34 36 22 C40 40 40 56 36 66 C46 58 54 46 58 32 C70 50 66 82 48 98 C34 108 14 106 10 92 Z"/>
+    <path d="M246 92 C250 60 238 34 220 22 C216 40 216 56 220 66 C210 58 202 46 198 32 C186 50 190 82 208 98 C222 108 242 106 246 92 Z"/>
+  </g>
+  <g stroke="#d65a17" stroke-width="14" stroke-linecap="round"><path d="M104 90 L96 52"/><path d="M152 90 L160 52"/></g>
+  <path d="M24 152 C24 102 72 80 128 80 C184 80 232 102 232 152 C232 196 186 218 128 218 C70 218 24 196 24 152 Z" fill="url(#shell)"/>
+  <path d="M109 104 H147 V146 H174 L128 200 L82 146 H109 Z" fill="#7a2604" opacity=".55" transform="translate(-3 -3)" stroke="#7a2604" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M109 104 H147 V146 H174 L128 200 L82 146 H109 Z" fill="url(#gold)" stroke="url(#gold)" stroke-width="6" stroke-linejoin="round"/>
+  <circle cx="94" cy="40" r="25" fill="#f08a48"/><circle cx="162" cy="40" r="25" fill="#f08a48"/><circle cx="94" cy="40" r="20" fill="#140c09"/><circle cx="162" cy="40" r="20" fill="#140c09"/>
+  <circle cx="87" cy="32" r="7" fill="#fff"/><circle cx="155" cy="32" r="7" fill="#fff"/>
+</svg>

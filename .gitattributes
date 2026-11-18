@@ -3,3 +3,5 @@ tests/fixtures/** -text
 *.gpg binary
 *.sig binary
 *.der binary
+*.ico binary
+*.png binary
