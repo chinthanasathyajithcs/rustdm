@@ -194,6 +194,14 @@ async fn an_update_keeps_the_previous_version_and_rollback_goes_back() {
     assert_eq!(version_folders(&world.root(), "yt-dlp"), vec![V1, V3]);
 }
 
+/// A speed per connection at which `program` downloads in about two seconds
+/// over the tools' 4 connections. On Windows a fake program is a copy of the
+/// test build of rdmd, megabytes where the Unix script is a few bytes, so a
+/// fixed speed made it take most of a test's 30-second wait there.
+fn throttle_for_two_seconds(program: &[u8]) -> u64 {
+    (program.len() as u64 / 8).max(150_000)
+}
+
 async fn wait_until_idle(store: &ToolStore, tool: Tool) {
     let started = std::time::Instant::now();
     while info(store, tool).phase != ToolPhase::Idle {
@@ -342,9 +350,10 @@ async fn rollback_while_an_update_runs_is_refused_and_a_second_update_is_skipped
     slow.extend(std::iter::repeat_n(b'#', 300_000));
     publish_ytdlp(&world.server, V2, &slow);
     let asset = format!("/{TEST_REPO}/releases/download/{V2}/{TEST_ASSET}");
-    world
-        .server
-        .set_route(&asset, Route::ok(slow.clone()).throttled(150_000));
+    world.server.set_route(
+        &asset,
+        Route::ok(slow.clone()).throttled(throttle_for_two_seconds(&slow)),
+    );
     let before = world.api_calls();
 
     store.start_update(Some(Tool::YtDlp));
@@ -495,9 +504,10 @@ async fn cancelling_a_download_and_trying_again_resumes_it() {
     program.extend(std::iter::repeat_n(b'#', 300_000));
     publish_ytdlp(&world.server, V1, &program);
     let asset = format!("/{TEST_REPO}/releases/download/{V1}/{TEST_ASSET}");
-    world
-        .server
-        .set_route(&asset, Route::ok(program.clone()).throttled(150_000));
+    world.server.set_route(
+        &asset,
+        Route::ok(program.clone()).throttled(throttle_for_two_seconds(&program)),
+    );
     let store = world.store();
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
