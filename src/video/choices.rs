@@ -47,6 +47,16 @@ fn is_progressive(f: &FormatInfo) -> bool {
     has_codec(&f.vcodec) && has_codec(&f.acodec)
 }
 
+/// A direct mp4 or webm stream whose codecs yt-dlp did not report.
+fn is_codecless_stream(f: &FormatInfo) -> bool {
+    f.vcodec.is_none() && f.acodec.is_none() && (has_ext(f, "mp4") || has_ext(f, "webm"))
+}
+
+/// Video and sound in one stream, as far as we can tell.
+fn is_whole_stream(f: &FormatInfo) -> bool {
+    is_progressive(f) || is_codecless_stream(f)
+}
+
 fn is_direct(f: &FormatInfo) -> bool {
     matches!(f.protocol.as_deref(), Some("https" | "http"))
 }
@@ -81,7 +91,7 @@ fn original_audio<'a>(formats: &[&'a FormatInfo]) -> Vec<&'a FormatInfo> {
     let audio: Vec<&FormatInfo> = formats
         .iter()
         .copied()
-        .filter(|f| is_audio_only(f))
+        .filter(|f| is_audio_only(f) && !f.format_id.ends_with("-drc"))
         .collect();
     let preference = |f: &FormatInfo| f.language_preference.unwrap_or(0);
     let top = audio.iter().map(|f| preference(f)).max();
@@ -202,17 +212,24 @@ fn split_row(
     ))
 }
 
-fn progressive_row(height: u32, all: &[&FormatInfo]) -> Option<VideoChoice> {
-    let candidates = all.iter().copied().filter(|f| {
-        is_progressive(f) && f.height == Some(height) && !starts_with(&f.vcodec, &["av01"])
-    });
+/// The best whole stream of a height, or of no known height when `None`.
+fn progressive_row(height: Option<u32>, all: &[&FormatInfo]) -> Option<VideoChoice> {
+    let candidates = all
+        .iter()
+        .copied()
+        .filter(|f| is_whole_stream(f) && f.height == height && !starts_with(&f.vcodec, &["av01"]));
     let f = best(candidates.filter(|f| has_ext(f, "mp4") || has_ext(f, "webm")))?;
     let container = if has_ext(f, "mp4") {
         Container::Mp4
     } else {
         Container::Webm
     };
-    Some(row(Some(height), container, &[(f, StreamKind::Both)]))
+    let mut choice = row(height, container, &[(f, StreamKind::Both)]);
+    if height.is_none() {
+        choice.id = format!("video-{}", container.ext());
+        choice.label = "Video".to_string();
+    }
+    Some(choice)
 }
 
 fn audio_row(audio: &[&FormatInfo]) -> Option<VideoChoice> {
@@ -232,28 +249,46 @@ fn video_rows(usable: &[&FormatInfo]) -> Vec<VideoChoice> {
         .collect();
     let heights: BTreeSet<u32> = usable
         .iter()
-        .filter(|f| is_video_only(f) || is_progressive(f))
+        .filter(|f| is_video_only(f) || is_whole_stream(f))
         .filter_map(|f| f.height)
         .filter(|h| *h > 0)
         .collect();
     let mut rows: Vec<VideoChoice> = heights
         .into_iter()
-        .filter_map(|h| split_row(h, &video, aac, opus).or_else(|| progressive_row(h, usable)))
+        .filter_map(|h| {
+            split_row(h, &video, aac, opus).or_else(|| progressive_row(Some(h), usable))
+        })
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.height));
+    rows.extend(progressive_row(None, usable));
     rows
 }
 
-/// Why no row was left, for a page that offers nothing.
-fn failure(formats: &[FormatInfo]) -> ChoicesError {
-    let real: Vec<&FormatInfo> = formats.iter().filter(|f| !is_storyboard(f)).collect();
-    let video: Vec<&&FormatInfo> = real.iter().filter(|f| is_video_capable(f)).collect();
-    if real.is_empty() {
-        ChoicesError::NoFormats
-    } else if !video.is_empty() && video.iter().all(|f| f.is_drm()) {
-        ChoicesError::Drm
-    } else {
+/// The formats a page has besides its storyboards.
+fn real_formats(formats: &[FormatInfo]) -> Vec<&FormatInfo> {
+    formats.iter().filter(|f| !is_storyboard(f)).collect()
+}
+
+/// Every format that carries video (video-only or progressive) is DRM.
+fn all_video_is_drm(formats: &[FormatInfo]) -> bool {
+    let video: Vec<&FormatInfo> = real_formats(formats)
+        .into_iter()
+        .filter(|f| is_video_capable(f))
+        .collect();
+    !video.is_empty() && video.iter().all(|f| f.is_drm())
+}
+
+/// Why no row was left: small pieces only when a stream exists that is not
+/// direct and none that is.
+fn no_rows_error(formats: &[FormatInfo]) -> ChoicesError {
+    let carries_media = |f: &&FormatInfo| has_codec(&f.vcodec) || has_codec(&f.acodec);
+    let real = real_formats(formats);
+    let direct = real.iter().filter(|f| is_direct(f)).any(carries_media);
+    let pieces = real.iter().filter(|f| !is_direct(f)).any(carries_media);
+    if pieces && !direct {
         ChoicesError::PiecesOnly
+    } else {
+        ChoicesError::NoFormats
     }
 }
 
@@ -268,11 +303,14 @@ fn default_index(rows: &[VideoChoice]) -> usize {
 
 /// The quality list of a page, highest first with "Audio only" last.
 pub fn build_choices(info: &PageInfo) -> Result<VideoChoices, ChoicesError> {
+    if all_video_is_drm(&info.formats) {
+        return Err(ChoicesError::Drm);
+    }
     let usable: Vec<&FormatInfo> = info.formats.iter().filter(|f| usable(f)).collect();
     let mut choices = video_rows(&usable);
     choices.extend(audio_row(&original_audio(&usable)));
     if choices.is_empty() {
-        return Err(failure(&info.formats));
+        return Err(no_rows_error(&info.formats));
     }
     let default = default_index(&choices);
     Ok(VideoChoices {
@@ -289,7 +327,10 @@ pub fn pick(choices: &VideoChoices, quality: Quality) -> usize {
     let last = rows.len().saturating_sub(1);
     match quality {
         Quality::Best => 0,
-        Quality::Audio => rows.iter().position(|r| r.height.is_none()).unwrap_or(last),
+        Quality::Audio => rows
+            .iter()
+            .position(|r| r.id.starts_with("audio-"))
+            .unwrap_or(last),
         Quality::Height(wanted) => {
             let videos = || rows.iter().enumerate().filter(|(_, r)| r.height.is_some());
             videos()
@@ -599,6 +640,104 @@ mod tests {
             build_choices(&page(formats)).unwrap_err(),
             ChoicesError::Drm
         );
+    }
+
+    fn codecless(id: &str, ext: &str, height: Option<u32>) -> FormatInfo {
+        FormatInfo {
+            vcodec: None,
+            acodec: None,
+            ..fmt(id, ext, "", "", height)
+        }
+    }
+
+    #[test]
+    fn a_codecless_stream_without_a_height_is_one_video_row() {
+        let choices = built(vec![codecless("http-1", "mp4", None)]);
+
+        assert_eq!(labels(&choices), ["Video"]);
+        let choice = &choices.choices[0];
+        assert_eq!(choice.id, "video-mp4");
+        assert_eq!(choice.container, Container::Mp4);
+        assert_eq!(choice.height, None);
+        assert_eq!(choice.streams.len(), 1);
+        assert_eq!(choice.streams[0].kind, StreamKind::Both);
+    }
+
+    #[test]
+    fn a_codecless_stream_with_a_height_is_that_height() {
+        let choices = built(vec![codecless("http-1", "mp4", Some(720))]);
+
+        assert_eq!(labels(&choices), ["720p"]);
+        assert_eq!(choices.choices[0].streams[0].kind, StreamKind::Both);
+    }
+
+    #[test]
+    fn the_video_row_comes_after_the_heights_and_before_audio() {
+        let mut formats = vec![codecless("a", "mp4", None), codecless("b", "webm", None)];
+        formats[1].tbr = Some(5_000.0);
+        formats.extend([avc("137", 1080), aac("140", 10)]);
+
+        let choices = built(formats);
+
+        assert_eq!(labels(&choices), ["1080p", "Video", "Audio only"]);
+        assert_eq!(choices.choices[1].id, "video-webm");
+        assert_eq!(pick(&choices, Quality::Audio), 2);
+    }
+
+    #[test]
+    fn other_codecless_formats_stay_unused() {
+        let formats = vec![
+            codecless("x", "flv", Some(480)),
+            codecless("y", "m4a", None),
+        ];
+
+        assert_eq!(
+            build_choices(&page(formats)).unwrap_err(),
+            ChoicesError::NoFormats
+        );
+    }
+
+    #[test]
+    fn direct_formats_that_cannot_be_paired_are_no_formats_not_pieces() {
+        let formats = vec![avc("137", 1080), vp9("248", 720)];
+
+        assert_eq!(
+            build_choices(&page(formats)).unwrap_err(),
+            ChoicesError::NoFormats
+        );
+    }
+
+    #[test]
+    fn pieces_beside_unpairable_direct_formats_are_still_no_formats() {
+        let formats = vec![avc("137", 1080), pieces("hls", 720)];
+
+        assert_eq!(
+            build_choices(&page(formats)).unwrap_err(),
+            ChoicesError::NoFormats
+        );
+    }
+
+    #[test]
+    fn clear_audio_does_not_rescue_a_drm_video() {
+        let drm_video = FormatInfo {
+            has_drm: Some(serde_json::Value::Bool(true)),
+            ..avc("137", 1080)
+        };
+
+        let result = build_choices(&page(vec![drm_video, aac("140", 10)]));
+
+        assert_eq!(result.unwrap_err(), ChoicesError::Drm);
+    }
+
+    #[test]
+    fn drc_audio_is_never_chosen() {
+        let mut drc = aac("140-drc", 10);
+        drc.tbr = Some(999.0);
+
+        let choices = built(vec![avc("137", 1080), aac("140", 10), drc]);
+
+        assert_eq!(stream_ids(row(&choices, "1080p")), ["137", "140"]);
+        assert_eq!(stream_ids(row(&choices, "Audio only")), ["140"]);
     }
 
     #[test]
