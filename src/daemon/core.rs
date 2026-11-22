@@ -54,11 +54,14 @@ fn rebalance_shares(state: &DaemonState, now: Instant) {
         .iter()
         .map(|t| {
             let t = t.lock().unwrap();
+            let held_back = t
+                .share_limiter
+                .held_back_within(fair_share::HELD_BACK_WINDOW);
             fair_share::demand(
                 t.speed_bps,
                 t.share_limiter.bytes_per_sec(),
                 t.max_bytes_per_sec(),
-                t.speed_is_settled(now),
+                t.speed_is_settled(now) && !held_back,
             )
         })
         .collect();

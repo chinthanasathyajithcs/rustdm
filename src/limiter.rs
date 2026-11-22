@@ -19,6 +19,8 @@ pub struct RateLimiter {
 struct Bucket {
     tokens: f64,
     refilled_at: Instant,
+    /// The last time a caller had to wait for this bucket.
+    waited_at: Option<Instant>,
 }
 
 impl RateLimiter {
@@ -28,6 +30,7 @@ impl RateLimiter {
             bucket: Mutex::new(Bucket {
                 tokens: bytes_per_sec as f64,
                 refilled_at: Instant::now(),
+                waited_at: None,
             }),
         }
     }
@@ -46,7 +49,7 @@ impl RateLimiter {
         self.reserve_at(bytes, Instant::now())
     }
 
-    fn reserve_at(&self, bytes: u64, now: Instant) -> Duration {
+    pub(crate) fn reserve_at(&self, bytes: u64, now: Instant) -> Duration {
         let rate = self.bytes_per_sec();
         if rate == 0 {
             return Duration::ZERO;
@@ -62,8 +65,22 @@ impl RateLimiter {
         if bucket.tokens >= 0.0 {
             Duration::ZERO
         } else {
+            bucket.waited_at = Some(now);
             Duration::from_secs_f64(-bucket.tokens / rate)
         }
+    }
+
+    /// Whether this bucket made a caller wait within the last `window`: the
+    /// limit, not the server, is what decides the speed.
+    pub fn held_back_within(&self, window: Duration) -> bool {
+        self.held_back_at(Instant::now(), window)
+    }
+
+    pub(crate) fn held_back_at(&self, now: Instant, window: Duration) -> bool {
+        let bucket = self.bucket.lock().unwrap();
+        bucket
+            .waited_at
+            .is_some_and(|at| now.saturating_duration_since(at) <= window)
     }
 }
 
@@ -121,6 +138,22 @@ mod tests {
         let later = t0 + Duration::from_secs(60);
         assert_eq!(limiter.reserve_at(1000, later), Duration::ZERO);
         assert_eq!(limiter.reserve_at(1000, later), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_bucket_says_whether_it_held_a_caller_back_lately() {
+        let limiter = RateLimiter::new(1000);
+        let t0 = Instant::now();
+        let window = Duration::from_millis(500);
+        assert_eq!(limiter.reserve_at(1000, t0), Duration::ZERO);
+        assert!(!limiter.held_back_at(t0, window), "it had the bytes");
+
+        assert!(limiter.reserve_at(500, t0) > Duration::ZERO);
+        assert!(limiter.held_back_at(t0 + window, window));
+        assert!(
+            !limiter.held_back_at(t0 + window * 2, window),
+            "too long ago"
+        );
     }
 
     #[test]
