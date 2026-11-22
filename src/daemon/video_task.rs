@@ -484,15 +484,21 @@ fn settle_run(rec: &mut TaskRecord) {
 }
 
 /// The file a video is saved as: the name the user asked for, else its title,
-/// made safe, and the quality's ending.
+/// made safe, and the quality's ending. A requested name that already ends
+/// with that ending (in any letter case) is not given it twice.
 fn video_file_name(requested: Option<&str>, title: &str, container: Container) -> String {
     let usable =
         |text: &str| Some(crate::template::sanitize_component(text)).filter(|n| !n.is_empty());
-    let name = requested
-        .and_then(usable)
-        .or_else(|| usable(title))
-        .unwrap_or_else(|| FALLBACK_NAME.to_string());
-    format!("{name}.{}", container.ext())
+    let ending = format!(".{}", container.ext());
+    if let Some(name) = requested.and_then(usable) {
+        let has_ending = name.len() > ending.len()
+            && name
+                .get(name.len() - ending.len()..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(&ending));
+        return if has_ending { name } else { name + &ending };
+    }
+    let name = usable(title).unwrap_or_else(|| FALLBACK_NAME.to_string());
+    name + &ending
 }
 
 fn fail_with_placeholder(rec: &mut TaskRecord) {
@@ -666,6 +672,19 @@ mod tests {
             video_file_name(Some("..."), "Rust", Container::M4a),
             "Rust.m4a"
         );
+    }
+
+    #[test]
+    fn a_requested_name_keeps_its_own_ending_only_when_it_is_the_right_one() {
+        let name = |requested: &str, container| video_file_name(Some(requested), "T", container);
+
+        assert_eq!(name("clip.mp4", Container::Mp4), "clip.mp4");
+        assert_eq!(name("Clip.MP4", Container::Mp4), "Clip.MP4");
+        assert_eq!(name("clip.mkv", Container::Mp4), "clip.mkv.mp4");
+        assert_eq!(name("clip.mp4", Container::Webm), "clip.mp4.webm");
+        assert_eq!(name("mp4", Container::Mp4), "mp4.mp4");
+        // Leading dots are trimmed when the name is made safe.
+        assert_eq!(name(".mp4", Container::Mp4), "mp4.mp4");
     }
 
     #[test]
