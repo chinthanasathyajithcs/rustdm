@@ -139,6 +139,9 @@ fn in_flight(status: DownloadStatus) -> bool {
     )
 }
 
+/// What plain mode tells the user when a video page waits for its quality.
+const CHOOSE_HINT: &str = "This is a video page; choose a quality in the dashboard (rdm) or add it again with --quality 1080p.";
+
 /// Script-friendly mode: print each download's row when it changes, until
 /// nothing is running or queued.
 pub async fn run_plain<W: Write>(
@@ -163,6 +166,13 @@ pub async fn run_plain<W: Write>(
         out.flush()?;
 
         if !downloads.iter().any(|d| in_flight(d.status)) {
+            // Nothing more will happen on its own: say what a waiting video needs.
+            if downloads
+                .iter()
+                .any(|d| d.status == DownloadStatus::Choosing)
+            {
+                writeln!(out, "{CHOOSE_HINT}")?;
+            }
             return Ok(());
         }
         tokio::time::sleep(interval).await;

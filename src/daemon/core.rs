@@ -76,13 +76,23 @@ fn rebalance_shares(state: &DaemonState, now: Instant) {
 /// A download's folder must be usable before it is queued, so a bad one is
 /// reported to the client (under the Add dialog's Folder field) instead of
 /// failing later in the table.
-fn check_download_folder(folder: &std::path::Path) -> Result<(), RpcError> {
+pub(super) fn check_download_folder(folder: &std::path::Path) -> Result<(), RpcError> {
     folder_check::check_folder(folder).map_err(|problem| match problem {
         FolderProblem::CantWrite(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             RpcError::permission_denied(folder)
         }
         other => RpcError::invalid_path(folder, &other.to_string()),
     })
+}
+
+/// A file name a client asked for must leave something once made safe.
+pub(super) fn check_file_name(name: &str) -> Result<(), RpcError> {
+    if crate::template::sanitize_component(name).is_empty() {
+        return Err(RpcError::invalid_params(format!(
+            "{name:?} is not a usable file name"
+        )));
+    }
+    Ok(())
 }
 
 /// A speed cap must be 0 (none) or at least `MIN_BYTES_PER_SEC`.
@@ -304,7 +314,7 @@ impl DaemonCore {
         state.downloads.values().any(|t| t.lock().unwrap().running)
     }
 
-    fn get_task(&self, id: &str) -> Result<Arc<Mutex<TaskRecord>>, RpcError> {
+    pub(super) fn get_task(&self, id: &str) -> Result<Arc<Mutex<TaskRecord>>, RpcError> {
         let state = self.state.lock().unwrap();
         state
             .downloads
@@ -332,11 +342,7 @@ impl DaemonCore {
             })
             .transpose()?;
         if let Some(name) = &params.filename {
-            if crate::template::sanitize_component(name).is_empty() {
-                return Err(RpcError::invalid_params(format!(
-                    "{name:?} is not a usable file name"
-                )));
-            }
+            check_file_name(name)?;
         }
 
         let asked_folder = params.destination.clone();

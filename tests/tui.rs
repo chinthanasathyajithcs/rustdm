@@ -534,3 +534,76 @@ async fn settings_screen_polls_tools_and_u_requests_an_update() {
     assert!(text.contains("yt-dlp"), "{text}");
     assert!(text.contains("Checking yt-dlp"), "{text}");
 }
+
+const CHOOSE_HINT: &str =
+    "This is a video page; choose a quality in the dashboard (rdm) or add it again with --quality 1080p.";
+
+#[tokio::test]
+async fn plain_mode_says_how_to_choose_when_a_video_waits_for_a_quality() {
+    use rustdm::testing::video::{
+        video_page_json, write_script, youtube_like, ToolResponse, ToolScript, VideoWorld,
+    };
+    let world = VideoWorld::new().await;
+    let base = url::Url::parse("https://video.test/").unwrap();
+    write_script(
+        &world.ytdlp.exe,
+        &ToolScript {
+            responses: vec![ToolResponse {
+                stdout: video_page_json(&youtube_like(&base)),
+                ..ToolResponse::default()
+            }],
+        },
+    );
+    let page = TestServer::start_routes(
+        [(
+            "/watch".to_string(),
+            rustdm::testing::Route::ok("<html></html>").with_header("Content-Type", "text/html"),
+        )]
+        .into(),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let endpoint = IpcEndpoint::test_endpoint(&format!("tui_choose_{id}"));
+    let core = DaemonCore::new().with_tools(std::sync::Arc::clone(&world.store));
+    let server = DaemonServer::bind_with_core(&endpoint, core).await.unwrap();
+    tokio::spawn(async move { server.run().await.unwrap() });
+    let mut client = DaemonClient::connect(&endpoint).await.unwrap();
+    let added = client
+        .add(AddDownloadParams {
+            url: page.url().join("/watch").unwrap().to_string(),
+            destination: Some(dir.path().to_path_buf()),
+            filename: None,
+            connections: Some(1),
+            max_bytes_per_sec: None,
+            context: None,
+            quality: None,
+        })
+        .await
+        .unwrap();
+
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        WAIT_TIMEOUT,
+        run_plain(&mut client, &mut out, Duration::from_millis(20)),
+    )
+    .await
+    .expect("plain mode never finished")
+    .unwrap();
+
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("choose"), "{text}");
+    assert_eq!(text.matches(CHOOSE_HINT).count(), 1, "{text}");
+
+    // The client's own call picks the quality.
+    let chosen = client
+        .choose_quality(rustdm::ipc::protocol::ChooseQualityParams {
+            id: added.id,
+            choice_id: "720-mp4".to_string(),
+            destination: None,
+            filename: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(chosen.video.unwrap().chosen.unwrap().label, "720p");
+}

@@ -74,6 +74,10 @@ impl DaemonCore {
                 respond(id, parse_params(params).and_then(|p| self.set_defaults(p)))
             }
             "download.add" => respond(id, parse_params(params).and_then(|p| self.add_download(p))),
+            "download.choose_quality" => respond(
+                id,
+                parse_params(params).and_then(|p| self.choose_quality(p)),
+            ),
             "download.pause" => respond(
                 id,
                 parse_params::<DownloadIdParam>(params).and_then(|p| self.pause_download(&p.id)),

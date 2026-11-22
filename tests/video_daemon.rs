@@ -7,7 +7,8 @@ use rustdm::daemon::DaemonCore;
 use rustdm::engine::build_client;
 use rustdm::error::web_page_with_cookies_message;
 use rustdm::ipc::protocol::{
-    AddDownloadParams, CancelDownloadParams, DownloadStatus, DownloadSummary, CODE_INVALID_PARAMS,
+    AddDownloadParams, CancelDownloadParams, ChooseQualityParams, DownloadStatus, DownloadSummary,
+    RpcId, RpcRequest, CODE_INVALID_PARAMS, CODE_INVALID_PATH,
 };
 use rustdm::request_context::{ContextCookie, RequestContext};
 use rustdm::testing::fake_releases::{publish_ytdlp, test_sources};
@@ -692,4 +693,194 @@ async fn stale_cookie_files_are_swept_when_the_daemon_starts() {
 
     assert_eq!(lookup_files(data.path()), vec!["lookup-notes.json"]);
     assert!(data.path().join("queue.json.keep").exists());
+}
+
+fn choose(id: &str, choice_id: &str) -> ChooseQualityParams {
+    ChooseQualityParams {
+        id: id.to_string(),
+        choice_id: choice_id.to_string(),
+        destination: None,
+        filename: None,
+    }
+}
+
+/// A download of the stand-in video page that waits for its quality.
+async fn choosing(s: &Setup, path: &str) -> DownloadSummary {
+    s.answer(page_answer(&youtube_like(&base())));
+    let added = s.add(path);
+    wait_for(&s.core, &added.id, DownloadStatus::Choosing).await
+}
+
+#[tokio::test]
+async fn choosing_a_quality_stores_the_plan() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+
+    let chosen = s
+        .core
+        .choose_quality(choose(&waiting.id, "720-mp4"))
+        .unwrap();
+
+    for summary in [chosen, s.core.get_status(&waiting.id).unwrap()] {
+        assert_eq!(summary.status, DownloadStatus::Failed);
+        assert_eq!(summary.error_message.as_deref(), Some(PLACEHOLDER));
+        assert_eq!(summary.filename, "A test video.mp4");
+        let video = summary.video.expect("a video summary");
+        assert_eq!(video.chosen.expect("a chosen quality").label, "720p");
+        assert!(video.choices.is_empty());
+    }
+    assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
+    let again = DaemonCore::with_store(QueueStore::in_dir(s.data.path())).unwrap();
+    let kept = again.get_status(&waiting.id).unwrap();
+    assert_eq!(kept.status, DownloadStatus::Failed);
+    assert_eq!(kept.video.unwrap().chosen.unwrap().choice_id, "720-mp4");
+}
+
+#[tokio::test]
+async fn a_choice_can_move_the_download_and_name_the_file() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+    let elsewhere = tempfile::tempdir().unwrap();
+    let mut params = choose(&waiting.id, "720-mp4");
+    params.destination = Some(elsewhere.path().to_path_buf());
+    params.filename = Some("My clip".to_string());
+
+    let chosen = s.core.choose_quality(params).unwrap();
+
+    assert_eq!(chosen.filename, "My clip.mp4");
+    assert_eq!(chosen.destination, elsewhere.path());
+}
+
+#[tokio::test]
+async fn a_quality_given_at_add_skips_the_question() {
+    let s = setup().await;
+    s.answer(page_answer(&youtube_like(&base())));
+    let mut params = s.params("/watch");
+    params.quality = Some("1080p".to_string());
+
+    let added = s.core.add_download(params).unwrap();
+    let done = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+
+    assert_eq!(done.video.unwrap().chosen.unwrap().label, "1080p");
+}
+
+#[tokio::test]
+async fn a_missing_height_takes_the_nearest_below() {
+    let s = setup().await;
+    s.answer(page_answer(&youtube_like(&base())));
+    let mut params = s.params("/watch");
+    params.quality = Some("900p".to_string());
+
+    let added = s.core.add_download(params).unwrap();
+    let done = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+
+    assert_eq!(done.video.unwrap().chosen.unwrap().label, "720p");
+}
+
+#[tokio::test]
+async fn choose_refuses_a_download_that_is_not_waiting() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+    s.core
+        .choose_quality(choose(&waiting.id, "720-mp4"))
+        .unwrap();
+
+    let err = s
+        .core
+        .choose_quality(choose(&waiting.id, "1080-mp4"))
+        .unwrap_err();
+
+    assert_eq!(err.code, CODE_INVALID_PARAMS);
+    assert_eq!(
+        err.message,
+        "Invalid params: This download isn't waiting for a quality"
+    );
+    let missing = s
+        .core
+        .choose_quality(choose("dl_999", "720-mp4"))
+        .unwrap_err();
+    assert_ne!(missing.code, CODE_INVALID_PARAMS);
+}
+
+#[tokio::test]
+async fn choose_refuses_an_unknown_quality() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+
+    let err = s
+        .core
+        .choose_quality(choose(&waiting.id, "8k-av1"))
+        .unwrap_err();
+
+    assert_eq!(err.code, CODE_INVALID_PARAMS);
+    assert_eq!(
+        err.message,
+        "Invalid params: No such quality for this video"
+    );
+    assert_eq!(
+        s.core.get_status(&waiting.id).unwrap().status,
+        DownloadStatus::Choosing
+    );
+}
+
+#[tokio::test]
+async fn choose_checks_the_folder_and_name() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+    let mut bad_folder = choose(&waiting.id, "720-mp4");
+    bad_folder.destination = Some("not/a/full/path".into());
+    let mut bad_name = choose(&waiting.id, "720-mp4");
+    bad_name.filename = Some("..".to_string());
+
+    let folder_err = s.core.choose_quality(bad_folder).unwrap_err();
+    let name_err = s.core.choose_quality(bad_name).unwrap_err();
+
+    assert_eq!(folder_err.code, CODE_INVALID_PATH);
+    assert!(folder_err.message.contains("full path"), "{folder_err:?}");
+    assert_eq!(name_err.code, CODE_INVALID_PARAMS);
+    assert_eq!(
+        name_err.message,
+        "Invalid params: \"..\" is not a usable file name"
+    );
+    let still = s.core.get_status(&waiting.id).unwrap();
+    assert_eq!(still.status, DownloadStatus::Choosing);
+    assert_eq!(still.destination, s.folder.path());
+}
+
+#[tokio::test]
+async fn choose_quality_is_routed_by_its_method_name() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+    let params = serde_json::to_value(choose(&waiting.id, "720-mp4")).unwrap();
+
+    let response = s.core.handle_request(RpcRequest::new(
+        RpcId::Number(1),
+        "download.choose_quality".to_string(),
+        Some(params),
+    ));
+
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(
+        value["result"]["video"]["chosen"]["label"], "720p",
+        "{value}"
+    );
+}
+
+#[tokio::test]
+async fn resuming_a_chosen_video_gives_the_placeholder_again() {
+    let s = setup().await;
+    let waiting = choosing(&s, "/watch").await;
+    s.core
+        .choose_quality(choose(&waiting.id, "720-mp4"))
+        .unwrap();
+    let requests = s.pages.requests().len();
+
+    s.core.resume_download(&waiting.id).unwrap();
+    assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
+
+    let again = s.core.get_status(&waiting.id).unwrap();
+    assert_eq!(again.status, DownloadStatus::Failed);
+    assert_eq!(again.error_message.as_deref(), Some(PLACEHOLDER));
+    assert_eq!(s.lookups(), 1);
+    assert_eq!(s.pages.requests().len(), requests);
 }

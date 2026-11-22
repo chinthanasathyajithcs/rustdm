@@ -109,6 +109,18 @@ impl DaemonClient {
             .await
     }
 
+    /// Pick the quality of a download that is waiting for one.
+    pub async fn choose_quality(
+        &mut self,
+        params: ChooseQualityParams,
+    ) -> Result<DownloadSummary, ClientError> {
+        self.call(
+            "download.choose_quality",
+            Some(serde_json::to_value(params)?),
+        )
+        .await
+    }
+
     pub async fn list(&mut self) -> Result<Vec<DownloadSummary>, ClientError> {
         self.call("download.list", None).await
     }

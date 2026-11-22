@@ -2,11 +2,11 @@
 //! look it up with yt-dlp and put the download in `Choosing`, or fail it with
 //! the reason (spec sections 4, 5.1 and 8).
 
-use super::core::DaemonCore;
+use super::core::{check_download_folder, check_file_name, DaemonCore};
 use super::task::TaskRecord;
 use crate::engine::{Outcome, Progress};
 use crate::error::Error;
-use crate::ipc::protocol::DownloadStatus;
+use crate::ipc::protocol::{ChooseQualityParams, DownloadStatus, DownloadSummary, RpcError};
 use crate::request_context::ContextCookie;
 use crate::tools::display::getting_text;
 use crate::tools::{FetchCtx, Freshness, Installed, Tool, ToolError};
@@ -382,6 +382,54 @@ impl DaemonCore {
         self.persist();
         self.schedule();
     }
+}
+
+impl DaemonCore {
+    /// The client's answer for a download that is `Choosing`: record the
+    /// quality (and the folder and name, when given) and save it.
+    pub fn choose_quality(&self, params: ChooseQualityParams) -> Result<DownloadSummary, RpcError> {
+        let task = self.get_task(&params.id)?;
+        // Refused for what is wrong with the download first, then for the
+        // folder and name, all before the task is touched. The folder check
+        // touches the disk, so no lock is held for it; the choice is looked up
+        // again below in case the download changed meanwhile.
+        chosen_index(&task.lock().unwrap(), &params.choice_id)?;
+        if let Some(folder) = &params.destination {
+            check_download_folder(folder)?;
+        }
+        if let Some(name) = &params.filename {
+            check_file_name(name)?;
+        }
+        let summary = {
+            let mut rec = task.lock().unwrap();
+            let index = chosen_index(&rec, &params.choice_id)?;
+            if let Some(folder) = params.destination {
+                rec.directory = folder;
+            }
+            if params.filename.is_some() {
+                rec.requested_name = params.filename;
+            }
+            apply_choice(&mut rec, index);
+            rec.to_summary()
+        };
+        self.persist();
+        Ok(summary)
+    }
+}
+
+/// The row of the stored choices that `choice_id` names, if the download is
+/// waiting for one.
+fn chosen_index(rec: &TaskRecord, choice_id: &str) -> Result<usize, RpcError> {
+    let waiting = rec.status == DownloadStatus::Choosing;
+    let Some(plan) = rec.video.as_ref().filter(|_| waiting) else {
+        return Err(RpcError::invalid_params(
+            "This download isn't waiting for a quality",
+        ));
+    };
+    plan.choices
+        .iter()
+        .position(|row| row.id == choice_id)
+        .ok_or_else(|| RpcError::invalid_params("No such quality for this video"))
 }
 
 impl Target {
