@@ -5,11 +5,12 @@ use crate::ipc::protocol::{
     DaemonLimits, DownloadDefaults, DownloadStatus, DownloadSummary, TelemetryTick, ToolInfo,
 };
 use crate::tui::daemon_link::{ActionError, Outcome};
+use crate::tui::dialogs::quality::QualityDialog;
 use crate::tui::dialogs::{Dialog, DialogTarget};
 use crate::tui::screens::logs::LogsState;
 use crate::tui::screens::settings::{SettingsField, SettingsState};
 use ratatui::layout::Rect;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 /// Speed samples kept per download for the speed graph: about 30 s at 4 ticks a second.
@@ -176,6 +177,9 @@ pub struct App {
     pub log_path: Option<PathBuf>,
     pub tab: Tab,
     pub selected: Option<String>,
+    /// Ids of the downloads this dashboard added. The first time one of them
+    /// waits for a quality, its quality list opens by itself.
+    pub own_adds: HashSet<String>,
     /// Index of the first visible table row.
     pub table_offset: usize,
     pub notice: Option<Notice>,
@@ -202,6 +206,7 @@ impl Default for App {
             log_path: None,
             tab: Tab::All,
             selected: None,
+            own_adds: HashSet::new(),
             table_offset: 0,
             notice: None,
             history: VecDeque::new(),
@@ -252,6 +257,33 @@ impl App {
             .retain(|id, _| downloads.iter().any(|d| &d.id == id));
         self.downloads = downloads;
         self.ensure_selection();
+        self.open_own_quality_list();
+    }
+
+    /// Open the quality list for a download added here that now waits for
+    /// one, unless a dialog is already open; it opens on a later refresh then.
+    /// An id is used up once its list opens, so Esc never brings it back.
+    fn open_own_quality_list(&mut self) {
+        let finished = |status| {
+            matches!(
+                status,
+                DownloadStatus::Completed | DownloadStatus::Failed | DownloadStatus::Cancelled
+            )
+        };
+        let downloads = &self.downloads;
+        self.own_adds
+            .retain(|id| !downloads.iter().any(|d| &d.id == id && finished(d.status)));
+        if !self.dialogs.is_empty() {
+            return;
+        }
+        let waiting = self.downloads.iter().find_map(|d| {
+            let own = d.status == DownloadStatus::Choosing && self.own_adds.contains(&d.id);
+            own.then(|| QualityDialog::new(d, self.defaults.as_ref()))?
+        });
+        if let Some(dialog) = waiting {
+            self.own_adds.remove(dialog.id());
+            self.dialogs.push(Dialog::Quality(Box::new(dialog)));
+        }
     }
 
     pub fn apply_tick(&mut self, tick: TelemetryTick) {
@@ -311,6 +343,7 @@ impl App {
             }
             Err(e) if self.settings.pending => self.settings.set_error(&e),
             Ok(outcome) => {
+                self.own_adds.extend(outcome.added);
                 if waiting {
                     self.dialogs.pop();
                 } else if self.settings.pending {
@@ -332,7 +365,8 @@ impl App {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use crate::ipc::protocol::SegmentProgress;
+    use crate::ipc::protocol::{SegmentProgress, VideoSummary};
+    use crate::video::{Container, VideoChoice};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
@@ -352,6 +386,91 @@ pub(crate) mod test_support {
             max_bytes_per_sec: 0,
             video: None,
             step: None,
+        }
+    }
+
+    fn choice(
+        id: &str,
+        label: &str,
+        container: Container,
+        height: Option<u32>,
+        size: Option<u64>,
+        estimate: bool,
+    ) -> VideoChoice {
+        VideoChoice {
+            id: id.to_string(),
+            label: label.to_string(),
+            container,
+            height,
+            size_bytes: size,
+            size_is_estimate: estimate,
+            streams: Vec::new(),
+        }
+    }
+
+    /// A video page waiting for a quality: seven rows, the default on 1080p.
+    pub(crate) fn choosing_summary(id: &str) -> DownloadSummary {
+        const MIB: u64 = 1024 * 1024;
+        let choices = vec![
+            choice(
+                "2160-webm",
+                "2160p",
+                Container::Webm,
+                Some(2160),
+                Some(57 * MIB),
+                true,
+            ),
+            choice(
+                "1440-webm",
+                "1440p",
+                Container::Webm,
+                Some(1440),
+                Some(22 * MIB),
+                false,
+            ),
+            choice(
+                "1080-mp4",
+                "1080p",
+                Container::Mp4,
+                Some(1080),
+                Some(8 * MIB),
+                false,
+            ),
+            choice(
+                "720-mp4",
+                "720p",
+                Container::Mp4,
+                Some(720),
+                Some(5 * MIB),
+                false,
+            ),
+            choice(
+                "480-mp4",
+                "480p",
+                Container::Mp4,
+                Some(480),
+                Some(4 * MIB),
+                false,
+            ),
+            choice("360-mp4", "360p", Container::Mp4, Some(360), None, false),
+            choice(
+                "audio-m4a",
+                "Audio only",
+                Container::M4a,
+                None,
+                Some(2 * MIB),
+                false,
+            ),
+        ];
+        DownloadSummary {
+            filename: "Rust in 100 Seconds.mp4".to_string(),
+            video: Some(VideoSummary {
+                title: "Rust in 100 Seconds".to_string(),
+                choices,
+                default: Some(2),
+                chosen: None,
+            }),
+            ..summary(id, DownloadStatus::Choosing)
         }
     }
 
@@ -469,6 +588,68 @@ mod tests {
         assert!(text.contains("choose "), "{text}");
     }
 
+    fn added(id: &str) -> Result<Outcome, ActionError> {
+        Ok(Outcome {
+            message: format!("Added {id}"),
+            select: Some(id.into()),
+            added: vec![id.into()],
+        })
+    }
+
+    #[test]
+    fn a_link_added_here_opens_its_quality_list_once() {
+        use crate::tui::dialogs::DialogResult;
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = App::default();
+        app.apply_outcome(added("dl_1"));
+        // While the page is looked up, nothing opens.
+        app.set_downloads(vec![summary("dl_1", DownloadStatus::Active)]);
+        assert!(app.dialogs.is_empty());
+
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        let Some(Dialog::Quality(dialog)) = app.dialogs.last_mut() else {
+            panic!("the quality list did not open");
+        };
+        assert_eq!(dialog.id(), "dl_1");
+        let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(dialog.handle_event(&esc), DialogResult::Close);
+        app.dialogs.pop();
+
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(app.dialogs.is_empty(), "Esc must not bring it back");
+    }
+
+    #[test]
+    fn a_waiting_quality_list_does_not_open_over_another_dialog() {
+        let mut app = App::default();
+        app.apply_outcome(added("dl_1"));
+        app.dialogs.push(Dialog::Add(Box::new(
+            crate::tui::dialogs::add::AddDialog::new(None, None),
+        )));
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert_eq!(app.dialogs.len(), 1);
+
+        app.dialogs.clear();
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(matches!(app.dialogs.last(), Some(Dialog::Quality(_))));
+    }
+
+    #[test]
+    fn a_video_added_elsewhere_waits_for_enter() {
+        let mut app = App::default();
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(app.dialogs.is_empty());
+    }
+
+    #[test]
+    fn a_finished_own_add_is_forgotten() {
+        let mut app = App::default();
+        app.apply_outcome(added("dl_1"));
+        app.set_downloads(vec![summary("dl_1", DownloadStatus::Completed)]);
+        assert!(app.own_adds.is_empty());
+    }
+
     #[test]
     fn only_an_active_download_reports_a_stall() {
         let mut app = sample_app();
@@ -513,6 +694,7 @@ mod tests {
         app.apply_outcome(Ok(Outcome {
             message: "Added dl_1 (queued)".into(),
             select: Some("dl_1".into()),
+            ..Default::default()
         }));
         assert_eq!(app.selected.as_deref(), Some("dl_1"));
         app.apply_outcome(Err(ActionError {

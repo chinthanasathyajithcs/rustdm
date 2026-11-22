@@ -16,10 +16,13 @@ use tokio::sync::mpsc;
 const TELEMETRY_RETRY: Duration = Duration::from_secs(1);
 
 /// What a successful action reports, and the download to select after it.
+/// `added` lists the ids of the downloads an Add created, so the dashboard
+/// can open the quality list for the one that turns out to be a video page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub message: String,
     pub select: Option<String>,
+    pub added: Vec<String>,
 }
 
 /// Why an action failed. `code` is the daemon's error code when it sent one;
@@ -128,6 +131,13 @@ pub(crate) async fn perform(
     };
     let summary = match action {
         Action::Add(downloads) => return add_each(conn, downloads).await,
+        Action::ChooseQuality(params) => {
+            let s = conn.choose_quality(params.clone()).await?;
+            return Ok(Outcome {
+                select: Some(s.id.clone()),
+                ..changed(&s)
+            });
+        }
         Action::Pause(id) => conn.pause(id).await?,
         Action::Resume(id) => conn.resume(id).await?,
         Action::Cancel { id, delete_files } => conn.cancel(id, *delete_files).await?,
@@ -223,13 +233,14 @@ async fn add_each(
     Ok(Outcome {
         message,
         select: added.first().map(|s| s.id.clone()),
+        added: added.iter().map(|s| s.id.clone()).collect(),
     })
 }
 
 fn message(text: String) -> Outcome {
     Outcome {
         message: text,
-        select: None,
+        ..Outcome::default()
     }
 }
 

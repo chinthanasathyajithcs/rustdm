@@ -26,6 +26,16 @@ pub fn status_span(status: DownloadStatus, stalled: bool) -> Span<'static> {
     }
 }
 
+/// What to say about a download's current step: the daemon's own text, or,
+/// for a video waiting for a quality, what the user can do about it.
+pub fn step_text(d: &DownloadSummary) -> Option<String> {
+    match (&d.step, d.status) {
+        (Some(step), _) => Some(step.clone()),
+        (None, DownloadStatus::Choosing) => Some("Choose a quality (Enter)".to_string()),
+        (None, _) => None,
+    }
+}
+
 /// Binary units: 1536 bytes is "1.5 KiB".
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];

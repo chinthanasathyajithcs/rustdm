@@ -25,6 +25,7 @@ const DOWNLOADS_KEYS: &[(&str, &str)] = &[
     ("?", "Help"),
     ("q", "Quit"),
     ("Q", "Stop rdmd"),
+    ("Enter", "Choose a quality"),
     ("←/→", "Tabs"),
     ("↑/↓", "Select"),
     ("⇧↑/⇧↓", "Reorder"),

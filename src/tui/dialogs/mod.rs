@@ -3,6 +3,7 @@
 
 pub mod add;
 pub mod confirm;
+pub mod quality;
 pub mod speed;
 
 use crate::tui::action::Action;
@@ -10,6 +11,7 @@ use crate::tui::daemon_link::ActionError;
 use crate::tui::theme;
 use add::AddDialog;
 use confirm::ConfirmDialog;
+use quality::QualityDialog;
 use ratatui::crossterm::event::{Event, KeyCode};
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -34,6 +36,8 @@ pub enum DialogResult {
 pub enum DialogTarget {
     /// The field at this position, top to bottom.
     Field(usize),
+    /// The row at this position in a list of choices, top to bottom.
+    Row(usize),
     /// A button, which acts as its key.
     Key(KeyCode),
 }
@@ -42,6 +46,8 @@ pub enum DialogTarget {
 pub enum Dialog {
     // Boxed: the Add dialog is several times the size of the others.
     Add(Box<AddDialog>),
+    // Boxed: it holds the whole list of qualities.
+    Quality(Box<QualityDialog>),
     Confirm(ConfirmDialog),
     Speed(SpeedDialog),
 }
@@ -50,6 +56,7 @@ impl Dialog {
     pub fn handle_event(&mut self, event: &Event) -> DialogResult {
         match self {
             Dialog::Add(d) => d.handle_event(event),
+            Dialog::Quality(d) => d.handle_event(event),
             Dialog::Confirm(d) => d.handle_event(event),
             Dialog::Speed(d) => d.handle_event(event),
         }
@@ -58,6 +65,7 @@ impl Dialog {
     pub fn click(&mut self, target: DialogTarget) -> DialogResult {
         match self {
             Dialog::Add(d) => d.click(target),
+            Dialog::Quality(d) => d.click(target),
             Dialog::Confirm(d) => d.click(target),
             Dialog::Speed(d) => d.click(target),
         }
@@ -67,6 +75,7 @@ impl Dialog {
     pub fn render(&self, frame: &mut Frame, area: Rect) -> Vec<(Rect, DialogTarget)> {
         match self {
             Dialog::Add(d) => d.render(frame, area),
+            Dialog::Quality(d) => d.render(frame, area),
             Dialog::Confirm(d) => d.render(frame, area),
             Dialog::Speed(d) => d.render(frame, area),
         }
@@ -76,6 +85,7 @@ impl Dialog {
     pub fn set_error(&mut self, err: &ActionError) {
         match self {
             Dialog::Add(d) => d.set_error(err),
+            Dialog::Quality(d) => d.set_error(err),
             Dialog::Confirm(d) => d.set_error(err),
             Dialog::Speed(d) => d.set_error(err),
         }
@@ -85,6 +95,7 @@ impl Dialog {
     pub fn is_pending(&self) -> bool {
         match self {
             Dialog::Add(d) => d.is_pending(),
+            Dialog::Quality(d) => d.is_pending(),
             Dialog::Confirm(d) => d.is_pending(),
             Dialog::Speed(d) => d.is_pending(),
         }
@@ -156,7 +167,7 @@ mod tests {
     use super::confirm::ConfirmDialog;
     use super::speed::SpeedDialog;
     use super::*;
-    use crate::tui::state::test_support::sample_app;
+    use crate::tui::state::test_support::{choosing_summary, sample_app};
     use crate::tui::state::App;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -182,6 +193,9 @@ mod tests {
             Dialog::Confirm(ConfirmDialog::cancel(&d)),
             Dialog::Confirm(ConfirmDialog::stop_daemon(2)),
             Dialog::Speed(SpeedDialog::new(&d)),
+            Dialog::Quality(Box::new(
+                quality::QualityDialog::new(&choosing_summary("dl_9"), None).unwrap(),
+            )),
         ];
         for (width, height) in [(30, 8), (10, 3), (1, 1)] {
             for dialog in &dialogs {
