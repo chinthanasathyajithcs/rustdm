@@ -278,13 +278,13 @@ fn all_video_is_drm(formats: &[FormatInfo]) -> bool {
     !video.is_empty() && video.iter().all(|f| f.is_drm())
 }
 
-/// Why no row was left: small pieces only when a stream exists that is not
-/// direct and none that is.
+/// Why no row was left: small pieces when some non-direct format exists
+/// (whatever its codecs) and no direct video or audio stream does.
 fn no_rows_error(formats: &[FormatInfo]) -> ChoicesError {
     let carries_media = |f: &&FormatInfo| has_codec(&f.vcodec) || has_codec(&f.acodec);
     let real = real_formats(formats);
     let direct = real.iter().filter(|f| is_direct(f)).any(carries_media);
-    let pieces = real.iter().filter(|f| !is_direct(f)).any(carries_media);
+    let pieces = real.iter().any(|f| !is_direct(f));
     if pieces && !direct {
         ChoicesError::PiecesOnly
     } else {
@@ -738,6 +738,19 @@ mod tests {
 
         assert_eq!(stream_ids(row(&choices, "1080p")), ["137", "140"]);
         assert_eq!(stream_ids(row(&choices, "Audio only")), ["140"]);
+    }
+
+    #[test]
+    fn a_codecless_pieces_page_is_pieces_only() {
+        let hls = FormatInfo {
+            protocol: Some("m3u8_native".to_string()),
+            ..codecless("hls", "mp4", None)
+        };
+
+        assert_eq!(
+            build_choices(&page(vec![hls])).unwrap_err(),
+            ChoicesError::PiecesOnly
+        );
     }
 
     #[test]
