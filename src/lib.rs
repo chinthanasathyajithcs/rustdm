@@ -25,5 +25,6 @@ pub mod testing;
 pub mod tools;
 pub mod tui;
 pub mod units;
+pub mod video;
 pub mod worker;
 pub mod writer;
