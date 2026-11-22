@@ -166,6 +166,7 @@ async fn a_video_page_waits_for_a_quality() {
 
     let video = waiting.video.expect("a video summary");
     assert_eq!(video.title, "A test video");
+    assert_eq!(video.duration_secs, Some(212));
     let labels: Vec<&str> = video.choices.iter().map(|c| c.label.as_str()).collect();
     assert_eq!(labels.first(), Some(&"2160p"));
     assert_eq!(labels.last(), Some(&"Audio only"));

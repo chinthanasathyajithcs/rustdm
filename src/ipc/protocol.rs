@@ -572,6 +572,9 @@ pub enum DownloadStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoSummary {
     pub title: String,
+    /// How long the video runs, when the site says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
     /// The qualities to pick from; only while the download is `choosing`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<VideoChoice>,

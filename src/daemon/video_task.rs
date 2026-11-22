@@ -514,6 +514,7 @@ fn plan_of(page_url: &str, choices: &VideoChoices) -> VideoPlan {
     VideoPlan {
         page_url: page_url.to_string(),
         title: choices.title.clone(),
+        duration_secs: choices.duration_secs,
         choice: None,
         choices: choices.choices.clone(),
         default: choices.default,

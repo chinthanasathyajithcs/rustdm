@@ -51,6 +51,7 @@ impl QualityFocus {
 pub struct QualityDialog {
     id: String,
     title: String,
+    duration_secs: Option<u64>,
     choices: Vec<VideoChoice>,
     cursor: usize,
     focus: QualityFocus,
@@ -85,6 +86,7 @@ impl QualityDialog {
         Some(Self {
             id: summary.id.clone(),
             title: video.title.clone(),
+            duration_secs: video.duration_secs,
             choices: video.choices.clone(),
             cursor,
             focus: QualityFocus::List,
@@ -255,11 +257,12 @@ impl QualityDialog {
             "Choose a quality",
         );
         let mut hits = Vec::new();
+        let title = title_text(&self.title, self.duration_secs, inner.width as usize);
         put(
             frame,
             inner,
             0,
-            Line::from(Span::styled(self.title.clone(), theme::PANEL_TITLE)),
+            Line::from(Span::styled(title, theme::PANEL_TITLE)),
         );
         let shown = self.render_rows(frame, inner, &mut hits);
         let folder_row = 1 + shown;
@@ -356,6 +359,39 @@ impl QualityDialog {
     }
 }
 
+/// "m:ss", or "h:mm:ss" from one hour.
+fn format_duration(secs: u64) -> String {
+    let (hours, minutes, seconds) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// "<title> · m:ss" in at most `width` columns. A title that is too long is
+/// cut with "…" so the duration always shows.
+fn title_text(title: &str, duration_secs: Option<u64>, width: usize) -> String {
+    let suffix = duration_secs.map_or(String::new(), |s| format!(" · {}", format_duration(s)));
+    let room = width.saturating_sub(Span::raw(suffix.as_str()).width());
+    if room == 0 {
+        return suffix.chars().take(width).collect();
+    }
+    if Span::raw(title).width() <= room {
+        return format!("{title}{suffix}");
+    }
+    // Leave one column for the ellipsis.
+    let mut cut = String::new();
+    for c in title.chars() {
+        cut.push(c);
+        if Span::raw(cut.as_str()).width() > room - 1 {
+            cut.pop();
+            break;
+        }
+    }
+    format!("{cut}…{suffix}")
+}
+
 /// "1080p  MP4   8.6 MiB": the label padded to `label_width`, the container,
 /// then the size, with `~` in front of an estimate and "(4K)" after a 2160p
 /// row. An unknown size is left blank.
@@ -406,6 +442,51 @@ mod tests {
             DialogResult::Submit(Action::ChooseQuality(params)) => params,
             other => panic!("expected a ChooseQuality submit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_title_line_shows_the_duration() {
+        assert_eq!(title_text("Rust", Some(149), 40), "Rust · 2:29");
+        assert_eq!(title_text("Rust", Some(3725), 40), "Rust · 1:02:05");
+        assert_eq!(title_text("Rust", Some(7), 40), "Rust · 0:07");
+        assert_eq!(title_text("Rust", None, 40), "Rust");
+    }
+
+    #[test]
+    fn a_long_title_is_shortened_so_the_duration_still_shows() {
+        let long = "x".repeat(100);
+        let line = title_text(&long, Some(149), 30);
+        assert_eq!(line.chars().count(), 30, "{line}");
+        assert!(line.ends_with("… · 2:29"), "{line}");
+        let wide = "日本語".repeat(20);
+        let line = title_text(&wide, Some(149), 30);
+        assert!(line.contains('…') && line.ends_with(" · 2:29"), "{line}");
+        assert!(Span::raw(line).width() <= 30);
+        let line = title_text(&long, None, 20);
+        assert_eq!(line, format!("{}…", "x".repeat(19)));
+        assert_eq!(title_text("short", None, 0), "");
+        assert!(Span::raw(title_text(&long, Some(149), 5)).width() <= 5);
+    }
+
+    #[test]
+    fn a_long_title_is_cut_with_an_ellipsis_at_80_columns() {
+        let mut summary = choosing_summary("dl_1");
+        summary.video.as_mut().unwrap().title = "A very long video title ".repeat(5);
+        let mut app = sample_app();
+        app.dialogs.push(Dialog::Quality(Box::new(
+            QualityDialog::new(&summary, None).unwrap(),
+        )));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
+        let text = screen_text(&terminal);
+        let line = text.lines().find(|l| l.contains("A very long")).unwrap();
+        assert!(line.contains("… · 2:29"), "{line}");
+        assert!(
+            line.trim_end().ends_with('│'),
+            "stays inside the box: {line}"
+        );
     }
 
     #[test]

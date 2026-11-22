@@ -13,6 +13,10 @@ use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
+/// Shown when an open quality list closes because its download is no longer listed.
+const LIST_GONE: &str = "That download is gone.";
+/// Shown when an open quality list closes because the quality was chosen elsewhere.
+const LIST_CHOSEN: &str = "That video's quality was already chosen.";
 /// Speed samples kept per download for the speed graph: about 30 s at 4 ticks a second.
 pub const SPEED_HISTORY_LEN: usize = 120;
 /// Notices kept for the Logs screen.
@@ -257,7 +261,32 @@ impl App {
             .retain(|id, _| downloads.iter().any(|d| &d.id == id));
         self.downloads = downloads;
         self.ensure_selection();
+        self.close_stale_quality_lists();
         self.open_own_quality_list();
+    }
+
+    /// Close a quality list whose download no longer waits for one, saying why.
+    /// A list that has sent its choice stays: its own answer closes it.
+    fn close_stale_quality_lists(&mut self) {
+        let mut notice = None;
+        let downloads = &self.downloads;
+        self.dialogs.retain(|dialog| {
+            let Dialog::Quality(list) = dialog else {
+                return true;
+            };
+            if list.is_pending() {
+                return true;
+            }
+            match downloads.iter().find(|d| d.id == list.id()) {
+                None => notice = Some(LIST_GONE),
+                Some(d) if d.status != DownloadStatus::Choosing => notice = Some(LIST_CHOSEN),
+                Some(_) => return true,
+            }
+            false
+        });
+        if let Some(text) = notice {
+            self.notify(text, false);
+        }
     }
 
     /// Open the quality list for a download added here that now waits for
@@ -271,9 +300,16 @@ impl App {
             )
         };
         let downloads = &self.downloads;
-        self.own_adds
-            .retain(|id| !downloads.iter().any(|d| &d.id == id && finished(d.status)));
-        if !self.dialogs.is_empty() {
+        self.own_adds.retain(|id| {
+            downloads
+                .iter()
+                .find(|d| &d.id == id)
+                .is_some_and(|d| !finished(d.status))
+        });
+        // Not over a dialog, and not while the user is on another screen or
+        // reading Help, where Enter and typing mean something else.
+        let free = self.dialogs.is_empty() && self.screen == Screen::Downloads && !self.help_open;
+        if !free {
             return;
         }
         let waiting = self.downloads.iter().find_map(|d| {
@@ -466,6 +502,7 @@ pub(crate) mod test_support {
             filename: "Rust in 100 Seconds.mp4".to_string(),
             video: Some(VideoSummary {
                 title: "Rust in 100 Seconds".to_string(),
+                duration_secs: Some(149),
                 choices,
                 default: Some(2),
                 chosen: None,
@@ -633,6 +670,87 @@ mod tests {
         app.dialogs.clear();
         app.set_downloads(vec![choosing_summary("dl_1")]);
         assert!(matches!(app.dialogs.last(), Some(Dialog::Quality(_))));
+    }
+
+    #[test]
+    fn a_quality_list_waits_for_the_downloads_screen_with_no_help_or_edit() {
+        let mut app = App::default();
+        app.apply_outcome(added("dl_1"));
+
+        app.screen = Screen::Settings;
+        let enter =
+            ratatui::crossterm::event::Event::Key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Enter,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ));
+        crate::tui::screens::handle_event(&mut app, &enter);
+        assert!(app.settings.is_editing());
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(app.dialogs.is_empty(), "Settings is being edited");
+
+        app.screen = Screen::Logs;
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(app.dialogs.is_empty(), "Logs is showing");
+
+        app.screen = Screen::Downloads;
+        app.help_open = true;
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(app.dialogs.is_empty(), "Help is open");
+
+        app.help_open = false;
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(matches!(app.dialogs.last(), Some(Dialog::Quality(_))));
+    }
+
+    fn open_list(app: &mut App) {
+        app.apply_outcome(added("dl_1"));
+        app.set_downloads(vec![choosing_summary("dl_1")]);
+        assert!(matches!(app.dialogs.last(), Some(Dialog::Quality(_))));
+    }
+
+    #[test]
+    fn an_open_list_closes_when_the_quality_was_chosen_elsewhere() {
+        let mut app = App::default();
+        open_list(&mut app);
+        app.set_downloads(vec![summary("dl_1", DownloadStatus::Queued)]);
+        assert!(app.dialogs.is_empty());
+        assert_eq!(
+            app.notice.map(|n| n.text).as_deref(),
+            Some("That video's quality was already chosen.")
+        );
+    }
+
+    #[test]
+    fn an_open_list_closes_when_its_download_is_gone() {
+        let mut app = App::default();
+        open_list(&mut app);
+        app.set_downloads(Vec::new());
+        assert!(app.dialogs.is_empty());
+        assert_eq!(
+            app.notice.map(|n| n.text).as_deref(),
+            Some("That download is gone.")
+        );
+    }
+
+    #[test]
+    fn a_list_waiting_for_the_daemon_stays_for_its_own_answer() {
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::default();
+        open_list(&mut app);
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.dialogs.last_mut().unwrap().handle_event(&enter);
+        app.set_downloads(vec![summary("dl_1", DownloadStatus::Queued)]);
+        assert_eq!(app.dialogs.len(), 1);
+    }
+
+    #[test]
+    fn own_adds_forget_downloads_that_are_no_longer_listed() {
+        let mut app = App::default();
+        app.apply_outcome(added("dl_1"));
+        app.set_downloads(vec![summary("dl_1", DownloadStatus::Active)]);
+        assert!(app.own_adds.contains("dl_1"));
+        app.set_downloads(Vec::new());
+        assert!(app.own_adds.is_empty());
     }
 
     #[test]

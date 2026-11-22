@@ -527,6 +527,7 @@ mod tests {
         VideoPlan {
             page_url: "https://video.test/watch?v=1".to_string(),
             title: "A test video".to_string(),
+            duration_secs: None,
             choice: None,
             choices: vec![choice("1080-mp4", "1080p"), choice("720-mp4", "720p")],
             default: 1,

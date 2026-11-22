@@ -8,6 +8,7 @@ use crate::video::{parse_quality, Quality, VideoPlan};
 pub fn summarize(plan: &VideoPlan, choosing: bool) -> VideoSummary {
     VideoSummary {
         title: plan.title.clone(),
+        duration_secs: plan.duration_secs,
         choices: if choosing {
             plan.choices.clone()
         } else {

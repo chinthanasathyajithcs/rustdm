@@ -773,6 +773,7 @@ fn saved_download(
         video: (status == DownloadStatus::Choosing).then(|| VideoPlan {
             page_url: url.to_string(),
             title: "A test video".to_string(),
+            duration_secs: None,
             choice: None,
             choices: Vec::new(),
             default: 0,

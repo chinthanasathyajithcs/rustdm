@@ -152,6 +152,9 @@ pub struct StreamPlan {
 pub struct VideoPlan {
     pub page_url: String,
     pub title: String,
+    /// How long the video runs, when the site says.
+    #[serde(default)]
+    pub duration_secs: Option<u64>,
     /// What was chosen; none while the plan waits for a choice.
     #[serde(default)]
     pub choice: Option<ChosenQuality>,
@@ -242,6 +245,7 @@ mod tests {
         let plan = VideoPlan {
             page_url: "https://video.test/watch?v=1".to_string(),
             title: "A test video".to_string(),
+            duration_secs: Some(149),
             choice: Some(ChosenQuality {
                 label: "1080p".to_string(),
                 container: Container::Mp4,
