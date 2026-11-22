@@ -159,12 +159,13 @@ pub struct VideoPlan {
     pub refreshes: Vec<u64>,
 }
 
-/// The site's name for messages: yt-dlp's extractor name (`Youtube` shown as
-/// `YouTube`), else the page's host without `www.`.
+/// The site's name for messages: yt-dlp's extractor name (any `Youtube...`
+/// shown as `YouTube`), else the page's host without `www.`. `Generic` is
+/// yt-dlp's catch-all for unknown sites, so it counts as no name.
 pub fn site_name(info: &PageInfo, page_url: &Url) -> String {
     match info.extractor_key.as_deref() {
-        Some("Youtube") => "YouTube".to_string(),
-        Some(key) if !key.is_empty() => key.to_string(),
+        Some(key) if key.starts_with("Youtube") => "YouTube".to_string(),
+        Some(key) if !key.is_empty() && key != "Generic" => key.to_string(),
         _ => {
             let host = page_url.host_str().unwrap_or_default();
             host.strip_prefix("www.").unwrap_or(host).to_string()
@@ -203,6 +204,8 @@ mod tests {
         assert_eq!(site_name(&named(Some("Youtube")), &url), "YouTube");
         assert_eq!(site_name(&named(Some("Vimeo")), &url), "Vimeo");
         assert_eq!(site_name(&named(None), &url), "example.org");
+        assert_eq!(site_name(&named(Some("YoutubeTab")), &url), "YouTube");
+        assert_eq!(site_name(&named(Some("Generic")), &url), "example.org");
     }
 
     #[test]

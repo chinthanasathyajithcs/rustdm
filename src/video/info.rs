@@ -18,6 +18,7 @@ pub struct PageInfo {
     /// `"video"`, `"playlist"` and so on.
     #[serde(rename = "_type")]
     pub kind: Option<String>,
+    #[serde(deserialize_with = "whole_number")]
     pub playlist_count: Option<u32>,
     pub entries: Option<Vec<serde_json::Value>>,
     pub webpage_url: Option<String>,
@@ -36,10 +37,14 @@ pub struct FormatInfo {
     pub vcodec: Option<String>,
     /// `"none"` for a video-only format.
     pub acodec: Option<String>,
+    #[serde(deserialize_with = "whole_number")]
     pub height: Option<u32>,
     pub tbr: Option<f64>,
+    #[serde(deserialize_with = "whole_number")]
     pub filesize: Option<u64>,
+    #[serde(deserialize_with = "whole_number")]
     pub filesize_approx: Option<u64>,
+    #[serde(deserialize_with = "whole_number")]
     pub language_preference: Option<i32>,
     pub format_note: Option<String>,
     /// yt-dlp writes `true`, `false` or `"maybe"`.
@@ -54,6 +59,29 @@ pub struct FormatInfo {
 pub struct DownloaderOptions {
     /// YouTube refuses large ranges; yt-dlp asks for pieces of this size.
     pub http_chunk_size: Option<u64>,
+}
+
+/// Read a whole number that yt-dlp or an extractor may write as a decimal
+/// (`1080.0`, `1.5e7`). Null, a missing field, something that is not a number,
+/// a value out of the field's range (a negative size, say) and anything
+/// non-finite all become `None`, so one odd format cannot spoil the page.
+/// A decimal loses its fraction.
+fn whole_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<i128>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(serde_json::Value::Number(number)) = value else {
+        return Ok(None);
+    };
+    let whole = match (number.as_i64(), number.as_u64(), number.as_f64()) {
+        (Some(int), _, _) => Some(i128::from(int)),
+        (_, Some(uint), _) => Some(i128::from(uint)),
+        (_, _, Some(float)) if float.is_finite() => Some(float.trunc() as i128),
+        _ => None,
+    };
+    Ok(whole.and_then(|n| T::try_from(n).ok()))
 }
 
 impl FormatInfo {
@@ -117,6 +145,34 @@ mod tests {
         assert_eq!(page.id, "x");
         assert!(page.formats.is_empty());
         assert_eq!(page.duration, None);
+    }
+
+    #[test]
+    fn whole_numbers_written_as_decimals_are_read() {
+        let json = r#"{"format_id":"a","height":720.0,"filesize_approx":1.5e7,
+            "filesize":-5,"language_preference":-1.0,"tbr":128.5}"#;
+
+        let format: FormatInfo = serde_json::from_str(json).unwrap();
+
+        assert_eq!(format.height, Some(720));
+        assert_eq!(format.filesize_approx, Some(15_000_000));
+        assert_eq!(format.filesize, None);
+        assert_eq!(format.language_preference, Some(-1));
+        assert_eq!(format.tbr, Some(128.5));
+    }
+
+    #[test]
+    fn one_odd_number_does_not_spoil_the_page() {
+        let json = br#"{"id":"x","title":"t","playlist_count":2.0,
+            "formats":[{"format_id":"a","height":"tall","filesize":1e40},
+                       {"format_id":"b","height":null}]}"#;
+
+        let page = parse_page(json).unwrap();
+
+        assert_eq!(page.playlist_count, Some(2));
+        assert_eq!(page.formats.len(), 2);
+        assert_eq!(page.formats[0].height, None);
+        assert_eq!(page.formats[0].filesize, None);
     }
 
     #[test]
