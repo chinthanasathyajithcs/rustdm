@@ -40,7 +40,7 @@ const SIGN_IN_MARKERS: [&str; 6] = [
     "this video is private",
     "login required",
 ];
-const COUNTRY_MARKERS: [&str; 2] = ["not available in your country", "geo restrict"];
+const COUNTRY_MARKERS: [&str; 2] = ["available in your country", "geo restrict"];
 const NETWORK_MARKERS: [&str; 5] = [
     "unable to download",
     "timed out",
@@ -48,6 +48,28 @@ const NETWORK_MARKERS: [&str; 5] = [
     "temporary failure in name resolution",
     "network is unreachable",
 ];
+
+/// A stderr line that reports trouble reaching the site. `Unable to download`
+/// also covers pages that are gone (`HTTP Error 404`), which will not come
+/// back, so it counts only when its line has no 4xx status but 429.
+fn is_network_line(line: &str) -> bool {
+    let line = line.to_lowercase();
+    if line.contains(NETWORK_MARKERS[0]) && has_permanent_http_error(&line) {
+        return NETWORK_MARKERS[1..]
+            .iter()
+            .any(|marker| line.contains(marker));
+    }
+    NETWORK_MARKERS.iter().any(|marker| line.contains(marker))
+}
+
+/// Whether the (lower case) line says `http error 4xx` for a 4xx other than 429.
+fn has_permanent_http_error(line: &str) -> bool {
+    const PREFIX: &str = "http error ";
+    line.match_indices(PREFIX).any(|(at, _)| {
+        let status = &line[at + PREFIX.len()..];
+        status.starts_with('4') && !status.starts_with("429")
+    })
+}
 
 fn mentions(text: &str, markers: &[&str]) -> bool {
     let text = text.to_lowercase();
@@ -74,7 +96,7 @@ pub fn failure_message(
         LookupFailure::Spawn(detail) => (format!("Couldn't start yt-dlp: {detail}"), true),
         LookupFailure::Exited { code, stderr } => {
             let text = exited_message(*code, stderr, site, has_cookies, ytdlp_version);
-            (text, mentions(stderr, &NETWORK_MARKERS))
+            (text, stderr.lines().any(is_network_line))
         }
     }
 }
@@ -137,7 +159,8 @@ pub fn is_extractor_error(stderr: &str) -> bool {
         line.trim().starts_with("ERROR: [")
             && !mentions(line, &SIGN_IN_MARKERS)
             && !mentions(line, &COUNTRY_MARKERS)
-            && !mentions(line, &NETWORK_MARKERS)
+            && !is_network_line(line)
+            && !line.to_lowercase().contains(NETWORK_MARKERS[0])
     })
 }
 
@@ -234,7 +257,9 @@ mod tests {
 
     #[test]
     fn a_country_block_names_the_site() {
-        let failure = exited("ERROR: [youtube] abc: The uploader has not made this video available in your country (not available in your country)");
+        let failure = exited(
+            "ERROR: [youtube] abc: The uploader has not made this video available in your country",
+        );
 
         assert_eq!(
             message(&failure, false),
@@ -364,6 +389,49 @@ mod tests {
     }
 
     #[test]
+    fn a_page_that_is_gone_is_not_retried_but_a_busy_site_is() {
+        let transient = |line: &str| failure_message(&exited(line), "Y", false, "1").1;
+
+        for status in [
+            "400: Bad Request",
+            "403: Forbidden",
+            "404: Not Found",
+            "410: Gone",
+        ] {
+            let line =
+                format!("ERROR: [generic] x: Unable to download webpage: HTTP Error {status}");
+            assert!(!transient(&line), "{status}");
+        }
+        assert!(transient(
+            "ERROR: [generic] x: Unable to download webpage: HTTP Error 429: Too Many Requests"
+        ));
+        assert!(transient(
+            "ERROR: [generic] x: Unable to download webpage: HTTP Error 503: Service Unavailable"
+        ));
+        assert!(transient(
+            "ERROR: [generic] x: Unable to download webpage: <urlopen error timed out>"
+        ));
+        // A 404 on one line does not make another line's timeout permanent.
+        assert!(transient(
+            "ERROR: [generic] x: Unable to download webpage: HTTP Error 404: Not Found\nERROR: [generic] y: The read operation timed out"
+        ));
+    }
+
+    #[test]
+    fn a_page_that_is_gone_shows_its_own_line_not_a_broken_extractor() {
+        let failure =
+            exited("ERROR: [generic] x: Unable to download webpage: HTTP Error 404: Not Found");
+
+        assert!(!is_extractor_error(
+            "ERROR: [generic] x: Unable to download webpage: HTTP Error 404: Not Found"
+        ));
+        assert_eq!(
+            message(&failure, false),
+            "[generic] x: Unable to download webpage: HTTP Error 404: Not Found"
+        );
+    }
+
+    #[test]
     fn only_a_broken_extractor_is_an_extractor_error() {
         assert!(is_extractor_error(
             "ERROR: [youtube] abc: Unable to extract initial player response"
@@ -372,7 +440,7 @@ mod tests {
             "ERROR: [youtube] abc: Sign in to confirm you're not a bot"
         ));
         assert!(!is_extractor_error(
-            "ERROR: [youtube] abc: Video not available in your country (not available in your country)"
+            "ERROR: [youtube] abc: The uploader has not made this video available in your country"
         ));
         assert!(!is_extractor_error(
             "ERROR: Unsupported URL: https://x.test/"

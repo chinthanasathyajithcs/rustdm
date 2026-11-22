@@ -61,15 +61,21 @@ pub fn lookup_args(req: &LookupRequest, cookies_file: Option<&Path>) -> Vec<OsSt
         args.push("--cookies".into());
         args.push(file.into());
     }
-    if let Some(user_agent) = req.user_agent {
+    if let Some(user_agent) = req.user_agent.filter(|v| is_plain(v)) {
         args.extend(["--user-agent".into(), user_agent.into()]);
     }
-    if let Some(referer) = req.referer {
+    if let Some(referer) = req.referer.filter(|v| is_plain(v)) {
         args.extend(["--referer".into(), referer.into()]);
     }
     args.push("--".into());
     args.push(req.page_url.as_str().into());
     args
+}
+
+/// Header values come from the browser's request; one with a control
+/// character in it is left out rather than passed on.
+fn is_plain(value: &str) -> bool {
+    !value.chars().any(char::is_control)
 }
 
 /// Run yt-dlp on the page and read what it found.
@@ -267,11 +273,14 @@ async fn run_ytdlp(
     };
     match finished {
         Ok((status, stdout)) => {
-            let stderr = tokio::time::timeout(STDERR_GRACE, stderr_task)
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or_default();
+            let mut stderr_task = stderr_task;
+            let stderr = match tokio::time::timeout(STDERR_GRACE, &mut stderr_task).await {
+                Ok(read) => read.unwrap_or_default(),
+                Err(_grace_over) => {
+                    stderr_task.abort();
+                    String::new()
+                }
+            };
             Ok(YtdlpOutput {
                 status,
                 stdout,

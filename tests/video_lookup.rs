@@ -173,6 +173,25 @@ async fn the_options_come_in_the_fixed_order() {
 }
 
 #[tokio::test]
+async fn a_user_agent_or_referer_with_control_characters_is_left_out() {
+    let world = VideoWorld::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = page_url();
+    let mut req = request(&world, &url, &[], dir.path());
+    req.user_agent = Some("Agent\r\nX-Evil: 1");
+    req.referer = Some("https://video.test/\n");
+
+    let args: Vec<String> = lookup_args(&req, None)
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(!args.iter().any(|a| a == "--user-agent" || a == "--referer"));
+    assert!(!args.iter().any(|a| a.contains("Evil")));
+    assert_eq!(args[args.len() - 2], "--");
+}
+
+#[tokio::test]
 async fn a_link_that_starts_with_a_dash_stays_a_link() {
     let world = VideoWorld::new().await;
     answer(&world, page_answer());
