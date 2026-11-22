@@ -1,5 +1,6 @@
 use crate::daemon::queue_store::SavedDownload;
 use crate::daemon::speed::SpeedMeter;
+use crate::daemon::video_fields::{read_saved_quality, summarize};
 use crate::engine::{Outcome, PauseReason, Progress};
 use crate::error::{
     is_sign_in_status, link_status_message, sign_in_expired_message, web_page_with_cookies_message,
@@ -9,6 +10,8 @@ use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
 use crate::limiter::RateLimiter;
 use crate::request_context::RequestContext;
 use crate::state::{part_path, state_path};
+use crate::tools::Tool;
+use crate::video::{Quality, VideoPlan};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -83,6 +86,20 @@ pub struct TaskRecord {
     /// been let go; one with only the Referer and User-Agent is yet to be built.
     /// The build is slow, so the caller does it outside the lock.
     pub client_pending: bool,
+    /// What is known of a video download; none for any other.
+    pub video: Option<VideoPlan>,
+    /// The quality asked for when the download was added; none means ask the user.
+    pub quality: Option<Quality>,
+    /// `quality` as the user wrote it, so it is saved exactly.
+    pub quality_text: Option<String>,
+    /// What the download is doing right now, such as "video 1 of 2". Not saved.
+    pub step: Option<String>,
+    /// The tool and progress of a download that is being fetched for this
+    /// lookup, shown while it runs. Not saved.
+    pub lookup_progress: Option<(Tool, Arc<Progress>)>,
+    /// The lookup found nothing to choose from, so it is not run again.
+    /// Not saved.
+    pub video_lookup_failed: bool,
 }
 
 impl TaskRecord {
@@ -133,6 +150,12 @@ impl TaskRecord {
             user_agent: None,
             client: None,
             client_pending: false,
+            video: None,
+            quality: None,
+            quality_text: None,
+            step: None,
+            lookup_progress: None,
+            video_lookup_failed: false,
         }
     }
 
@@ -153,6 +176,8 @@ impl TaskRecord {
         rec.has_cookies = saved.has_cookies;
         rec.referer = saved.referer;
         rec.user_agent = saved.user_agent;
+        rec.video = saved.video;
+        (rec.quality, rec.quality_text) = read_saved_quality(&rec.id, saved.quality);
         // Nothing runs right after a restart; anything that was running waits in the queue.
         rec.status = match saved.status {
             DownloadStatus::Active | DownloadStatus::Retrying | DownloadStatus::Pausing => {
@@ -180,6 +205,8 @@ impl TaskRecord {
             has_cookies: self.has_cookies,
             referer: self.referer.clone(),
             user_agent: self.user_agent.clone(),
+            video: self.video.clone(),
+            quality: self.quality_text.clone(),
         }
     }
 
@@ -265,6 +292,11 @@ impl TaskRecord {
             eta_secs: self.eta_secs,
             error_message: self.error_message.clone(),
             max_bytes_per_sec: self.max_bytes_per_sec(),
+            video: self
+                .video
+                .as_ref()
+                .map(|plan| summarize(plan, self.status == DownloadStatus::Choosing)),
+            step: self.step.clone(),
         }
     }
 
@@ -467,6 +499,7 @@ fn placeholder_name(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::{ChosenQuality, Container, VideoChoice, VideoStep};
 
     fn record(status: DownloadStatus) -> TaskRecord {
         let mut rec = TaskRecord::new(
@@ -478,6 +511,110 @@ mod tests {
         );
         rec.status = status;
         rec
+    }
+
+    fn choosing_plan() -> VideoPlan {
+        let choice = |id: &str, label: &str| VideoChoice {
+            id: id.to_string(),
+            label: label.to_string(),
+            container: Container::Mp4,
+            height: None,
+            size_bytes: None,
+            size_is_estimate: false,
+            streams: Vec::new(),
+        };
+        VideoPlan {
+            page_url: "https://video.test/watch?v=1".to_string(),
+            title: "A test video".to_string(),
+            choice: None,
+            choices: vec![choice("1080-mp4", "1080p"), choice("720-mp4", "720p")],
+            streams: Vec::new(),
+            step: VideoStep::Choosing,
+            refreshes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_choosing_download_comes_back_choosing_after_a_restart() {
+        let mut rec = record(DownloadStatus::Choosing);
+        rec.video = Some(choosing_plan());
+
+        let back = TaskRecord::from_saved(rec.to_saved());
+
+        assert_eq!(back.status, DownloadStatus::Choosing);
+        let plan = back.video.expect("the plan is kept");
+        assert_eq!(plan.title, "A test video");
+        assert_eq!(plan.choices.len(), 2);
+    }
+
+    #[test]
+    fn choices_are_summarised_only_while_choosing() {
+        let mut rec = record(DownloadStatus::Choosing);
+        rec.video = Some(choosing_plan());
+        rec.step = Some("Looking for a video on this page…".to_string());
+
+        let summary = rec.to_summary();
+        let video = summary.video.expect("video summary");
+        assert_eq!(video.title, "A test video");
+        assert_eq!(video.choices.len(), 2);
+        assert_eq!(video.chosen, None);
+        assert_eq!(
+            summary.step.as_deref(),
+            Some("Looking for a video on this page…")
+        );
+
+        let mut plan = choosing_plan();
+        plan.choice = Some(ChosenQuality {
+            label: "1080p".to_string(),
+            container: Container::Mp4,
+            choice_id: "1080-mp4".to_string(),
+        });
+        plan.choices = Vec::new();
+        plan.step = VideoStep::Stream(0);
+        rec.status = DownloadStatus::Active;
+        rec.video = Some(plan);
+        let video = rec.to_summary().video.expect("video summary");
+        assert!(video.choices.is_empty());
+        assert_eq!(video.chosen.map(|c| c.label), Some("1080p".to_string()));
+    }
+
+    #[test]
+    fn a_plain_download_has_no_video_in_its_summary() {
+        assert_eq!(record(DownloadStatus::Queued).to_summary().video, None);
+    }
+
+    #[test]
+    fn the_quality_text_the_user_gave_survives_a_restart() {
+        let mut rec = record(DownloadStatus::Queued);
+        rec.quality = Some(Quality::Height(1080));
+        rec.quality_text = Some("1080P".to_string());
+
+        let saved = rec.to_saved();
+        assert_eq!(saved.quality.as_deref(), Some("1080P"));
+        let back = TaskRecord::from_saved(saved);
+
+        assert_eq!(back.quality, Some(Quality::Height(1080)));
+        assert_eq!(back.quality_text.as_deref(), Some("1080P"));
+    }
+
+    #[test]
+    fn a_saved_quality_that_cannot_be_read_becomes_none() {
+        let mut saved = record(DownloadStatus::Queued).to_saved();
+        saved.quality = Some("hd".to_string());
+        let back = TaskRecord::from_saved(saved);
+        assert_eq!(back.quality, None);
+        assert_eq!(back.quality_text, None);
+    }
+
+    #[test]
+    fn lookup_state_is_not_saved() {
+        let mut rec = record(DownloadStatus::Choosing);
+        rec.step = Some("video 1 of 2".to_string());
+        rec.video_lookup_failed = true;
+        let back = TaskRecord::from_saved(rec.to_saved());
+        assert_eq!(back.step, None);
+        assert!(!back.video_lookup_failed);
+        assert!(back.lookup_progress.is_none());
     }
 
     #[test]

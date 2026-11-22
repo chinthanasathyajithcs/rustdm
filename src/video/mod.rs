@@ -152,7 +152,9 @@ pub struct StreamPlan {
 pub struct VideoPlan {
     pub page_url: String,
     pub title: String,
-    pub choice: ChosenQuality,
+    /// What was chosen; none while the plan waits for a choice.
+    #[serde(default)]
+    pub choice: Option<ChosenQuality>,
     /// Kept only while choosing; emptied after the choice.
     pub choices: Vec<VideoChoice>,
     /// Filled after the choice.
@@ -237,11 +239,11 @@ mod tests {
         let plan = VideoPlan {
             page_url: "https://video.test/watch?v=1".to_string(),
             title: "A test video".to_string(),
-            choice: ChosenQuality {
+            choice: Some(ChosenQuality {
                 label: "1080p".to_string(),
                 container: Container::Mp4,
                 choice_id: "1080-mp4".to_string(),
-            },
+            }),
             choices: vec![choice],
             streams: vec![StreamPlan {
                 format_id: "137".to_string(),
@@ -262,5 +264,14 @@ mod tests {
         assert_eq!(back, plan);
         assert!(json.contains(r#""container":"mp4""#));
         assert!(json.contains(r#""kind":"video""#));
+    }
+
+    #[test]
+    fn a_plan_before_any_choice_has_no_chosen_quality() {
+        let json = r#"{"page_url":"u","title":"t","choices":[],"streams":[],
+            "step":"choosing","refreshes":[]}"#;
+        let plan: VideoPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.choice, None);
+        assert_eq!(plan.step, VideoStep::Choosing);
     }
 }

@@ -1,14 +1,15 @@
-use rustdm::daemon::queue_store::QueueStore;
+use rustdm::daemon::queue_store::{QueueSnapshot, QueueStore, SavedDownload, QUEUE_VERSION};
 use rustdm::daemon::{DaemonCore, DaemonServer};
 use rustdm::dirs::default_downloads_dir;
 use rustdm::ipc::client::DaemonClient;
 use rustdm::ipc::protocol::{
-    AddDownloadParams, CancelDownloadParams, DownloadIdParam, DownloadStatus, DownloadSummary,
-    PingResult, RpcId, RpcMessage, RpcRequest, SetDefaultsParams, CODE_DOWNLOAD_NOT_FOUND,
-    CODE_INVALID_PARAMS, CODE_INVALID_PATH,
+    AddDownloadParams, CancelDownloadParams, DaemonLimits, DownloadIdParam, DownloadStatus,
+    DownloadSummary, PingResult, RpcId, RpcMessage, RpcRequest, SavedDefaults, SetDefaultsParams,
+    CODE_DOWNLOAD_NOT_FOUND, CODE_INVALID_PARAMS, CODE_INVALID_PATH,
 };
 use rustdm::ipc::transport::{IpcConnection, IpcEndpoint};
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
+use rustdm::video::{VideoPlan, VideoStep};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -83,6 +84,7 @@ async fn test_daemon_add_download_and_complete() {
         connections: Some(4),
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(10),
@@ -152,6 +154,7 @@ async fn test_daemon_pause_and_resume() {
         connections: Some(2),
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(20),
@@ -309,6 +312,7 @@ async fn test_daemon_telemetry_streaming() {
         connections: Some(2),
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(41),
@@ -497,6 +501,7 @@ fn add_to(
         connections: None,
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     })
 }
 
@@ -607,6 +612,7 @@ fn add_without_options(url: String) -> AddDownloadParams {
         connections: None,
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     }
 }
 
@@ -720,6 +726,142 @@ async fn an_active_download_that_gets_no_data_reports_a_stall_in_its_ticks() {
 
     core.cancel_download(CancelDownloadParams {
         id: summary.id,
+        delete_partial: true,
+    })
+    .unwrap();
+}
+
+/// A daemon that has restored `saved` from its queue file, the way a restart does.
+/// The only way to put a `Choosing` download in until the lookup itself does.
+fn core_restored_with(data: &std::path::Path, saved: Vec<SavedDownload>) -> DaemonCore {
+    let snapshot = QueueSnapshot {
+        version: QUEUE_VERSION,
+        next_id: saved.len() as u64,
+        limits: DaemonLimits {
+            max_active: 1,
+            max_bytes_per_sec: 0,
+        },
+        defaults: SavedDefaults::default(),
+        downloads: saved,
+    };
+    QueueStore::in_dir(data).save(&snapshot).unwrap();
+    DaemonCore::with_store(QueueStore::in_dir(data)).unwrap()
+}
+
+fn saved_download(
+    id: &str,
+    url: &str,
+    folder: &std::path::Path,
+    status: DownloadStatus,
+) -> SavedDownload {
+    SavedDownload {
+        id: id.to_string(),
+        url: url.to_string(),
+        directory: folder.to_path_buf(),
+        requested_name: Some(format!("{id}.bin")),
+        filename: format!("{id}.bin"),
+        output: None,
+        connections: 2,
+        status,
+        total_bytes: None,
+        downloaded_bytes: 0,
+        error_message: None,
+        max_bytes_per_sec: 0,
+        has_cookies: false,
+        referer: None,
+        user_agent: None,
+        video: (status == DownloadStatus::Choosing).then(|| VideoPlan {
+            page_url: url.to_string(),
+            title: "A test video".to_string(),
+            choice: None,
+            choices: Vec::new(),
+            streams: Vec::new(),
+            step: VideoStep::Choosing,
+            refreshes: Vec::new(),
+        }),
+        quality: None,
+    }
+}
+
+#[tokio::test]
+async fn a_choosing_download_is_never_started() {
+    let mock = throttled_server().await;
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let url = mock.url().to_string();
+    let core = core_restored_with(
+        data.path(),
+        vec![saved_download(
+            "dl_1",
+            &url,
+            folder.path(),
+            DownloadStatus::Choosing,
+        )],
+    );
+
+    core.schedule();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(
+        core.get_status("dl_1").unwrap().status,
+        DownloadStatus::Choosing
+    );
+    assert!(mock.requests().is_empty(), "no engine run was started");
+}
+
+#[tokio::test]
+async fn a_choosing_download_takes_no_slot_and_waits_through_pause_and_resume() {
+    let mock = throttled_server().await;
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let url = mock.url().to_string();
+    let core = core_restored_with(
+        data.path(),
+        vec![
+            saved_download("dl_1", &url, folder.path(), DownloadStatus::Choosing),
+            saved_download(
+                "dl_2",
+                &format!("{url}?b"),
+                folder.path(),
+                DownloadStatus::Queued,
+            ),
+        ],
+    );
+
+    core.schedule();
+
+    // max_active is 1, and the one slot goes to the queued download behind it.
+    assert_eq!(
+        core.get_status("dl_2").unwrap().status,
+        DownloadStatus::Active
+    );
+    assert_eq!(
+        core.get_status("dl_1").unwrap().status,
+        DownloadStatus::Choosing
+    );
+    assert_eq!(
+        core.pause_download("dl_1").unwrap().status,
+        DownloadStatus::Choosing
+    );
+    assert_eq!(
+        core.resume_download("dl_1").unwrap().status,
+        DownloadStatus::Choosing
+    );
+    let summary = core.get_status("dl_1").unwrap();
+    assert_eq!(
+        summary.video.map(|v| v.title),
+        Some("A test video".to_string())
+    );
+
+    let cancelled = core
+        .cancel_download(CancelDownloadParams {
+            id: "dl_1".to_string(),
+            delete_partial: false,
+        })
+        .unwrap();
+    assert_eq!(cancelled.status, DownloadStatus::Cancelled);
+    core.cancel_download(CancelDownloadParams {
+        id: "dl_2".to_string(),
         delete_partial: true,
     })
     .unwrap();

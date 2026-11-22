@@ -53,6 +53,7 @@ fn add_params(mock: &TestServer, name: &str, dir: &Path) -> AddDownloadParams {
         connections: Some(1),
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     }
 }
 

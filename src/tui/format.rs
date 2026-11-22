@@ -12,6 +12,7 @@ pub fn status_label(status: DownloadStatus) -> &'static str {
         DownloadStatus::Completed => "completed",
         DownloadStatus::Failed => "failed",
         DownloadStatus::Cancelled => "cancelled",
+        DownloadStatus::Choosing => "choose quality",
     }
 }
 
@@ -125,6 +126,14 @@ mod tests {
     }
 
     #[test]
+    fn choosing_rows_show_choose_quality() {
+        assert_eq!(status_label(DownloadStatus::Choosing), "choose quality");
+        let summary = crate::tui::state::test_support::summary("dl_1", DownloadStatus::Choosing);
+        let row = format_row(&summary);
+        assert!(row.contains("choose quality"), "{row}");
+    }
+
+    #[test]
     fn eta_drops_seconds_once_hours_appear() {
         assert_eq!(format_eta(None), "-");
         assert_eq!(format_eta(Some(45)), "45s");
@@ -146,6 +155,8 @@ mod tests {
             eta_secs: Some(37),
             error_message: None,
             max_bytes_per_sec: 0,
+            video: None,
+            step: None,
         };
         let row = format_row(&summary);
         assert!(row.contains("25.0 MiB / 100.0 MiB (25%)"), "{row}");

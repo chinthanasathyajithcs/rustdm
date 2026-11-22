@@ -103,7 +103,10 @@ fn refuse_unless_open(state: &DaemonState, url: &str) -> Result<(), RpcError> {
         let task = task_lock.lock().unwrap();
         let unfinished = matches!(
             task.status,
-            DownloadStatus::Active | DownloadStatus::Queued | DownloadStatus::Pausing
+            DownloadStatus::Active
+                | DownloadStatus::Queued
+                | DownloadStatus::Pausing
+                | DownloadStatus::Choosing
         );
         if task.url == url && unfinished {
             return Err(RpcError::duplicate_download(url, &task.id));
@@ -438,10 +441,13 @@ impl DaemonCore {
                         let _ = tx.send(true);
                     }
                 }
+                // Nothing runs while the user picks a quality, so there is
+                // nothing to pause; like any other stopped download it stays as it is.
                 DownloadStatus::Pausing
                 | DownloadStatus::Paused
                 | DownloadStatus::Failed
-                | DownloadStatus::Cancelled => {}
+                | DownloadStatus::Cancelled
+                | DownloadStatus::Choosing => {}
             }
             task.to_summary()
         };
@@ -463,7 +469,8 @@ impl DaemonCore {
                 DownloadStatus::Pausing => {
                     return Err(RpcError::operation_in_progress(id, "pausing"))
                 }
-                DownloadStatus::Active | DownloadStatus::Queued => {}
+                // A download waiting for a quality stays so until one is chosen.
+                DownloadStatus::Active | DownloadStatus::Queued | DownloadStatus::Choosing => {}
                 // A stopped cancel continues from its partial file, or starts
                 // over if `--delete` removed it.
                 DownloadStatus::Paused
@@ -869,6 +876,7 @@ impl DaemonCore {
                     segments,
                     lanes,
                     stall: task.stall(now),
+                    step: task.step.clone(),
                 };
                 let _ = self.telemetry_tx.send(tick);
             }

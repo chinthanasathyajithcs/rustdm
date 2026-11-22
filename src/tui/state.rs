@@ -51,7 +51,10 @@ impl Tab {
             Tab::All => true,
             Tab::Active => matches!(
                 status,
-                DownloadStatus::Active | DownloadStatus::Pausing | DownloadStatus::Retrying
+                DownloadStatus::Active
+                    | DownloadStatus::Pausing
+                    | DownloadStatus::Retrying
+                    | DownloadStatus::Choosing
             ),
             Tab::Queued => status == DownloadStatus::Queued,
             Tab::Completed => status == DownloadStatus::Completed,
@@ -347,6 +350,8 @@ pub(crate) mod test_support {
             eta_secs: None,
             error_message: None,
             max_bytes_per_sec: 0,
+            video: None,
+            step: None,
         }
     }
 
@@ -378,6 +383,8 @@ pub(crate) mod test_support {
             eta_secs: Some(30),
             error_message: None,
             max_bytes_per_sec: 0,
+            video: None,
+            step: None,
         }]);
         app.apply_tick(TelemetryTick {
             id: "dl_1".to_string(),
@@ -406,6 +413,7 @@ pub(crate) mod test_support {
                 },
             ],
             stall: None,
+            step: None,
         });
         app
     }
@@ -441,6 +449,27 @@ mod tests {
     }
 
     #[test]
+    fn choosing_rows_show_choose_quality_in_the_active_tab() {
+        let mut app = App::default();
+        app.set_downloads(vec![
+            summary("dl_1", DownloadStatus::Choosing),
+            summary("dl_2", DownloadStatus::Queued),
+        ]);
+        assert!(Tab::Active.includes(DownloadStatus::Choosing));
+        assert!(!Tab::Queued.includes(DownloadStatus::Choosing));
+        assert!(!Tab::Stopped.includes(DownloadStatus::Choosing));
+        assert_eq!(app.count(Tab::Active), 1);
+        app.select_tab(Tab::Active);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 32)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
+        let text = screen_text(&terminal);
+        assert!(text.contains("choose quality"), "{text}");
+    }
+
+    #[test]
     fn only_an_active_download_reports_a_stall() {
         let mut app = sample_app();
         let reason = "no data for 42s: server busy (HTTP 503), retrying in 8s";
@@ -470,6 +499,7 @@ mod tests {
                 segments: Vec::new(),
                 lanes: Vec::new(),
                 stall: None,
+                step: None,
             });
         }
         let history = &app.speed_history["dl_1"];

@@ -14,6 +14,7 @@ fn test_integration_full_rpc_cycle() {
         connections: Some(16),
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     };
     let client_req = RpcRequest::new(
         RpcId::Number(1001),
@@ -44,6 +45,8 @@ fn test_integration_full_rpc_cycle() {
         eta_secs: None,
         error_message: None,
         max_bytes_per_sec: 0,
+        video: None,
+        step: None,
     };
     let server_resp = RpcResponse::success(server_req.id, serde_json::to_value(&summary).unwrap());
     let wire_resp = encode_message(&server_resp).expect("should encode response");
@@ -110,6 +113,7 @@ fn an_add_without_context_sends_no_context_field_and_parses_without_one() {
         connections: None,
         max_bytes_per_sec: None,
         context: None,
+        quality: None,
     };
     let json = serde_json::to_value(&params).unwrap();
     assert!(json.get("context").is_none());

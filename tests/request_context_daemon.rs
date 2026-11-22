@@ -60,6 +60,7 @@ fn add_params(
         connections: Some(2),
         max_bytes_per_sec: None,
         context,
+        quality: None,
     }
 }
 

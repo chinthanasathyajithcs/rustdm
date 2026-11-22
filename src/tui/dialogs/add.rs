@@ -278,6 +278,7 @@ impl AddDialog {
                 connections: connections.map(|n| n as usize),
                 max_bytes_per_sec,
                 context: None,
+                quality: None,
             })
             .collect())
     }
@@ -463,6 +464,7 @@ mod tests {
                 connections: Some(4),
                 max_bytes_per_sec: Some(512 * 1024),
                 context: None,
+                quality: None,
             }]
         );
         assert!(dialog.is_pending());

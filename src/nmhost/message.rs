@@ -214,6 +214,7 @@ pub fn add_params(
         connections: None,
         max_bytes_per_sec: None,
         context: context.cloned(),
+        quality: None,
     }
 }
 
