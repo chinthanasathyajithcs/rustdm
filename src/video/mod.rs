@@ -2,7 +2,9 @@
 //! stored plan of a video download.
 
 pub mod choices;
+pub mod errors;
 pub mod info;
+pub mod ytdlp;
 
 use info::PageInfo;
 use serde::{Deserialize, Serialize};

@@ -58,12 +58,32 @@ pub fn write_script(exe: &Path, script: &ToolScript) {
 /// The arguments of every call the stand-in at `exe` has answered, in order.
 /// A `--version` call is answered without being recorded.
 pub fn recorded_args(exe: &Path) -> Vec<Vec<String>> {
-    let Ok(text) = std::fs::read_to_string(exe_dir(exe).join(ARGS_FILE)) else {
-        return Vec::new();
-    };
-    text.lines()
-        .map(|line| serde_json::from_str(line).expect("an args line is a JSON list"))
+    log_lines(exe)
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+/// What the stand-in saw in the file named by `--cookies`, when it was called.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CookiesSeen {
+    pub cookies_file: String,
+    /// The file's Unix permission bits as the OS reports them; 0 on Windows.
+    pub mode: u32,
+    pub content: String,
+}
+
+/// The cookies files the stand-in at `exe` found while it ran, in order.
+pub fn recorded_cookies(exe: &Path) -> Vec<CookiesSeen> {
+    log_lines(exe)
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn log_lines(exe: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(exe_dir(exe).join(ARGS_FILE)).unwrap_or_default();
+    text.lines().map(String::from).collect()
 }
 
 fn exe_dir(exe: &Path) -> &Path {
@@ -133,6 +153,41 @@ fn record_call(dir: &Path, args: &[String]) {
         .open(dir.join(ARGS_FILE))
         .expect("open the args log");
     file.write_all(line.as_bytes()).expect("write the args log");
+    record_cookies_file(&mut file, args);
+}
+
+/// When the call names a `--cookies` file that exists, log what it holds now,
+/// so a test can tell the file was there, private and filled while the tool ran.
+fn record_cookies_file(log: &mut std::fs::File, args: &[String]) {
+    let Some(path) = args
+        .windows(2)
+        .find(|pair| pair[0] == "--cookies")
+        .map(|pair| pair[1].clone())
+    else {
+        return;
+    };
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return;
+    };
+    let seen = CookiesSeen {
+        cookies_file: path.clone(),
+        mode: file_mode(&metadata),
+        content: std::fs::read_to_string(&path).unwrap_or_default(),
+    };
+    let mut line = serde_json::to_string(&seen).expect("a cookies record serializes");
+    line.push('\n');
+    log.write_all(line.as_bytes()).expect("write the args log");
+}
+
+#[cfg(unix)]
+fn file_mode(metadata: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode()
+}
+
+#[cfg(not(unix))]
+fn file_mode(_metadata: &std::fs::Metadata) -> u32 {
+    0
 }
 
 /// The answer for this call, and count the call.
