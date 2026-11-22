@@ -1,6 +1,7 @@
 //! Video downloads: the types shared by the lookup, the quality list and the
 //! stored plan of a video download.
 
+pub mod choices;
 pub mod info;
 
 use info::PageInfo;
