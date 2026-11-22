@@ -20,8 +20,14 @@ path = "src/bin/rdmd.rs"
 name = "rdm-nmhost"
 path = "src/bin/rdm-nmhost.rs"
 
+[[bin]]
+name = "rdm-test-tool"
+path = "src/bin/rdm-test-tool.rs"
+required-features = ["testing"]
+
 [features]
-testing = []
+# `testing` pulls in tempfile, which the video test world uses outside `cfg(test)`.
+testing = ["dep:tempfile"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -32,6 +38,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 ring = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tempfile = { version = "3.17", optional = true }
 thiserror = "2.0"
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"

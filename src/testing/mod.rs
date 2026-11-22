@@ -1,5 +1,6 @@
 pub mod fake_releases;
 pub mod tools;
+pub mod video;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};

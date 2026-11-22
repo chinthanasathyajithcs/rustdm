@@ -6,9 +6,8 @@ use rustdm::ipc::protocol::ToolPhase;
 use rustdm::testing::fake_releases::*;
 use rustdm::testing::{Mode, RequestLog, Route, TestServer};
 use rustdm::tools::checksum::sha256_hex;
-use rustdm::tools::pins::{Archive, Pin};
+use rustdm::tools::pins::Pin;
 use rustdm::tools::{FetchCtx, Freshness, Tool, ToolError, ToolStore};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -762,41 +761,6 @@ async fn a_program_that_vanishes_after_starting_is_reported_as_quarantined() {
 }
 
 // --- ffmpeg and deno, from pinned zip files ---
-
-fn zip_bytes(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
-    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .unix_permissions(0o755);
-    for (name, data) in entries {
-        writer.start_file(*name, options).unwrap();
-        writer.write_all(data).unwrap();
-    }
-    writer.finish().unwrap().into_inner()
-}
-
-fn zip_pin(
-    archive: &[u8],
-    version: &str,
-    strip: usize,
-    wanted: &[&str],
-    exe: &str,
-    exe_dir: &str,
-) -> Pin {
-    Pin {
-        version: version.to_string(),
-        path: "pins/tool.zip".to_string(),
-        asset: "tool.zip".to_string(),
-        sha256: sha256_hex(archive),
-        archive: Archive::Zip,
-        strip_components: strip,
-        wanted: wanted.iter().map(|s| s.to_string()).collect(),
-        exe: exe.to_string(),
-        exe_dir: exe_dir.to_string(),
-        unpacked_bytes: 1000,
-        published_checksums_path: String::new(),
-    }
-}
 
 fn store_with_pin(world: &World, tool: Tool, pin: Pin) -> Arc<ToolStore> {
     let mut sources = test_sources(&world.server);
