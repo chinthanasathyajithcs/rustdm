@@ -19,7 +19,8 @@ pub enum LookupFailure {
     Spawn(String),
 }
 
-const NO_VIDEO: &str = "This link is a web page, not a file, and no video was found on it.";
+/// What a page with nothing to download is told.
+pub const NO_VIDEO: &str = "This link is a web page, not a file, and no video was found on it.";
 const SIGN_IN_NEEDED: &str =
     "This video needs you to be signed in. Add it from your browser so rustdm gets your sign-in.";
 const LIVE: &str = "This is a live stream; rustdm downloads finished videos only.";

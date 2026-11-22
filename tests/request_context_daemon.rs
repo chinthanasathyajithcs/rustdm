@@ -8,6 +8,7 @@ use rustdm::ipc::protocol::{
     AddDownloadParams, CancelDownloadParams, DownloadStatus, DownloadSummary, CODE_INVALID_PARAMS,
 };
 use rustdm::request_context::{ContextCookie, RequestContext};
+use rustdm::testing::video::{write_script, ToolResponse, ToolScript, VideoWorld};
 use rustdm::testing::{pattern_bytes, Mode, TestServer};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -827,6 +828,20 @@ async fn a_sign_in_page_on_resume_fails_the_download_and_deletes_the_secret() {
     let folder = tempfile::tempdir().unwrap();
     let server = slow_server().await;
     let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+    // A web page is looked up for a video before it fails; the stand-in yt-dlp
+    // finds none, so nothing reaches the real tools host.
+    let world = VideoWorld::new().await;
+    write_script(
+        &world.ytdlp.exe,
+        &ToolScript {
+            responses: vec![ToolResponse {
+                stderr: "ERROR: Unsupported URL: http://127.0.0.1/file.bin".to_string(),
+                exit_code: 1,
+                ..ToolResponse::default()
+            }],
+        },
+    );
+    let core = core.with_tools(world.store.clone());
     // The site now answers the link with a sign-in page.
     let _page = restart_server_at(
         server,

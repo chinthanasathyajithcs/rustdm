@@ -22,6 +22,11 @@ use url::Url;
 const SCRIPT_FILE: &str = "test-tool.json";
 const COUNT_FILE: &str = "test-tool.count";
 const ARGS_FILE: &str = "test-tool.args.jsonl";
+/// Marks a script carried inside the program itself (see `test_tool_program_scripted`).
+const SCRIPT_MARKER: &[u8] = b"\0rdm-test-script=";
+/// The most of the program's end searched for an embedded script.
+const SCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
+const VERSION_TAIL_BYTES: u64 = 4096;
 
 /// The yt-dlp version `VideoWorld` installs.
 pub const WORLD_YTDLP_VERSION: &str = "2026.11.10";
@@ -93,9 +98,24 @@ fn exe_dir(exe: &Path) -> &Path {
 /// The bytes of the stand-in program with `version` appended, so it can be
 /// installed as yt-dlp or deno and answer `--version` with that version.
 pub fn test_tool_program(version: &str) -> Vec<u8> {
+    program_with_tail(version, None)
+}
+
+/// Like `test_tool_program`, with `script` carried inside the program: whoever
+/// installs it gets a stand-in that plays `script` from its first call, before
+/// any script file is written next to it. For a yt-dlp the daemon installs itself.
+pub fn test_tool_program_scripted(version: &str, script: &ToolScript) -> Vec<u8> {
+    program_with_tail(version, Some(script))
+}
+
+fn program_with_tail(version: &str, script: Option<&ToolScript>) -> Vec<u8> {
     let path = std::env::var_os("CARGO_BIN_EXE_rdm-test-tool")
         .expect("CARGO_BIN_EXE_rdm-test-tool is set when integration tests run");
     let mut bytes = std::fs::read(path).expect("read rdm-test-tool");
+    if let Some(script) = script {
+        bytes.extend_from_slice(SCRIPT_MARKER);
+        bytes.extend_from_slice(&serde_json::to_vec(script).expect("a script serializes"));
+    }
     bytes.extend_from_slice(FAKE_VERSION_MARKER);
     bytes.extend_from_slice(version.as_bytes());
     bytes.push(0);
@@ -107,7 +127,7 @@ pub fn run_test_tool() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().expect("the test tool knows where it is");
     if args == ["--version"] {
-        let version = tail_of(&exe).and_then(|bytes| fake_version_in(&bytes));
+        let version = tail_of(&exe, VERSION_TAIL_BYTES).and_then(|bytes| fake_version_in(&bytes));
         return match version {
             Some(version) => {
                 let _ = writeln!(std::io::stdout(), "{version}");
@@ -130,18 +150,29 @@ pub fn run_test_tool() -> i32 {
     response.exit_code
 }
 
-/// The last bytes of the file at `path`, where `test_tool_program` puts the
+/// The last `bytes` of the file at `path`, where `test_tool_program` puts the
 /// version. Scanning the whole program for it would take seconds in a debug build.
-fn tail_of(path: &Path) -> Option<Vec<u8>> {
+fn tail_of(path: &Path, bytes: u64) -> Option<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
-    const TAIL_BYTES: u64 = 4096;
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES)))
-        .ok()?;
+    file.seek(SeekFrom::Start(len.saturating_sub(bytes))).ok()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
     Some(bytes)
+}
+
+/// The script carried inside this program, if it was made with
+/// `test_tool_program_scripted`.
+fn embedded_script() -> Option<ToolScript> {
+    let exe = std::env::current_exe().ok()?;
+    let tail = tail_of(&exe, SCRIPT_TAIL_BYTES)?;
+    let at = tail
+        .windows(SCRIPT_MARKER.len())
+        .rposition(|window| window == SCRIPT_MARKER)?;
+    let rest = &tail[at + SCRIPT_MARKER.len()..];
+    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+    serde_json::from_slice(&rest[..end]).ok()
 }
 
 fn record_call(dir: &Path, args: &[String]) {
@@ -201,6 +232,7 @@ fn next_response(dir: &Path) -> ToolResponse {
     let script: ToolScript = std::fs::read(dir.join(SCRIPT_FILE))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .or_else(embedded_script)
         .unwrap_or_default();
     match script.responses.len() {
         0 => ToolResponse::default(),

@@ -2,10 +2,12 @@ use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::secrets::SecretStore;
 use crate::daemon::task::TaskRecord;
+use crate::daemon::video_task::{self, ExtractorUpdateGate};
 use crate::daemon::{defaults, fair_share, queue_order, sign_in};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::*;
+use crate::video::{parse_quality, Quality};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -91,6 +93,8 @@ struct NewDownload {
     filename: Option<String>,
     connections: u32,
     max_bytes_per_sec: u64,
+    /// The quality asked for, with the text it was asked in.
+    quality: Option<(Quality, String)>,
 }
 
 /// An add of `url` is turned away while the daemon shuts down, or while that
@@ -140,6 +144,8 @@ pub struct DaemonCore {
     pub(crate) tools: Option<Arc<crate::tools::ToolStore>>,
     /// Browser cookies of downloads that came with them, when the queue is saved.
     pub(super) secrets: Option<Arc<SecretStore>>,
+    /// Lets extractor errors ask for a newer yt-dlp once an hour, daemon-wide.
+    pub(super) extractor_gate: Arc<ExtractorUpdateGate>,
 }
 
 impl Default for DaemonCore {
@@ -185,6 +191,9 @@ impl DaemonCore {
             .as_ref()
             .and_then(|s| s.path().parent())
             .map(|p| p.to_path_buf());
+        if let Some(dir) = &data_dir {
+            video_task::sweep_lookup_files(dir);
+        }
         let secrets = data_dir
             .as_deref()
             .map(|d| Arc::new(SecretStore::in_dir(d)));
@@ -236,6 +245,7 @@ impl DaemonCore {
             store: store.map(Arc::new),
             tools,
             secrets,
+            extractor_gate: Arc::default(),
         };
         if restored_changes {
             core.persist();
@@ -312,6 +322,15 @@ impl DaemonCore {
             .max_bytes_per_sec
             .unwrap_or(defaults.max_bytes_per_sec);
         validate_speed(max_bytes_per_sec)?;
+        let quality = params
+            .quality
+            .as_deref()
+            .map(|text| {
+                parse_quality(text)
+                    .map(|quality| (quality, text.to_string()))
+                    .map_err(RpcError::invalid_params)
+            })
+            .transpose()?;
         if let Some(name) = &params.filename {
             if crate::template::sanitize_component(name).is_empty() {
                 return Err(RpcError::invalid_params(format!(
@@ -359,6 +378,7 @@ impl DaemonCore {
                             filename: params.filename,
                             connections,
                             max_bytes_per_sec,
+                            quality,
                         },
                         context.as_ref(),
                     )
@@ -413,6 +433,10 @@ impl DaemonCore {
             new.connections,
         );
         task.speed_limiter.set_bytes_per_sec(new.max_bytes_per_sec);
+        (task.quality, task.quality_text) = match new.quality {
+            Some((quality, text)) => (Some(quality), Some(text)),
+            None => (None, None),
+        };
         if let Some(checked) = context {
             task.set_context(&checked.context, checked.client.clone());
             self.keep_secret(&task, &checked.context.cookies);
@@ -739,8 +763,17 @@ impl DaemonCore {
         let client = task.client.clone().unwrap_or_else(|| self.client.clone());
         let core = self.clone();
         let record = Arc::clone(task_lock);
+        let fresh = resume_from.is_none();
+        let video_cancel = cancel_rx.clone();
 
         tokio::spawn(async move {
+            // A download that already has a video plan needs no link check.
+            if core
+                .continue_video_plan(&record, video_cancel.clone())
+                .await
+            {
+                return;
+            }
             let outcome = match resume_from {
                 Some(state_file) => {
                     engine::resume_with_options(
@@ -768,11 +801,21 @@ impl DaemonCore {
                     Err(e) => Err(Error::Protocol(format!("invalid URL: {e}"))),
                 },
             };
-            core.finish_task(&record, outcome);
+            // A web page may be a video page: look it up instead of failing.
+            if let Some(outcome) = core
+                .web_page_to_video(&record, outcome, video_cancel, fresh)
+                .await
+            {
+                core.finish_task(&record, outcome);
+            }
         });
     }
 
-    fn finish_task(&self, record: &Arc<Mutex<TaskRecord>>, outcome: Result<Outcome, Error>) {
+    pub(super) fn finish_task(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        outcome: Result<Outcome, Error>,
+    ) {
         {
             let mut rec = record.lock().unwrap();
             let had_cookies = rec.has_cookies;
@@ -827,6 +870,7 @@ impl DaemonCore {
                     continue;
                 }
                 changed |= task.sync_from_progress();
+                video_task::refresh_step(&mut task);
                 let current_bytes = task.measure(now);
                 let speed = task.speed_bps;
 
@@ -875,7 +919,11 @@ impl DaemonCore {
                     active_connections,
                     segments,
                     lanes,
-                    stall: task.stall(now),
+                    stall: if video_task::is_looking_up(&task) {
+                        None
+                    } else {
+                        task.stall(now)
+                    },
                     step: task.step.clone(),
                 };
                 let _ = self.telemetry_tx.send(tick);

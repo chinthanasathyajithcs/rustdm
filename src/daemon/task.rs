@@ -227,6 +227,8 @@ impl TaskRecord {
         self.resume_after_restart = false;
         self.retries = 0;
         self.retry_at = None;
+        // The user asks again, so a page that did not give a video is looked up again.
+        self.video_lookup_failed = false;
     }
 
     /// Forget the cookies, keeping the Referer and User-Agent. Returns whether
