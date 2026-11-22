@@ -95,9 +95,7 @@ impl DaemonCore {
         }
         let id = {
             let rec = record.lock().unwrap();
-            let wanted = rec.status == DownloadStatus::Active
-                && rec.video.is_none()
-                && !rec.video_lookup_failed;
+            let wanted = rec.status == DownloadStatus::Active && rec.video.is_none();
             if !wanted {
                 return Some(outcome);
             }
@@ -128,26 +126,37 @@ impl DaemonCore {
         let next = {
             let rec = record.lock().unwrap();
             match &rec.video {
-                None => Next::Fresh,
-                Some(_) if rec.status != DownloadStatus::Active => Next::Stopped,
+                None if !rec.lookup_next => Next::Fresh,
+                _ if rec.status != DownloadStatus::Active => Next::Stopped,
                 Some(plan) if plan.choice.is_some() => Next::Placeholder,
                 Some(plan) if !plan.choices.is_empty() => Next::Choose,
-                Some(_) => Next::LookUp(rec.id.clone()),
+                // The last run failed in the lookup, or no choices were kept.
+                _ => Next::LookUp(rec.id.clone()),
             }
         };
         match next {
             Next::Fresh => return false,
             Next::Stopped => self.finish_task(record, Err(Error::Cancelled)),
             Next::Choose | Next::Placeholder => {
-                {
+                let kept = {
                     let mut rec = record.lock().unwrap();
-                    settle_run(&mut rec);
-                    rec.error_message = None;
-                    if matches!(next, Next::Placeholder) {
-                        fail_with_placeholder(&mut rec);
+                    // Stopped since the check above: settle like any stop.
+                    if rec.status != DownloadStatus::Active {
+                        false
                     } else {
-                        rec.status = DownloadStatus::Choosing;
+                        settle_run(&mut rec);
+                        rec.error_message = None;
+                        if matches!(next, Next::Placeholder) {
+                            fail_with_placeholder(&mut rec);
+                        } else {
+                            rec.status = DownloadStatus::Choosing;
+                        }
+                        true
                     }
+                };
+                if !kept {
+                    self.finish_task(record, Err(Error::Cancelled));
+                    return true;
                 }
                 self.persist();
                 self.schedule();
@@ -290,7 +299,7 @@ impl DaemonCore {
             let mut rec = record.lock().unwrap();
             rec.step = None;
             rec.lookup_progress = None;
-            rec.video_lookup_failed |= failed;
+            rec.lookup_next |= failed;
             rec.has_cookies
         };
         match outcome {
@@ -310,7 +319,7 @@ impl DaemonCore {
                 self.finish_task(record, Err(error));
             }
             LookupOutcome::NoTools(e) => {
-                end_lookup(false);
+                end_lookup(true);
                 let error = Error::Tool {
                     message: e.to_string(),
                     transient: e.is_transient(),
@@ -349,13 +358,18 @@ impl DaemonCore {
                     info.extractor_key.as_deref().unwrap_or("a web page")
                 );
                 rec.video = Some(plan_of(&rec.url, choices));
+                rec.lookup_next = false;
                 match rec.quality {
                     Some(quality) => apply_choice(&mut rec, pick(choices, quality)),
                     None => {
                         rec.status = DownloadStatus::Choosing;
                         let default = choices.choices.get(choices.default);
                         let container = default.map_or(Container::Mp4, |c| c.container);
-                        rec.filename = video_file_name(&choices.title, container);
+                        rec.filename = video_file_name(
+                            rec.requested_name.as_deref(),
+                            &choices.title,
+                            container,
+                        );
                     }
                 }
                 true
@@ -469,14 +483,15 @@ fn settle_run(rec: &mut TaskRecord) {
     rec.running = false;
 }
 
-/// The file a video is saved as: its title, made safe, and the quality's ending.
-fn video_file_name(title: &str, container: Container) -> String {
-    let name = crate::template::sanitize_component(title);
-    let name = if name.is_empty() {
-        FALLBACK_NAME
-    } else {
-        &name
-    };
+/// The file a video is saved as: the name the user asked for, else its title,
+/// made safe, and the quality's ending.
+fn video_file_name(requested: Option<&str>, title: &str, container: Container) -> String {
+    let usable =
+        |text: &str| Some(crate::template::sanitize_component(text)).filter(|n| !n.is_empty());
+    let name = requested
+        .and_then(usable)
+        .or_else(|| usable(title))
+        .unwrap_or_else(|| FALLBACK_NAME.to_string());
     format!("{name}.{}", container.ext())
 }
 
@@ -493,6 +508,10 @@ pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) {
         return;
     };
     let Some(row) = plan.choices.get(index).cloned() else {
+        // A row that is not there leaves nothing to download.
+        rec.status = DownloadStatus::Failed;
+        rec.retry_at = None;
+        rec.error_message = Some(NO_VIDEO.to_string());
         return;
     };
     plan.choice = Some(ChosenQuality {
@@ -503,7 +522,7 @@ pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) {
     plan.step = VideoStep::Stream(0);
     plan.choices = Vec::new();
     let title = plan.title.clone();
-    rec.filename = video_file_name(&title, row.container);
+    rec.filename = video_file_name(rec.requested_name.as_deref(), &title, row.container);
     fail_with_placeholder(rec);
 }
 
@@ -621,19 +640,42 @@ mod tests {
     }
 
     #[test]
-    fn a_row_that_is_not_there_changes_nothing() {
+    fn a_row_that_is_not_there_fails_the_download_with_the_no_video_message() {
         let mut rec = record_with_plan();
 
         apply_choice(&mut rec, 9);
 
         assert_eq!(rec.video.as_ref().unwrap().choices.len(), 2);
-        assert_eq!(rec.status, DownloadStatus::Queued);
+        assert_eq!(rec.status, DownloadStatus::Failed);
+        assert_eq!(rec.error_message.as_deref(), Some(NO_VIDEO));
     }
 
     #[test]
     fn a_title_with_nothing_usable_still_gives_a_name() {
-        assert_eq!(video_file_name("...", Container::Webm), "video.webm");
-        assert_eq!(video_file_name("Rust", Container::Mp4), "Rust.mp4");
+        assert_eq!(video_file_name(None, "...", Container::Webm), "video.webm");
+        assert_eq!(video_file_name(None, "Rust", Container::Mp4), "Rust.mp4");
+    }
+
+    #[test]
+    fn a_name_the_user_asked_for_beats_the_title() {
+        assert_eq!(
+            video_file_name(Some("My: clip"), "Rust", Container::Mp4),
+            "My_ clip.mp4"
+        );
+        assert_eq!(
+            video_file_name(Some("..."), "Rust", Container::M4a),
+            "Rust.m4a"
+        );
+    }
+
+    #[test]
+    fn choosing_a_row_names_the_file_after_the_requested_name() {
+        let mut rec = record_with_plan();
+        rec.requested_name = Some("My clip".to_string());
+
+        apply_choice(&mut rec, 0);
+
+        assert_eq!(rec.filename, "My clip.mp4");
     }
 
     #[test]

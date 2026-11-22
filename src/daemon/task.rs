@@ -97,9 +97,10 @@ pub struct TaskRecord {
     /// The tool and progress of a download that is being fetched for this
     /// lookup, shown while it runs. Not saved.
     pub lookup_progress: Option<(Tool, Arc<Progress>)>,
-    /// The lookup found nothing to choose from, so it is not run again.
+    /// The last run failed in the lookup, so the next run (a retry or the
+    /// user's resume) goes straight to the lookup without the link check.
     /// Not saved.
-    pub video_lookup_failed: bool,
+    pub lookup_next: bool,
 }
 
 impl TaskRecord {
@@ -155,7 +156,7 @@ impl TaskRecord {
             quality_text: None,
             step: None,
             lookup_progress: None,
-            video_lookup_failed: false,
+            lookup_next: false,
         }
     }
 
@@ -227,8 +228,6 @@ impl TaskRecord {
         self.resume_after_restart = false;
         self.retries = 0;
         self.retry_at = None;
-        // The user asks again, so a page that did not give a video is looked up again.
-        self.video_lookup_failed = false;
     }
 
     /// Forget the cookies, keeping the Referer and User-Agent. Returns whether
@@ -617,10 +616,10 @@ mod tests {
     fn lookup_state_is_not_saved() {
         let mut rec = record(DownloadStatus::Choosing);
         rec.step = Some("video 1 of 2".to_string());
-        rec.video_lookup_failed = true;
+        rec.lookup_next = true;
         let back = TaskRecord::from_saved(rec.to_saved());
         assert_eq!(back.step, None);
-        assert!(!back.video_lookup_failed);
+        assert!(!back.lookup_next);
         assert!(back.lookup_progress.is_none());
     }
 

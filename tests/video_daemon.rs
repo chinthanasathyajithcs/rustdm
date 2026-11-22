@@ -2,6 +2,7 @@
 //! for a quality to be chosen.
 
 use rustdm::daemon::queue_store::QueueStore;
+use rustdm::daemon::task::MAX_AUTO_RETRIES;
 use rustdm::daemon::DaemonCore;
 use rustdm::engine::build_client;
 use rustdm::error::web_page_with_cookies_message;
@@ -354,7 +355,13 @@ async fn cancel_during_the_lookup_stops_yt_dlp_and_removes_the_cookies_file() {
     let mut params = s.params("/watch");
     params.context = Some(cookie_context());
     let added = s.core.add_download(params).unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until yt-dlp is running with the cookies file.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while s.core.get_status(&added.id).unwrap().step.as_deref() != Some(LOOKING) || s.lookups() != 1
+    {
+        assert!(Instant::now() < deadline, "the lookup never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let started = Instant::now();
     s.core
@@ -371,6 +378,11 @@ async fn cancel_during_the_lookup_stops_yt_dlp_and_removes_the_cookies_file() {
     assert_eq!(summary.status, DownloadStatus::Cancelled);
     assert_eq!(summary.error_message, None);
     assert_eq!(summary.step, None);
+    assert_eq!(
+        recorded_cookies(&s.world.ytdlp.exe).len(),
+        1,
+        "yt-dlp saw a cookies file while it ran"
+    );
     assert!(lookup_files(s.data.path()).is_empty());
     assert_eq!(s.lookups(), 1, "yt-dlp was started and not started again");
 }
@@ -413,33 +425,114 @@ async fn no_yt_dlp_and_no_network_says_so_and_retries() {
     );
 }
 
+const TIMED_OUT_STDERR: &str =
+    "ERROR: [youtube] testVideo01: Unable to download webpage: <urlopen error timed out>";
+const TIMED_OUT_MESSAGE: &str =
+    "[youtube] testVideo01: Unable to download webpage: <urlopen error timed out>";
+
+/// Bring the retry of a waiting download forward and start it.
+fn retry_now(core: &DaemonCore, id: &str) {
+    {
+        let state = core.state.lock().unwrap();
+        state.downloads[id].lock().unwrap().retry_at = Some(Instant::now());
+    }
+    core.retry_due_downloads();
+}
+
+/// Retry a download that keeps failing in the lookup until it gives up.
+async fn retry_until_it_fails(core: &DaemonCore, id: &str) -> DownloadSummary {
+    loop {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let summary = loop {
+            let summary = core.get_status(id).unwrap();
+            if matches!(
+                summary.status,
+                DownloadStatus::Retrying | DownloadStatus::Failed
+            ) {
+                break summary;
+            }
+            assert!(Instant::now() < deadline, "{id} is {:?}", summary.status);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        if summary.status == DownloadStatus::Failed {
+            return summary;
+        }
+        retry_now(core, id);
+    }
+}
+
 #[tokio::test]
-async fn a_failed_lookup_is_not_repeated_by_the_automatic_retry() {
+async fn a_lookup_that_failed_for_a_moment_is_tried_again_without_the_link_check() {
     let s = setup().await;
-    s.answer(error_answer(
-        "ERROR: [youtube] testVideo01: Unable to download webpage: <urlopen error timed out>",
-    ));
+    write_script(
+        &s.world.ytdlp.exe,
+        &script(vec![
+            error_answer(TIMED_OUT_STDERR),
+            page_answer(&youtube_like(&base())),
+        ]),
+    );
 
     let added = s.add("/watch");
     wait_for(&s.core, &added.id, DownloadStatus::Retrying).await;
-    assert_eq!(s.lookups(), 1);
-    let checks_before = s.pages.requests().len();
+    let page_checks = s.pages.requests().len();
+    assert!(page_checks > 0, "the first run checked the link");
+    retry_now(&s.core, &added.id);
+    let waiting = wait_for(&s.core, &added.id, DownloadStatus::Choosing).await;
 
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while s.pages.requests().len() == checks_before {
-        s.core.retry_due_downloads();
-        assert!(Instant::now() < deadline, "the retry never ran");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    s.core.wait_until_settled(Duration::from_secs(10)).await;
+    assert_eq!(s.lookups(), 2);
+    assert_eq!(s.pages.requests().len(), page_checks, "one link check");
+    assert_eq!(waiting.error_message, None);
+}
 
-    assert_eq!(s.lookups(), 1, "the retry did not look the page up again");
+#[tokio::test]
+async fn a_lookup_that_keeps_failing_ends_with_its_own_message() {
+    let s = setup().await;
+    s.answer(error_answer(TIMED_OUT_STDERR));
 
+    let added = s.add("/watch");
+    wait_for(&s.core, &added.id, DownloadStatus::Retrying).await;
+    let page_checks = s.pages.requests().len();
+    let failed = retry_until_it_fails(&s.core, &added.id).await;
+
+    assert_eq!(failed.error_message.as_deref(), Some(TIMED_OUT_MESSAGE));
+    assert_eq!(s.lookups(), 1 + MAX_AUTO_RETRIES as usize);
+    assert_eq!(s.pages.requests().len(), page_checks, "one link check");
+
+    // The user's resume goes to the lookup too.
     s.answer(page_answer(&youtube_like(&base())));
     s.core.resume_download(&added.id).unwrap();
     wait_for(&s.core, &added.id, DownloadStatus::Choosing).await;
-    // Writing the script reset the count, so this is the one new lookup.
     assert_eq!(s.lookups(), 1);
+    assert_eq!(s.pages.requests().len(), page_checks, "no link check");
+}
+
+#[tokio::test]
+async fn a_lookup_that_keeps_failing_keeps_the_sign_in() {
+    let s = setup().await;
+    s.answer(error_answer(TIMED_OUT_STDERR));
+    let mut params = s.params("/watch");
+    params.context = Some(cookie_context());
+
+    let added = s.core.add_download(params).unwrap();
+    wait_for(&s.core, &added.id, DownloadStatus::Retrying).await;
+    let failed = retry_until_it_fails(&s.core, &added.id).await;
+
+    assert_eq!(failed.error_message.as_deref(), Some(TIMED_OUT_MESSAGE));
+    assert_ne!(
+        failed.error_message.as_deref(),
+        Some(web_page_with_cookies_message().as_str())
+    );
+    let secret = s
+        .data
+        .path()
+        .join("secrets")
+        .join(format!("{}.cookies", added.id));
+    assert!(secret.exists(), "the sign-in was kept");
+    assert_eq!(
+        recorded_cookies(&s.world.ytdlp.exe).len(),
+        1 + MAX_AUTO_RETRIES as usize,
+        "every lookup carried the cookies"
+    );
 }
 
 #[tokio::test]
@@ -500,6 +593,25 @@ async fn a_quality_given_at_add_is_chosen_at_once() {
     assert_eq!(chosen.choice_id, "720-mp4");
     assert!(video.choices.is_empty());
     assert_eq!(done.filename, "A test video.mp4");
+}
+
+#[tokio::test]
+async fn a_name_asked_for_at_add_names_the_video_file() {
+    let s = setup().await;
+    s.answer(page_answer(&youtube_like(&base())));
+    let mut waits = s.params("/watch");
+    waits.filename = Some("My clip".to_string());
+    let mut chooses = s.params("/watch1");
+    chooses.filename = Some("My clip".to_string());
+    chooses.quality = Some("720".to_string());
+
+    let waiting = s.core.add_download(waits).unwrap();
+    let waiting = wait_for(&s.core, &waiting.id, DownloadStatus::Choosing).await;
+    let chosen = s.core.add_download(chooses).unwrap();
+    let chosen = wait_for(&s.core, &chosen.id, DownloadStatus::Failed).await;
+
+    assert_eq!(waiting.filename, "My clip.mp4");
+    assert_eq!(chosen.filename, "My clip.mp4");
 }
 
 #[tokio::test]
