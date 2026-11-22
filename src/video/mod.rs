@@ -157,6 +157,9 @@ pub struct VideoPlan {
     pub choice: Option<ChosenQuality>,
     /// Kept only while choosing; emptied after the choice.
     pub choices: Vec<VideoChoice>,
+    /// Index into `choices` of the row to offer first.
+    #[serde(default)]
+    pub default: usize,
     /// Filled after the choice.
     pub streams: Vec<StreamPlan>,
     pub step: VideoStep,
@@ -245,6 +248,7 @@ mod tests {
                 choice_id: "1080-mp4".to_string(),
             }),
             choices: vec![choice],
+            default: 0,
             streams: vec![StreamPlan {
                 format_id: "137".to_string(),
                 kind: StreamKind::Video,
@@ -272,6 +276,7 @@ mod tests {
             "step":"choosing","refreshes":[]}"#;
         let plan: VideoPlan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.choice, None);
+        assert_eq!(plan.default, 0);
         assert_eq!(plan.step, VideoStep::Choosing);
     }
 }

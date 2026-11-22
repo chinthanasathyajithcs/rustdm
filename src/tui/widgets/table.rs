@@ -1,6 +1,6 @@
 //! The downloads table, and the progress bar and size text it shares.
 
-use crate::ipc::protocol::{DownloadStatus, DownloadSummary};
+use crate::ipc::protocol::DownloadSummary;
 use crate::tui::format::{format_bytes, format_eta, format_speed, fraction_done, status_span};
 use crate::tui::state::App;
 use crate::tui::theme;
@@ -16,11 +16,6 @@ pub const TABLE_BAR_WIDTH: usize = 10;
 const NARROW_BAR_WIDTH: usize = 6;
 /// Fewest cells the NAME column gets before another column is dropped.
 const NAME_MIN_WIDTH: u16 = 12;
-/// Cells the STATUS column needs for "stalled" and "retrying".
-const STATUS_WIDTH: u16 = 9;
-/// Cells it needs while a row says "choose quality"; wider only then, so
-/// the other layouts keep their room.
-const CHOOSING_STATUS_WIDTH: u16 = 14;
 /// Space ratatui leaves between columns.
 const COLUMN_GAP: u16 = 1;
 
@@ -51,11 +46,11 @@ impl Column {
 
     /// Cells this column needs to show its widest value whole; NAME takes
     /// whatever is left.
-    fn width(self, bar_width: usize, status_width: u16) -> u16 {
+    fn width(self, bar_width: usize) -> u16 {
         match self {
             Column::Id => 6,
             Column::Name => NAME_MIN_WIDTH,
-            Column::Status => status_width,
+            Column::Status => 9,
             // The bar, a space and "100%".
             Column::Progress => bar_width as u16 + 5,
             // "1023.9 MiB / 1023.9 MiB"
@@ -88,25 +83,19 @@ impl Column {
 pub struct TableLayout {
     pub columns: Vec<Column>,
     pub bar_width: usize,
-    status_width: u16,
 }
 
 impl TableLayout {
-    fn new(columns: &[Column], bar_width: usize, status_width: u16) -> Self {
+    fn new(columns: &[Column], bar_width: usize) -> Self {
         Self {
             columns: columns.to_vec(),
             bar_width,
-            status_width,
         }
     }
 
     /// Cells needed to show every column whole.
     fn needed(&self) -> u16 {
-        let cells: u16 = self
-            .columns
-            .iter()
-            .map(|c| c.width(self.bar_width, self.status_width))
-            .sum();
+        let cells: u16 = self.columns.iter().map(|c| c.width(self.bar_width)).sum();
         cells + COLUMN_GAP * (self.columns.len() as u16 - 1)
     }
 
@@ -115,7 +104,7 @@ impl TableLayout {
             .iter()
             .map(|c| match c {
                 Column::Name => Constraint::Min(NAME_MIN_WIDTH),
-                other => Constraint::Length(other.width(self.bar_width, self.status_width)),
+                other => Constraint::Length(other.width(self.bar_width)),
             })
             .collect()
     }
@@ -125,33 +114,16 @@ impl TableLayout {
 /// ETA goes first, then SIZE (the details pane shows both), then the bar
 /// shortens, then SPEED goes. Narrower than the last, NAME is squeezed.
 pub fn table_layout(width: u16) -> TableLayout {
-    layout_with_status_width(width, STATUS_WIDTH)
-}
-
-fn layout_with_status_width(width: u16, status: u16) -> TableLayout {
     use Column::*;
     let candidates = [
         TableLayout::new(
             &[Id, Name, Status, Progress, Size, Speed, Eta],
             TABLE_BAR_WIDTH,
-            status,
         ),
-        TableLayout::new(
-            &[Id, Name, Status, Progress, Size, Speed],
-            TABLE_BAR_WIDTH,
-            status,
-        ),
-        TableLayout::new(
-            &[Id, Name, Status, Progress, Speed],
-            TABLE_BAR_WIDTH,
-            status,
-        ),
-        TableLayout::new(
-            &[Id, Name, Status, Progress, Speed],
-            NARROW_BAR_WIDTH,
-            status,
-        ),
-        TableLayout::new(&[Id, Name, Status, Progress], NARROW_BAR_WIDTH, status),
+        TableLayout::new(&[Id, Name, Status, Progress, Size, Speed], TABLE_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress, Speed], TABLE_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress, Speed], NARROW_BAR_WIDTH),
+        TableLayout::new(&[Id, Name, Status, Progress], NARROW_BAR_WIDTH),
     ];
     let narrowest = candidates[candidates.len() - 1].clone();
     candidates
@@ -230,12 +202,7 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
         .take(body_rows)
         .copied()
         .collect();
-    let status_width = if shown.iter().any(|d| d.status == DownloadStatus::Choosing) {
-        CHOOSING_STATUS_WIDTH
-    } else {
-        STATUS_WIDTH
-    };
-    let layout = layout_with_status_width(inner.width, status_width);
+    let layout = table_layout(inner.width);
     let rows: Vec<Row> = shown
         .iter()
         .map(|d| {
@@ -278,6 +245,7 @@ pub fn render_table(frame: &mut Frame, app: &mut App, area: Rect) -> Vec<(Rect, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::protocol::DownloadStatus;
     use crate::tui::state::test_support::{sample_app, screen_text, summary};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -319,18 +287,13 @@ mod tests {
     }
 
     #[test]
-    fn choose_quality_shows_whole_and_only_a_choosing_row_widens_the_status_column() {
+    fn a_choosing_row_shows_its_status_whole() {
         for width in [120, 80] {
             let mut app = sample_app();
             app.set_downloads(vec![summary("dl_1", DownloadStatus::Choosing)]);
             let text = draw(&mut app, width, 30);
-            assert!(text.contains("choose quality"), "{width}: {text}");
+            assert!(text.contains("choose "), "{width}: {text}");
         }
-        assert_eq!(
-            layout_with_status_width(78, STATUS_WIDTH),
-            table_layout(78),
-            "without a choosing row nothing moves"
-        );
     }
 
     #[test]

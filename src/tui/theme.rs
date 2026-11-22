@@ -112,21 +112,17 @@ pub const CONFIRM: Style = bold(AMBER);
 pub const STALLED: Style = fg(CORAL);
 
 pub fn status_style(status: DownloadStatus) -> Style {
-    // Waiting for the user, so it stands out from the downloads that run alone.
-    if status == DownloadStatus::Choosing {
-        return CONFIRM;
+    match status {
+        DownloadStatus::Active => fg(AMBER),
+        DownloadStatus::Queued => fg(STONE),
+        DownloadStatus::Pausing | DownloadStatus::Paused => fg(FAINT),
+        DownloadStatus::Retrying => fg(LAVENDER),
+        DownloadStatus::Completed => fg(SAGE),
+        DownloadStatus::Failed => fg(RED),
+        DownloadStatus::Cancelled => fg(DUSK),
+        // Waiting for the user, so it stands out from the downloads that run alone.
+        DownloadStatus::Choosing => CONFIRM,
     }
-    let color = match status {
-        DownloadStatus::Active => AMBER,
-        DownloadStatus::Queued => STONE,
-        DownloadStatus::Pausing | DownloadStatus::Paused => FAINT,
-        DownloadStatus::Retrying => LAVENDER,
-        DownloadStatus::Completed => SAGE,
-        DownloadStatus::Failed => RED,
-        DownloadStatus::Cancelled => DUSK,
-        DownloadStatus::Choosing => AMBER,
-    };
-    fg(color)
 }
 
 #[cfg(test)]
@@ -151,6 +147,7 @@ mod tests {
             DownloadStatus::Completed,
             DownloadStatus::Failed,
             DownloadStatus::Cancelled,
+            DownloadStatus::Choosing,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {

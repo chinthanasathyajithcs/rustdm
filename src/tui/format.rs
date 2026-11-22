@@ -12,7 +12,7 @@ pub fn status_label(status: DownloadStatus) -> &'static str {
         DownloadStatus::Completed => "completed",
         DownloadStatus::Failed => "failed",
         DownloadStatus::Cancelled => "cancelled",
-        DownloadStatus::Choosing => "choose quality",
+        DownloadStatus::Choosing => "choose",
     }
 }
 
@@ -126,11 +126,11 @@ mod tests {
     }
 
     #[test]
-    fn choosing_rows_show_choose_quality() {
-        assert_eq!(status_label(DownloadStatus::Choosing), "choose quality");
+    fn choosing_rows_say_choose() {
+        assert_eq!(status_label(DownloadStatus::Choosing), "choose");
         let summary = crate::tui::state::test_support::summary("dl_1", DownloadStatus::Choosing);
         let row = format_row(&summary);
-        assert!(row.contains("choose quality"), "{row}");
+        assert!(row.contains("choose "), "{row}");
     }
 
     #[test]

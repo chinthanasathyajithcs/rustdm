@@ -775,6 +775,7 @@ fn saved_download(
             title: "A test video".to_string(),
             choice: None,
             choices: Vec::new(),
+            default: 0,
             streams: Vec::new(),
             step: VideoStep::Choosing,
             refreshes: Vec::new(),

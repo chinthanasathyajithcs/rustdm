@@ -466,7 +466,7 @@ mod tests {
             .draw(|f| crate::tui::screens::render(f, &mut app))
             .unwrap();
         let text = screen_text(&terminal);
-        assert!(text.contains("choose quality"), "{text}");
+        assert!(text.contains("choose "), "{text}");
     }
 
     #[test]

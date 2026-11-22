@@ -573,7 +573,7 @@ pub enum DownloadStatus {
 pub struct VideoSummary {
     pub title: String,
     /// The qualities to pick from; only while the download is `choosing`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<VideoChoice>,
     /// Index into `choices` of the row to offer first.
     #[serde(default, skip_serializing_if = "Option::is_none")]

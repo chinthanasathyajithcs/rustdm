@@ -528,6 +528,7 @@ mod tests {
             title: "A test video".to_string(),
             choice: None,
             choices: vec![choice("1080-mp4", "1080p"), choice("720-mp4", "720p")],
+            default: 1,
             streams: Vec::new(),
             step: VideoStep::Choosing,
             refreshes: Vec::new(),
@@ -542,9 +543,11 @@ mod tests {
         let back = TaskRecord::from_saved(rec.to_saved());
 
         assert_eq!(back.status, DownloadStatus::Choosing);
+        assert_eq!(back.to_summary().video.and_then(|v| v.default), Some(1));
         let plan = back.video.expect("the plan is kept");
         assert_eq!(plan.title, "A test video");
         assert_eq!(plan.choices.len(), 2);
+        assert_eq!(plan.default, 1);
     }
 
     #[test]
@@ -557,6 +560,7 @@ mod tests {
         let video = summary.video.expect("video summary");
         assert_eq!(video.title, "A test video");
         assert_eq!(video.choices.len(), 2);
+        assert_eq!(video.default, Some(1));
         assert_eq!(video.chosen, None);
         assert_eq!(
             summary.step.as_deref(),
@@ -575,6 +579,7 @@ mod tests {
         rec.video = Some(plan);
         let video = rec.to_summary().video.expect("video summary");
         assert!(video.choices.is_empty());
+        assert_eq!(video.default, None);
         assert_eq!(video.chosen.map(|c| c.label), Some("1080p".to_string()));
     }
 

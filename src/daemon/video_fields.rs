@@ -13,7 +13,7 @@ pub fn summarize(plan: &VideoPlan, choosing: bool) -> VideoSummary {
         } else {
             Vec::new()
         },
-        default: None,
+        default: choosing.then_some(plan.default),
         chosen: plan.choice.clone(),
     }
 }
