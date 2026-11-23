@@ -415,6 +415,8 @@ impl DaemonCore {
             let mut task = stopped.lock().unwrap();
             task.set_context(&checked.context, checked.client.clone());
             task.requeue();
+            // A fresh sign-in may turn a sign-in page into the file: check the link first.
+            task.lookup_next = false;
             // Saved under the task's lock, so a cancel cannot slip in between.
             self.keep_secret(&task, &checked.context.cookies);
             sign_in::log_context(&task.id, &checked.context, "continued with");

@@ -536,7 +536,7 @@ async fn settings_screen_polls_tools_and_u_requests_an_update() {
 }
 
 const CHOOSE_HINT: &str =
-    "This is a video page; choose a quality in the dashboard (rdm) or add it again with --quality 1080p.";
+    "This is a video page; choose a quality in the dashboard (rdm) or remove it and add it again with --quality 1080p.";
 
 #[tokio::test]
 async fn plain_mode_says_how_to_choose_when_a_video_waits_for_a_quality() {

@@ -435,7 +435,8 @@ impl TaskRecord {
         self.status = DownloadStatus::Retrying;
         self.retry_at = Some(Instant::now() + delay);
         self.error_message = Some(format!(
-            "{e}; retry {} of {MAX_AUTO_RETRIES} in {}s",
+            "{}; retry {} of {MAX_AUTO_RETRIES} in {}s",
+            retrying_text(&e),
             self.retries,
             delay.as_secs()
         ));
@@ -495,6 +496,16 @@ fn placeholder_name(url: &str) -> String {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| "download".to_string())
+}
+
+/// The error's words while an automatic retry is planned: without a final
+/// period, and without "press r" advice, since rustdm tries again by itself.
+fn retrying_text(e: &Error) -> String {
+    let text = e.to_string();
+    let text = text.trim_end_matches('.');
+    text.strip_suffix("; press r to try again")
+        .unwrap_or(text)
+        .to_string()
 }
 
 #[cfg(test)]
@@ -757,6 +768,31 @@ mod tests {
 
         assert_eq!(auto_retry_delay(1), Duration::from_secs(6));
         assert_eq!(auto_retry_delay(30), MAX_RETRY_DELAY);
+    }
+
+    #[test]
+    fn a_planned_retry_does_not_also_ask_the_user_to_press_r() {
+        let mut rec = record(DownloadStatus::Active);
+        rec.begin_run();
+        let timed_out = || Error::Video {
+            message: "yt-dlp took more than a minute to read this page; press r to try again."
+                .into(),
+            transient: true,
+        };
+        fail(&mut rec, timed_out());
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("yt-dlp took more than a minute to read this page; retry 1 of 5 in 3s")
+        );
+
+        // Once the retries are used up, pressing r is the advice again.
+        rec.retries = MAX_AUTO_RETRIES;
+        rec.begin_run();
+        fail(&mut rec, timed_out());
+        assert_eq!(
+            rec.error_message.as_deref(),
+            Some("yt-dlp took more than a minute to read this page; press r to try again.")
+        );
     }
 
     #[test]

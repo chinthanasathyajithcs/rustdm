@@ -295,17 +295,20 @@ impl DaemonCore {
 
     /// Settle the download after a lookup and save it.
     pub(super) fn finish_lookup(&self, record: &Arc<Mutex<TaskRecord>>, outcome: LookupOutcome) {
-        let end_lookup = |failed: bool| {
+        // Only a failure that will be tried again sends the next run straight
+        // to the lookup (R25). After any other ending the next run checks the
+        // link first: the page may have become a file, or a Wi-Fi login page gone.
+        let end_lookup = |try_again: bool| {
             let mut rec = record.lock().unwrap();
             rec.step = None;
             rec.lookup_progress = None;
-            rec.lookup_next |= failed;
+            rec.lookup_next = try_again;
             rec.has_cookies
         };
         match outcome {
             LookupOutcome::Choices(info, choices) => self.store_choices(record, &info, &choices),
             LookupOutcome::Message { text, transient } => {
-                let has_cookies = end_lookup(true);
+                let has_cookies = end_lookup(transient);
                 // A page with no video where cookies were sent: the sign-in
                 // wording, and the cookies go, as for any web page.
                 let error = if has_cookies && text == NO_VIDEO {
@@ -319,7 +322,7 @@ impl DaemonCore {
                 self.finish_task(record, Err(error));
             }
             LookupOutcome::NoTools(e) => {
-                end_lookup(true);
+                end_lookup(e.is_transient());
                 let error = Error::Tool {
                     message: e.to_string(),
                     transient: e.is_transient(),

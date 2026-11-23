@@ -140,7 +140,7 @@ fn in_flight(status: DownloadStatus) -> bool {
 }
 
 /// What plain mode tells the user when a video page waits for its quality.
-const CHOOSE_HINT: &str = "This is a video page; choose a quality in the dashboard (rdm) or add it again with --quality 1080p.";
+const CHOOSE_HINT: &str = "This is a video page; choose a quality in the dashboard (rdm) or remove it and add it again with --quality 1080p.";
 
 /// Script-friendly mode: print each download's row when it changes, until
 /// nothing is running or queued.

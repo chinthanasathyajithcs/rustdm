@@ -252,6 +252,51 @@ async fn a_web_page_with_cookies_and_no_video_keeps_the_sign_in_message() {
         .exists());
 }
 
+/// What `/watch` serves once the page has become a plain file.
+fn file_route() -> Route {
+    Route::ok(rustdm::testing::pattern_bytes(4096))
+        .with_header("Content-Type", "application/octet-stream")
+}
+
+#[tokio::test]
+async fn a_fresh_sign_in_after_no_video_checks_the_link_and_downloads_the_file() {
+    let s = setup().await;
+    s.answer(error_answer(
+        "ERROR: Unsupported URL: http://127.0.0.1/watch",
+    ));
+    let mut params = s.params("/watch");
+    params.context = Some(cookie_context());
+    let added = s.core.add_download(params.clone()).unwrap();
+    wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+
+    // The user signs in again; the link now gives the file.
+    s.pages.set_route("/watch", file_route());
+    let again = s.core.add_download(params).unwrap();
+    let done = wait_for(&s.core, &again.id, DownloadStatus::Completed).await;
+
+    assert_eq!(again.id, added.id, "the stopped download carried on");
+    assert_eq!(done.error_message, None);
+    assert_eq!(s.lookups(), 1, "no second lookup");
+}
+
+#[tokio::test]
+async fn resuming_after_no_video_checks_the_link_again() {
+    let s = setup().await;
+    s.answer(error_answer(
+        "ERROR: Unsupported URL: http://127.0.0.1/watch",
+    ));
+    let added = s.add("/watch");
+    let failed = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    assert_eq!(failed.error_message.as_deref(), Some(NO_VIDEO));
+
+    // A Wi-Fi login page is gone: the link now gives the file.
+    s.pages.set_route("/watch", file_route());
+    s.core.resume_download(&added.id).unwrap();
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+
+    assert_eq!(s.lookups(), 1, "no second lookup");
+}
+
 #[tokio::test]
 async fn live_drm_pieces_only_and_playlist_pages_say_why() {
     let s = setup().await;
@@ -422,7 +467,7 @@ async fn no_yt_dlp_and_no_network_says_so_and_retries() {
 
     let message = retrying.error_message.unwrap();
     assert!(
-        message.starts_with("Couldn't reach github.com to get yt-dlp; will retry."),
+        message.starts_with("Couldn't reach github.com to get yt-dlp; will retry; retry 1 of"),
         "{message}"
     );
 }
