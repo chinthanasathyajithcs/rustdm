@@ -2,6 +2,7 @@ use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::secrets::SecretStore;
 use crate::daemon::task::TaskRecord;
+use crate::daemon::video_run;
 use crate::daemon::video_task::{self, ExtractorUpdateGate};
 use crate::daemon::{defaults, fair_share, queue_order, sign_in};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
@@ -880,6 +881,7 @@ impl DaemonCore {
                 }
                 changed |= task.sync_from_progress();
                 video_task::refresh_step(&mut task);
+                video_run::refresh_stream_step(&mut task);
                 let current_bytes = task.measure(now);
                 let speed = task.speed_bps;
 
@@ -928,7 +930,7 @@ impl DaemonCore {
                     active_connections,
                     segments,
                     lanes,
-                    stall: if video_task::is_looking_up(&task) {
+                    stall: if video_task::is_waiting_on_video_work(&task) {
                         None
                     } else {
                         task.stall(now)

@@ -16,7 +16,7 @@ use rustdm::testing::video::{
     recorded_args, recorded_cookies, test_tool_program_scripted, video_page_json, write_script,
     youtube_like, PageSpec, ToolResponse, ToolScript, VideoWorld,
 };
-use rustdm::testing::{Mode, Route, TestServer};
+use rustdm::testing::{pattern_bytes, Mode, Route, TestServer};
 use rustdm::tools::{FetchCtx, Freshness, Tool, ToolStore};
 use std::path::Path;
 use std::sync::Arc;
@@ -25,7 +25,11 @@ use url::Url;
 
 const NO_VIDEO: &str = "This link is a web page, not a file, and no video was found on it.";
 const LOOKING: &str = "Looking for a video on this page…";
-const PLACEHOLDER: &str = "Video downloading arrives in the next update";
+/// What a chosen two-stream video ends with until the join arrives (Task 5
+/// rewrites these assertions).
+const JOIN_LATER: &str = "Joining arrives in the next task";
+/// The streams a chosen quality of `Setup::page` fetches from the page server.
+const MEDIA: [&str; 3] = ["/media/136", "/media/137", "/media/140"];
 const NEWER_YTDLP: &str = "2026.11.14";
 
 struct Setup {
@@ -41,12 +45,12 @@ fn html_page() -> Route {
 }
 
 async fn page_server() -> TestServer {
-    let routes = [
+    let pages = [
         "/watch", "/watch1", "/watch2", "/watch3", "/watch4", "/watch5",
     ]
-    .map(|path| (path.to_string(), html_page()))
-    .into();
-    TestServer::start_routes(routes).await
+    .map(|path| (path.to_string(), html_page()));
+    let media = MEDIA.map(|path| (path.to_string(), Route::ok(pattern_bytes(4096))));
+    TestServer::start_routes([pages.to_vec(), media.to_vec()].concat()).await
 }
 
 async fn setup() -> Setup {
@@ -112,6 +116,21 @@ impl Setup {
 
     fn lookups(&self) -> usize {
         recorded_args(&self.world.ytdlp.exe).len()
+    }
+
+    /// The YouTube-like page with its streams on the page server, so a
+    /// chosen quality downloads.
+    fn page(&self) -> PageSpec {
+        youtube_like(&self.pages.url())
+    }
+
+    /// Requests to the page server for `paths`.
+    fn requests_to(&self, paths: &[&str]) -> usize {
+        let requests = self.pages.requests();
+        requests
+            .iter()
+            .filter(|r| paths.contains(&r.path.as_str()))
+            .count()
     }
 }
 
@@ -626,14 +645,15 @@ async fn without_a_tool_store_web_pages_fail_as_before() {
 #[tokio::test]
 async fn a_quality_given_at_add_is_chosen_at_once() {
     let s = setup().await;
-    s.answer(page_answer(&youtube_like(&base())));
+    s.answer(page_answer(&s.page()));
     let mut params = s.params("/watch");
     params.quality = Some("720".to_string());
 
     let added = s.core.add_download(params).unwrap();
     let done = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
 
-    assert_eq!(done.error_message.as_deref(), Some(PLACEHOLDER));
+    assert_eq!(done.error_message.as_deref(), Some(JOIN_LATER));
+    assert!(s.requests_to(&["/media/136"]) > 0, "the video stream ran");
     let video = done.video.expect("a video summary");
     let chosen = video.chosen.expect("a chosen quality");
     assert_eq!(chosen.label, "720p");
@@ -645,7 +665,7 @@ async fn a_quality_given_at_add_is_chosen_at_once() {
 #[tokio::test]
 async fn a_name_asked_for_at_add_names_the_video_file() {
     let s = setup().await;
-    s.answer(page_answer(&youtube_like(&base())));
+    s.answer(page_answer(&s.page()));
     let mut waits = s.params("/watch");
     waits.filename = Some("My clip".to_string());
     let mut chooses = s.params("/watch1");
@@ -752,7 +772,7 @@ fn choose(id: &str, choice_id: &str) -> ChooseQualityParams {
 
 /// A download of the stand-in video page that waits for its quality.
 async fn choosing(s: &Setup, path: &str) -> DownloadSummary {
-    s.answer(page_answer(&youtube_like(&base())));
+    s.answer(page_answer(&s.page()));
     let added = s.add(path);
     wait_for(&s.core, &added.id, DownloadStatus::Choosing).await
 }
@@ -767,9 +787,11 @@ async fn choosing_a_quality_stores_the_plan() {
         .choose_quality(choose(&waiting.id, "720-mp4"))
         .unwrap();
 
-    for summary in [chosen, s.core.get_status(&waiting.id).unwrap()] {
-        assert_eq!(summary.status, DownloadStatus::Failed);
-        assert_eq!(summary.error_message.as_deref(), Some(PLACEHOLDER));
+    // Chosen, it waits for a slot like any download, then runs its streams.
+    assert_eq!(chosen.status, DownloadStatus::Queued);
+    let ended = wait_for(&s.core, &waiting.id, DownloadStatus::Failed).await;
+    assert_eq!(ended.error_message.as_deref(), Some(JOIN_LATER));
+    for summary in [chosen, ended] {
         assert_eq!(summary.filename, "A test video.mp4");
         let video = summary.video.expect("a video summary");
         assert_eq!(video.chosen.expect("a chosen quality").label, "720p");
@@ -800,7 +822,7 @@ async fn a_choice_can_move_the_download_and_name_the_file() {
 #[tokio::test]
 async fn a_quality_given_at_add_skips_the_question() {
     let s = setup().await;
-    s.answer(page_answer(&youtube_like(&base())));
+    s.answer(page_answer(&s.page()));
     let mut params = s.params("/watch");
     params.quality = Some("1080p".to_string());
 
@@ -813,7 +835,7 @@ async fn a_quality_given_at_add_skips_the_question() {
 #[tokio::test]
 async fn a_missing_height_takes_the_nearest_below() {
     let s = setup().await;
-    s.answer(page_answer(&youtube_like(&base())));
+    s.answer(page_answer(&s.page()));
     let mut params = s.params("/watch");
     params.quality = Some("900p".to_string());
 
@@ -913,28 +935,32 @@ async fn choose_quality_is_routed_by_its_method_name() {
 }
 
 #[tokio::test]
-async fn resuming_a_chosen_video_gives_the_placeholder_again() {
+async fn resuming_a_chosen_video_needs_no_new_lookup_or_link_check() {
     let s = setup().await;
     let waiting = choosing(&s, "/watch").await;
     s.core
         .choose_quality(choose(&waiting.id, "720-mp4"))
         .unwrap();
-    let requests = s.pages.requests().len();
+    wait_for(&s.core, &waiting.id, DownloadStatus::Failed).await;
+    let pages = s.requests_to(&["/watch"]);
+    let streams = s.requests_to(&MEDIA);
 
     s.core.resume_download(&waiting.id).unwrap();
     assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
 
     let again = s.core.get_status(&waiting.id).unwrap();
     assert_eq!(again.status, DownloadStatus::Failed);
-    assert_eq!(again.error_message.as_deref(), Some(PLACEHOLDER));
+    assert_eq!(again.error_message.as_deref(), Some(JOIN_LATER));
     assert_eq!(s.lookups(), 1);
-    assert_eq!(s.pages.requests().len(), requests);
+    assert_eq!(s.requests_to(&["/watch"]), pages);
+    // Both streams were already there.
+    assert_eq!(s.requests_to(&MEDIA), streams);
 }
 
 #[tokio::test]
 async fn choosing_a_quality_keeps_its_streams_and_no_cookies() {
     let s = setup().await;
-    let mut spec = youtube_like(&base());
+    let mut spec = s.page();
     for format in &mut spec.formats {
         format.http_headers.extend(
             [
@@ -955,6 +981,7 @@ async fn choosing_a_quality_keeps_its_streams_and_no_cookies() {
         .choose_quality(choose(&added.id, "1080-mp4"))
         .unwrap();
 
+    wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
     assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
     let text = std::fs::read_to_string(s.data.path().join("queue.json")).unwrap();
     let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -970,8 +997,9 @@ async fn choosing_a_quality_keeps_its_streams_and_no_cookies() {
         .map(|s| s["kind"].as_str().unwrap())
         .collect();
     assert_eq!(kinds, ["video", "audio"]);
-    assert_eq!(streams[0]["url"], "https://video.test/media/137");
-    assert_eq!(streams[1]["url"], "https://video.test/media/140");
+    let media = |path: &str| s.pages.url().join(path).unwrap().to_string();
+    assert_eq!(streams[0]["url"], media("/media/137"));
+    assert_eq!(streams[1]["url"], media("/media/140"));
     assert_eq!(streams[0]["size"], 1080 * 40_000);
     assert_eq!(streams[1]["size"], 3_000_000);
     assert_eq!(streams[0]["ext"], "mp4");

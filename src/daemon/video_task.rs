@@ -30,8 +30,6 @@ use url::Url;
 const LOOKING_STEP: &str = "Looking for a video on this page…";
 /// yt-dlp is asked for a newer version after an extractor error at most this often.
 pub const EXTRACTOR_UPDATE_EVERY: Duration = Duration::from_secs(60 * 60);
-/// What a download that has its quality fails with until video downloading arrives.
-const VIDEO_PLACEHOLDER: &str = "Video downloading arrives in the next update";
 /// What `look_up` reports when it was cancelled.
 const CANCELLED: &str = "cancelled";
 /// The name given to a video whose title leaves nothing usable.
@@ -105,15 +103,17 @@ impl DaemonCore {
             rec.id.clone()
         };
         let cookies = self.cookies_for(&id);
-        let found = self.look_up_video(record, cookies, cancel).await;
-        self.finish_lookup(record, found);
+        let found = self.look_up_video(record, cookies, cancel.clone()).await;
+        if self.finish_lookup(record, found) {
+            self.run_video(record, cancel).await;
+        }
         None
     }
 
     /// A download that starts with a plan already (back from a cancel, or a
-    /// restart) does not need the engine: it waits for its choice again, or its
-    /// page is looked up once more when no choices were kept. Returns true when
-    /// that settled the download.
+    /// restart) does not need the link check: it runs its chosen quality, waits
+    /// for its choice again, or its page is looked up once more when no choices
+    /// were kept. Returns true when that settled the download.
     pub(super) async fn continue_video_plan(
         &self,
         record: &Arc<Mutex<TaskRecord>>,
@@ -123,7 +123,7 @@ impl DaemonCore {
             Fresh,
             Stopped,
             Choose,
-            Placeholder,
+            Run,
             LookUp(String),
         }
         let next = {
@@ -131,7 +131,7 @@ impl DaemonCore {
             match &rec.video {
                 None if !rec.lookup_next => Next::Fresh,
                 _ if rec.status != DownloadStatus::Active => Next::Stopped,
-                Some(plan) if plan.choice.is_some() => Next::Placeholder,
+                Some(plan) if plan.choice.is_some() => Next::Run,
                 Some(plan) if !plan.choices.is_empty() => Next::Choose,
                 // The last run failed in the lookup, or no choices were kept.
                 _ => Next::LookUp(rec.id.clone()),
@@ -140,7 +140,8 @@ impl DaemonCore {
         match next {
             Next::Fresh => return false,
             Next::Stopped => self.finish_task(record, Err(Error::Cancelled)),
-            Next::Choose | Next::Placeholder => {
+            Next::Run => self.run_video(record, cancel).await,
+            Next::Choose => {
                 let kept = {
                     let mut rec = record.lock().unwrap();
                     // Stopped since the check above: settle like any stop.
@@ -149,11 +150,7 @@ impl DaemonCore {
                     } else {
                         settle_run(&mut rec);
                         rec.error_message = None;
-                        if matches!(next, Next::Placeholder) {
-                            fail_with_placeholder(&mut rec);
-                        } else {
-                            rec.status = DownloadStatus::Choosing;
-                        }
+                        rec.status = DownloadStatus::Choosing;
                         true
                     }
                 };
@@ -166,8 +163,10 @@ impl DaemonCore {
             }
             Next::LookUp(id) => {
                 let cookies = self.cookies_for(&id);
-                let found = self.look_up_video(record, cookies, cancel).await;
-                self.finish_lookup(record, found);
+                let found = self.look_up_video(record, cookies, cancel.clone()).await;
+                if self.finish_lookup(record, found) {
+                    self.run_video(record, cancel).await;
+                }
             }
         }
         true
@@ -296,8 +295,13 @@ impl DaemonCore {
         }
     }
 
-    /// Settle the download after a lookup and save it.
-    pub(super) fn finish_lookup(&self, record: &Arc<Mutex<TaskRecord>>, outcome: LookupOutcome) {
+    /// Settle the download after a lookup and save it. Returns true when a
+    /// quality was chosen at once and the download goes on to run it.
+    pub(super) fn finish_lookup(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        outcome: LookupOutcome,
+    ) -> bool {
         // Only a failure that will be tried again sends the next run straight
         // to the lookup (R25). After any other ending the next run checks the
         // link first: the page may have become a file, or a Wi-Fi login page gone.
@@ -309,7 +313,9 @@ impl DaemonCore {
             rec.has_cookies
         };
         match outcome {
-            LookupOutcome::Choices(info, choices) => self.store_choices(record, &info, &choices),
+            LookupOutcome::Choices(info, choices) => {
+                return self.store_choices(record, &info, &choices)
+            }
             LookupOutcome::Message { text, transient } => {
                 let has_cookies = end_lookup(transient);
                 // A page with no video where cookies were sent: the sign-in
@@ -337,25 +343,26 @@ impl DaemonCore {
                 self.finish_task(record, Err(Error::Cancelled));
             }
         }
+        false
     }
 
     /// Keep the choices: the download waits for the user, or, when a quality
-    /// was asked for at add time, chooses at once.
+    /// was asked for at add time, chooses at once and stays running. Returns
+    /// true in that case, so the caller runs the chosen quality.
     fn store_choices(
         &self,
         record: &Arc<Mutex<TaskRecord>>,
         info: &PageInfo,
         choices: &VideoChoices,
-    ) {
+    ) -> bool {
         let kept = {
             let mut rec = record.lock().unwrap();
             rec.step = None;
             rec.lookup_progress = None;
             // Stopped meanwhile: settle like any stop, whatever was found.
             if rec.status != DownloadStatus::Active {
-                false
+                None
             } else {
-                settle_run(&mut rec);
                 rec.error_message = None;
                 tracing::info!(
                     "{}: {} qualities found on {}",
@@ -365,7 +372,7 @@ impl DaemonCore {
                 );
                 rec.video = Some(plan_of(&rec.url, choices, info));
                 rec.lookup_next = false;
-                match rec.quality {
+                let run_now = match rec.quality {
                     Some(quality) => apply_choice(&mut rec, pick(choices, quality)),
                     None => {
                         rec.status = DownloadStatus::Choosing;
@@ -376,23 +383,31 @@ impl DaemonCore {
                             &choices.title,
                             container,
                         );
+                        false
                     }
+                };
+                if !run_now {
+                    settle_run(&mut rec);
                 }
-                true
+                Some(run_now)
             }
         };
-        if !kept {
+        let Some(run_now) = kept else {
             self.finish_task(record, Err(Error::Cancelled));
-            return;
-        }
+            return false;
+        };
         self.persist();
-        self.schedule();
+        if !run_now {
+            self.schedule();
+        }
+        run_now
     }
 }
 
 impl DaemonCore {
     /// The client's answer for a download that is `Choosing`: record the
-    /// quality (and the folder and name, when given) and save it.
+    /// quality (and the folder and name, when given), save it, and queue the
+    /// download to fetch that quality.
     pub fn choose_quality(&self, params: ChooseQualityParams) -> Result<DownloadSummary, RpcError> {
         let task = self.get_task(&params.id)?;
         // Refused for what is wrong with the download first, then for the
@@ -415,10 +430,14 @@ impl DaemonCore {
             if params.filename.is_some() {
                 rec.requested_name = params.filename;
             }
-            apply_choice(&mut rec, index);
+            // Chosen, it waits for a free slot like any download.
+            if apply_choice(&mut rec, index) {
+                rec.requeue();
+            }
             rec.to_summary()
         };
         self.persist();
+        self.schedule();
         Ok(summary)
     }
 }
@@ -557,24 +576,19 @@ fn video_file_name(requested: Option<&str>, title: &str, container: Container) -
     name + &ending
 }
 
-fn fail_with_placeholder(rec: &mut TaskRecord) {
-    rec.status = DownloadStatus::Failed;
-    rec.retry_at = None;
-    rec.error_message = Some(VIDEO_PLACEHOLDER.to_string());
-}
-
-/// Record that row `index` of the stored choices was chosen. Until video
-/// downloading arrives the download then fails with a plain message.
-pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) {
+/// Record that row `index` of the stored choices was chosen, with its streams
+/// ready to fetch. Returns false, with the download failed, when the row or its
+/// streams are not there; the caller decides when a chosen download runs.
+pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) -> bool {
     let Some(plan) = rec.video.as_mut() else {
-        return;
+        return false;
     };
     let Some(row) = plan.choices.get(index).cloned() else {
         // A row that is not there leaves nothing to download.
         rec.status = DownloadStatus::Failed;
         rec.retry_at = None;
         rec.error_message = Some(NO_VIDEO.to_string());
-        return;
+        return false;
     };
     // The choice's streams, video first, each from what the lookup offered.
     let streams: Option<Vec<StreamPlan>> = row
@@ -592,7 +606,7 @@ pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) {
         rec.status = DownloadStatus::Failed;
         rec.retry_at = None;
         rec.error_message = Some(NO_VIDEO.to_string());
-        return;
+        return false;
     };
     plan.choice = Some(ChosenQuality {
         label: row.label,
@@ -605,7 +619,7 @@ pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) {
     plan.offered = Vec::new();
     let title = plan.title.clone();
     rec.filename = video_file_name(rec.requested_name.as_deref(), &title, row.container);
-    fail_with_placeholder(rec);
+    true
 }
 
 /// Show the tool being fetched for the lookup as the row's step. While nothing
@@ -625,10 +639,14 @@ pub(super) fn refresh_step(task: &mut TaskRecord) {
     task.step = Some(text);
 }
 
-/// Whether the download is waiting for yt-dlp (or for a tool it needs), so
-/// that silence from the engine is not a stall.
-pub(super) fn is_looking_up(task: &TaskRecord) -> bool {
-    task.lookup_progress.is_some() || task.step.as_deref() == Some(LOOKING_STEP)
+/// Whether the download is waiting for yt-dlp (or for a tool it needs), or
+/// joining its streams, so that silence from the engine is not a stall.
+pub(super) fn is_waiting_on_video_work(task: &TaskRecord) -> bool {
+    let joining = task
+        .video
+        .as_ref()
+        .is_some_and(|plan| plan.step == VideoStep::Join);
+    joining || task.lookup_progress.is_some() || task.step.as_deref() == Some(LOOKING_STEP)
 }
 
 /// Remove cookies files that an earlier run left in `dir`. Best effort.
@@ -707,7 +725,7 @@ mod tests {
     fn choosing_a_row_keeps_it_empties_the_list_and_names_the_file() {
         let mut rec = record_with_plan();
 
-        apply_choice(&mut rec, 1);
+        assert!(apply_choice(&mut rec, 1));
 
         let plan = rec.video.as_ref().unwrap();
         let chosen = plan.choice.as_ref().unwrap();
@@ -717,15 +735,16 @@ mod tests {
         assert!(plan.choices.is_empty());
         assert_eq!(plan.step, VideoStep::Stream(0));
         assert_eq!(rec.filename, "A_ title_with_marks.m4a");
-        assert_eq!(rec.status, DownloadStatus::Failed);
-        assert_eq!(rec.error_message.as_deref(), Some(VIDEO_PLACEHOLDER));
+        // The caller decides when it runs.
+        assert_eq!(rec.status, DownloadStatus::Queued);
+        assert_eq!(rec.error_message, None);
     }
 
     #[test]
     fn a_row_that_is_not_there_fails_the_download_with_the_no_video_message() {
         let mut rec = record_with_plan();
 
-        apply_choice(&mut rec, 9);
+        assert!(!apply_choice(&mut rec, 9));
 
         assert_eq!(rec.video.as_ref().unwrap().choices.len(), 2);
         assert_eq!(rec.status, DownloadStatus::Failed);
@@ -794,7 +813,17 @@ mod tests {
         progress.total.store(24_000_000, Ordering::Relaxed);
         refresh_step(&mut rec);
         assert_eq!(rec.step.as_deref(), Some("Getting yt-dlp: 12/24 MB"));
-        assert!(is_looking_up(&rec));
+        assert!(is_waiting_on_video_work(&rec));
+    }
+
+    #[test]
+    fn a_video_that_is_joining_is_waiting_not_stalled() {
+        let mut rec = record_with_plan();
+        assert!(!is_waiting_on_video_work(&rec));
+
+        rec.video.as_mut().unwrap().step = VideoStep::Join;
+
+        assert!(is_waiting_on_video_work(&rec));
     }
 
     #[test]
