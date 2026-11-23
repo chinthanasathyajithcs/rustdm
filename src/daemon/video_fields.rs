@@ -141,13 +141,13 @@ pub fn read_saved_quality(id: &str, text: Option<String>) -> (Option<Quality>, O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::VideoChoice;
 
     #[test]
     fn the_joining_step_shows_a_percent_once_it_is_known() {
         assert_eq!(joining_text(Some(64)), "Joining 64%");
         assert_eq!(joining_text(None), "Joining…");
     }
-    use crate::video::VideoChoice;
 
     fn plan_with(rows: usize, default: usize) -> VideoPlan {
         let choice = |n: usize| VideoChoice {

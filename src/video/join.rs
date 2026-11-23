@@ -120,8 +120,7 @@ pub async fn join(ffmpeg: &Installed, req: JoinRequest<'_>) -> Result<(), JoinFa
     // A file an earlier, interrupted join left behind is not ours to build on.
     remove_temp(req.temp);
     let args = join_args(req.video, req.audio, req.container, req.temp);
-    let mut child =
-        spawn_ffmpeg(&ffmpeg.exe, &args).map_err(|e| JoinFailure::Spawn(e.to_string()))?;
+    let mut child = spawn_ffmpeg(&ffmpeg.exe, &args).map_err(spawn_failure)?;
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let duration = req.duration_secs;
@@ -144,7 +143,7 @@ pub async fn join(ffmpeg: &Installed, req: JoinRequest<'_>) -> Result<(), JoinFa
             }
             Some(JoinFailure::Cancelled)
         }
-        Some(Err(e)) => Some(JoinFailure::Spawn(e.to_string())),
+        Some(Err(e)) => Some(spawn_failure(e)),
         Some(Ok(status)) if status.success() => None,
         Some(Ok(status)) => {
             let stderr = finished_text(stderr_task).await;
@@ -160,6 +159,11 @@ pub async fn join(ffmpeg: &Installed, req: JoinRequest<'_>) -> Result<(), JoinFa
             Err(failure)
         }
     }
+}
+
+/// A failure to start or watch ffmpeg, with the same length limit as what it says.
+fn spawn_failure(error: std::io::Error) -> JoinFailure {
+    JoinFailure::Spawn(last_error_line(&error.to_string()))
 }
 
 fn spawn_ffmpeg(exe: &Path, args: &[OsString]) -> std::io::Result<Child> {
@@ -319,6 +323,34 @@ mod tests {
             "Invalid data found"
         );
         assert_eq!(last_error_line(""), "");
+    }
+
+    #[tokio::test]
+    async fn a_program_that_cannot_start_is_a_short_spawn_failure() {
+        let missing = Installed {
+            tool: crate::tools::Tool::Ffmpeg,
+            version: "none".to_string(),
+            dir: PathBuf::from("/no/such/folder"),
+            exe: PathBuf::from("/no/such/folder/ffmpeg"),
+        };
+        let percent = AtomicU8::new(UNKNOWN_PERCENT);
+        let (_keep, cancel) = watch::channel(false);
+        let request = JoinRequest {
+            video: Path::new("v.mp4"),
+            audio: Path::new("a.m4a"),
+            container: Container::Mp4,
+            temp: Path::new("/no/such/folder/out.joining"),
+            duration_secs: None,
+            percent: &percent,
+            cancel,
+        };
+
+        let failure = join(&missing, request).await.unwrap_err();
+
+        let JoinFailure::Spawn(text) = failure else {
+            panic!("not a spawn failure: {failure:?}");
+        };
+        assert!(!text.is_empty() && text.chars().count() <= 200, "{text}");
     }
 
     #[test]

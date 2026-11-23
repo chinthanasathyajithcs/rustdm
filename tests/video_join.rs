@@ -33,6 +33,9 @@ const VIDEO_BYTES: u64 = 30_000;
 const AUDIO_BYTES: u64 = 10_000;
 const VIDEO_PATH: &str = "/stream/137";
 const AUDIO_PATH: &str = "/stream/140";
+/// The 720p video, which holds other bytes than the 1080p one.
+const OTHER_VIDEO_PATH: &str = "/stream/136";
+const OTHER_VIDEO_BYTE: u8 = 0xAB;
 const FIXTURES: &str = "tests/fixtures/video";
 
 struct Setup {
@@ -48,7 +51,8 @@ async fn setup() -> Setup {
     let html =
         Route::ok("<html><body>a page</body></html>").with_header("Content-Type", "text/html");
     let server = TestServer::start_routes(vec![
-        ("/watch".to_string(), html),
+        ("/watch".to_string(), html.clone()),
+        ("/watch2".to_string(), html),
         (
             VIDEO_PATH.to_string(),
             Route::ok(pattern_bytes(VIDEO_BYTES)),
@@ -56,6 +60,10 @@ async fn setup() -> Setup {
         (
             AUDIO_PATH.to_string(),
             Route::ok(pattern_bytes(AUDIO_BYTES)),
+        ),
+        (
+            OTHER_VIDEO_PATH.to_string(),
+            Route::ok(vec![OTHER_VIDEO_BYTE; VIDEO_BYTES as usize]),
         ),
     ])
     .await;
@@ -82,6 +90,7 @@ impl Setup {
         for format in &mut spec.formats {
             let (path, size) = match format.format_id.as_str() {
                 "137" => (VIDEO_PATH, VIDEO_BYTES),
+                "136" => (OTHER_VIDEO_PATH, VIDEO_BYTES),
                 "140" => (AUDIO_PATH, AUDIO_BYTES),
                 _ => continue,
             };
@@ -93,6 +102,11 @@ impl Setup {
 
     /// Add the 1080p video (streams 137 and 140), found by the stand-in yt-dlp.
     fn add_video(&self) -> DownloadSummary {
+        self.add_quality("/watch", "1080p")
+    }
+
+    /// Add the page at `path` with `quality`; the stand-in answers every page alike.
+    fn add_quality(&self, path: &str, quality: &str) -> DownloadSummary {
         let page = ToolResponse {
             stdout: video_page_json(&self.page()),
             ..ToolResponse::default()
@@ -105,13 +119,13 @@ impl Setup {
         );
         self.core
             .add_download(AddDownloadParams {
-                url: self.server.url().join("/watch").unwrap().to_string(),
+                url: self.server.url().join(path).unwrap().to_string(),
                 destination: Some(self.folder.path().to_path_buf()),
                 filename: None,
                 connections: Some(1),
                 max_bytes_per_sec: None,
                 context: None,
-                quality: Some("1080p".to_string()),
+                quality: Some(quality.to_string()),
             })
             .unwrap()
     }
@@ -186,9 +200,10 @@ async fn wait_for_step(core: &DaemonCore, id: &str, prefix: &str) -> DownloadSum
         }
         assert!(
             Instant::now() < deadline,
-            "{id} never reached {prefix:?}: {:?} {:?}",
+            "{id} never reached {prefix:?}: {:?} {:?} {:?}",
             summary.status,
-            summary.step
+            summary.step,
+            summary.error_message
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -311,6 +326,40 @@ async fn the_row_shows_how_far_the_join_is() {
     assert_eq!(row.step.as_deref(), Some("Joining 50%"));
     assert!(s.core.wait_until_settled(Duration::from_secs(10)).await);
     assert!(s.folder_names().is_empty(), "{:?}", s.folder_names());
+}
+
+#[tokio::test]
+async fn two_videos_with_one_name_joining_together_both_survive() {
+    let s = setup().await;
+    s.script_ffmpeg(vec![ToolResponse {
+        sleep_ms: 1500,
+        ..joins()
+    }]);
+
+    // Both are called "A test video.mp4"; their video streams differ.
+    let first = s.add_quality("/watch", "1080p");
+    wait_for_step(&s.core, &first.id, "Joining").await;
+    let second = s.add_quality("/watch2", "720");
+    wait_for_step(&s.core, &second.id, "Joining").await;
+    let first_done = wait_for(&s.core, &first.id, DownloadStatus::Completed).await;
+    let second_done = wait_for(&s.core, &second.id, DownloadStatus::Completed).await;
+
+    assert_eq!(first_done.filename, "A test video.mp4");
+    assert_eq!(second_done.filename, "A test video (1).mp4");
+    assert_eq!(
+        s.folder_names(),
+        ["A test video (1).mp4", "A test video.mp4"]
+    );
+    let audio = pattern_bytes(AUDIO_BYTES);
+    let other_video = vec![OTHER_VIDEO_BYTE; VIDEO_BYTES as usize];
+    assert_eq!(
+        std::fs::read(s.folder.path().join("A test video.mp4")).unwrap(),
+        Setup::joined_bytes()
+    );
+    assert_eq!(
+        std::fs::read(s.folder.path().join("A test video (1).mp4")).unwrap(),
+        [other_video, audio].concat()
+    );
 }
 
 #[tokio::test]

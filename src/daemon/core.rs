@@ -157,6 +157,9 @@ pub struct DaemonCore {
     pub(super) secrets: Option<Arc<SecretStore>>,
     /// Lets extractor errors ask for a newer yt-dlp once an hour, daemon-wide.
     pub(super) extractor_gate: Arc<ExtractorUpdateGate>,
+    /// Final names that running video downloads have claimed but not yet
+    /// written, so two of them never take the same one.
+    pub(super) claimed_names: Arc<Mutex<std::collections::HashSet<std::path::PathBuf>>>,
 }
 
 impl Default for DaemonCore {
@@ -257,6 +260,7 @@ impl DaemonCore {
             tools,
             secrets,
             extractor_gate: Arc::default(),
+            claimed_names: Arc::default(),
         };
         if restored_changes {
             core.persist();

@@ -20,6 +20,7 @@ use crate::tui::format::format_bytes;
 use crate::video::errors::{join_failed_message, NO_VIDEO};
 use crate::video::join::{join, joining_path, JoinFailure, JoinRequest, UNKNOWN_PERCENT};
 use crate::video::{Container, StreamKind, StreamPlan, VideoPlan, VideoStep};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,6 +60,25 @@ struct StreamJob {
 struct FfmpegFetch {
     handle: JoinHandle<Result<Installed, ToolError>>,
     progress: Arc<Progress>,
+}
+
+impl Drop for FfmpegFetch {
+    /// A run that ends early does not leave the fetch running on its own.
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// A final name held by a running download until its file is placed.
+struct NameClaim {
+    path: PathBuf,
+    claimed: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+impl Drop for NameClaim {
+    fn drop(&mut self) {
+        self.claimed.lock().unwrap().remove(&self.path);
+    }
 }
 
 /// What the join needs, copied out of the record.
@@ -195,9 +215,10 @@ impl DaemonCore {
             [_] => {
                 // The free name and `Done` are saved before the rename, so a
                 // restart in between finds the rename to finish, or finished.
-                let final_path = mark_done(record);
+                let claim = self.claim_final_name(&wanted_final(record));
+                mark_done(record, &claim.path);
                 self.persist();
-                complete_at(&final_path, &files)
+                complete_at(&claim.path, &files)
             }
             [_, _] => self.join_two_streams(record, ffmpeg, cancel).await,
             _ => Err(no_video()),
@@ -216,7 +237,10 @@ impl DaemonCore {
         ffmpeg: Option<FfmpegFetch>,
         cancel: watch::Receiver<bool>,
     ) -> Result<Outcome, Error> {
-        let job = join_job(record)?;
+        // Claimed until the file is placed: another download with the same
+        // name would otherwise write over this one's temporary file.
+        let mut claim = self.claim_final_name(&wanted_final(record));
+        let job = join_job(record, &claim.path)?;
         self.persist();
         let ffmpeg = self.ffmpeg_for(record, ffmpeg, &cancel).await?;
         let temp = joining_path(&job.final_path);
@@ -233,13 +257,26 @@ impl DaemonCore {
             .await
             .map_err(|failure| join_error(failure, &job.folder))?;
         // The name may have been taken while ffmpeg ran: nothing is overwritten.
-        let free = free_final_path(&job.final_path);
-        if free != job.final_path {
-            std::fs::rename(&temp, joining_path(&free))?;
+        if free_final_path(&claim.path) != claim.path {
+            drop(claim);
+            claim = self.claim_final_name(&job.final_path);
+            std::fs::rename(&temp, joining_path(&claim.path))?;
         }
-        let final_path = mark_done(record);
+        mark_done(record, &claim.path);
         self.persist();
-        complete_at(&final_path, &stream_files(record))
+        complete_at(&claim.path, &stream_files(record))
+    }
+
+    /// Claim the first name from `wanted` on that is not a file and not
+    /// claimed by another running download.
+    fn claim_final_name(&self, wanted: &Path) -> NameClaim {
+        let mut claimed = self.claimed_names.lock().unwrap();
+        let path = free_final_path_avoiding(wanted, &claimed);
+        claimed.insert(path.clone());
+        NameClaim {
+            path,
+            claimed: Arc::clone(&self.claimed_names),
+        }
     }
 
     /// Start getting ffmpeg in the background, with its progress ready to show.
@@ -281,12 +318,12 @@ impl DaemonCore {
         started: Option<FfmpegFetch>,
         cancel: &watch::Receiver<bool>,
     ) -> Result<Installed, Error> {
-        let fetch = match started {
+        let mut fetch = match started {
             Some(fetch) => fetch,
             None => self.start_ffmpeg_fetch(record, cancel)?,
         };
-        record.lock().unwrap().lookup_progress = Some((Tool::Ffmpeg, fetch.progress));
-        let result = fetch.handle.await;
+        record.lock().unwrap().lookup_progress = Some((Tool::Ffmpeg, Arc::clone(&fetch.progress)));
+        let result = (&mut fetch.handle).await;
         record.lock().unwrap().lookup_progress = None;
         match result {
             Ok(installed) => Ok(installed?),
@@ -307,7 +344,7 @@ fn has_two_streams(record: &Arc<Mutex<TaskRecord>>) -> bool {
 
 /// Copy out what the join needs, and keep the free final name in the record
 /// (the row shows it, and a restart joins to the same temporary file).
-fn join_job(record: &Arc<Mutex<TaskRecord>>) -> Result<JoinJob, Error> {
+fn join_job(record: &Arc<Mutex<TaskRecord>>, final_path: &Path) -> Result<JoinJob, Error> {
     let mut guard = record.lock().unwrap();
     let rec = &mut *guard;
     let plan = rec.video.as_ref().ok_or_else(no_video)?;
@@ -321,11 +358,10 @@ fn join_job(record: &Arc<Mutex<TaskRecord>>) -> Result<JoinJob, Error> {
     };
     let container = plan.choice.as_ref().map_or(Container::Mp4, |c| c.container);
     let duration_secs = plan.duration_secs;
-    let final_path = free_final_path(&rec.directory.join(&rec.filename));
     if let Some(name) = final_path.file_name() {
         rec.filename = name.to_string_lossy().into_owned();
     }
-    rec.output = Some(final_path.clone());
+    rec.output = Some(final_path.to_path_buf());
     let percent = Arc::new(AtomicU8::new(UNKNOWN_PERCENT));
     rec.join_percent = Some(Arc::clone(&percent));
     rec.step = Some(joining_text(None));
@@ -335,7 +371,7 @@ fn join_job(record: &Arc<Mutex<TaskRecord>>) -> Result<JoinJob, Error> {
         container,
         duration_secs,
         folder: rec.directory.clone(),
-        final_path,
+        final_path: final_path.to_path_buf(),
         percent,
     })
 }
@@ -362,19 +398,22 @@ fn stream_files(record: &Arc<Mutex<TaskRecord>>) -> Vec<PathBuf> {
     files.unwrap_or_default()
 }
 
-/// Pick the free final name, and record it with the step `Done`. Returns the
-/// final path.
-fn mark_done(record: &Arc<Mutex<TaskRecord>>) -> PathBuf {
+/// The final name the record asks for, taken or not.
+fn wanted_final(record: &Arc<Mutex<TaskRecord>>) -> PathBuf {
+    let rec = record.lock().unwrap();
+    rec.directory.join(&rec.filename)
+}
+
+/// Record the chosen final path, with the step `Done`.
+fn mark_done(record: &Arc<Mutex<TaskRecord>>, final_path: &Path) {
     let mut rec = record.lock().unwrap();
-    let final_path = free_final_path(&rec.directory.join(&rec.filename));
     if let Some(name) = final_path.file_name() {
         rec.filename = name.to_string_lossy().into_owned();
     }
-    rec.output = Some(final_path.clone());
+    rec.output = Some(final_path.to_path_buf());
     if let Some(plan) = rec.video.as_mut() {
         plan.step = VideoStep::Done;
     }
-    final_path
 }
 
 /// Finish a video whose final file is `final_path`: a joined file waiting
@@ -572,6 +611,11 @@ fn space_message(volume: &str, required: u64, available: u64, joined: bool) -> S
 /// `final_path`, or the first free numbered name beside it (`Title (1).mp4`),
 /// so nothing is overwritten.
 fn free_final_path(final_path: &Path) -> PathBuf {
+    free_final_path_avoiding(final_path, &HashSet::new())
+}
+
+/// `free_final_path`, also skipping the names in `claimed`.
+fn free_final_path_avoiding(final_path: &Path, claimed: &HashSet<PathBuf>) -> PathBuf {
     let folder = final_path.parent().unwrap_or(Path::new(""));
     let name = final_path
         .file_name()
@@ -579,7 +623,7 @@ fn free_final_path(final_path: &Path) -> PathBuf {
         .unwrap_or_default();
     let mut candidate = final_path.to_path_buf();
     let mut n = 0;
-    while candidate.exists() || part_path(&candidate).exists() {
+    while candidate.exists() || part_path(&candidate).exists() || claimed.contains(&candidate) {
         n += 1;
         candidate = folder.join(collision_name(&name, n));
     }
