@@ -1,3 +1,4 @@
+use crate::video::{ChosenQuality, VideoChoice};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -433,6 +434,22 @@ pub struct AddDownloadParams {
     /// Cookies, Referer and User-Agent to send with every request, from a browser.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::request_context::RequestContext>,
+    /// For a video page: `best`, `audio` or a height such as `1080p`. Left out,
+    /// the user is asked to choose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
+}
+
+/// `download.choose_quality`: pick the quality of a download that is `choosing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChooseQualityParams {
+    pub id: String,
+    /// The `id` of one of the download's choices.
+    pub choice_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -546,6 +563,27 @@ pub enum DownloadStatus {
     Completed,
     Failed,
     Cancelled,
+    /// A video page was found and the user has yet to pick a quality. Nothing
+    /// runs, no slot is taken, and it never starts by itself.
+    Choosing,
+}
+
+/// What a video download shows the user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoSummary {
+    pub title: String,
+    /// How long the video runs, when the site says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+    /// The qualities to pick from; only while the download is `choosing`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<VideoChoice>,
+    /// Index into `choices` of the row to offer first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<usize>,
+    /// The quality that was chosen, once it has been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<ChosenQuality>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -565,6 +603,12 @@ pub struct DownloadSummary {
     /// Speed cap for this download alone; 0 means none.
     #[serde(default)]
     pub max_bytes_per_sec: u64,
+    /// The video behind this download, if it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoSummary>,
+    /// What the download is doing right now, such as "video 1 of 2".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -592,6 +636,9 @@ pub struct TelemetryTick {
     /// "no data for 42s: server busy (HTTP 503), retrying in 8s".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall: Option<String>,
+    /// What the download is doing right now, such as "video 1 of 2".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -732,6 +779,50 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn choosing_serializes_as_choosing() {
+        assert_eq!(
+            serde_json::to_string(&DownloadStatus::Choosing).unwrap(),
+            r#""choosing""#
+        );
+        let back: DownloadStatus = serde_json::from_str(r#""choosing""#).unwrap();
+        assert_eq!(back, DownloadStatus::Choosing);
+    }
+
+    #[test]
+    fn an_add_without_quality_still_parses() {
+        let params: AddDownloadParams =
+            serde_json::from_str(r#"{"url":"https://example.com/a.bin"}"#).unwrap();
+        assert_eq!(params.quality, None);
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(!json.contains("quality"), "{json}");
+    }
+
+    #[test]
+    fn a_summary_without_video_or_step_still_parses_and_leaves_them_out() {
+        let json = r#"{"id":"dl_1","url":"u","destination":"/d","filename":"f",
+            "status":"queued","downloaded_bytes":0,"total_bytes":null,"speed_bps":0}"#;
+        let summary: DownloadSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(summary.video, None);
+        assert_eq!(summary.step, None);
+        let out = serde_json::to_string(&summary).unwrap();
+        assert!(!out.contains("video") && !out.contains("step"), "{out}");
+    }
+
+    #[test]
+    fn a_choose_quality_call_leaves_out_what_it_does_not_set() {
+        let params = ChooseQualityParams {
+            id: "dl_1".to_string(),
+            choice_id: "1080-mp4".to_string(),
+            destination: None,
+            filename: None,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert_eq!(json, r#"{"id":"dl_1","choice_id":"1080-mp4"}"#);
+        let back: ChooseQualityParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, params);
+    }
+
+    #[test]
     fn test_rpc_request_roundtrip_number_id() {
         let req = RpcRequest::new(RpcId::Number(42), "daemon.ping".to_string(), None);
         let encoded = encode_message(&req).unwrap();
@@ -752,6 +843,7 @@ mod tests {
             connections: Some(8),
             max_bytes_per_sec: None,
             context: None,
+            quality: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),
@@ -834,6 +926,7 @@ mod tests {
             }],
             lanes: Vec::new(),
             stall: None,
+            step: None,
         };
         let notif =
             RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));

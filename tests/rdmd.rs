@@ -112,6 +112,7 @@ async fn rdmd_shutdown_pauses_downloads_so_they_can_resume() {
             connections: Some(2),
             max_bytes_per_sec: None,
             context: None,
+            quality: None,
         })
         .await
         .expect("add");
@@ -159,6 +160,7 @@ async fn rdmd_finishes_an_interrupted_download_after_a_restart() {
             connections: Some(2),
             max_bytes_per_sec: None,
             context: None,
+            quality: None,
         })
         .await
         .expect("add");

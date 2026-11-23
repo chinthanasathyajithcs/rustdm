@@ -1,4 +1,5 @@
 use crate::ipc::protocol::{DaemonLimits, DownloadStatus, SavedDefaults};
+use crate::video::VideoPlan;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -50,6 +51,12 @@ pub struct SavedDownload {
     /// The browser's User-Agent, sent with every request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// What is known of a video download. Missing from older queue files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoPlan>,
+    /// The quality the user asked for, as they wrote it. Missing from older queue files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<String>,
 }
 
 /// Reads and writes the queue file. Saves are serialized and atomic.
@@ -167,8 +174,23 @@ mod tests {
                 has_cookies: true,
                 referer: Some("https://example.com/files".to_string()),
                 user_agent: Some("Mozilla/5.0".to_string()),
+                video: None,
+                quality: None,
             }],
         }
+    }
+
+    #[test]
+    fn old_queue_files_without_video_load() {
+        let mut json = serde_json::to_value(sample()).unwrap();
+        let saved = json["downloads"][0].as_object_mut().unwrap();
+        saved.remove("video");
+        saved.remove("quality");
+        let snapshot: QueueSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(snapshot.downloads[0].video, None);
+        assert_eq!(snapshot.downloads[0].quality, None);
+        let text = serde_json::to_string(&snapshot).unwrap();
+        assert!(!text.contains("\"video\"") && !text.contains("\"quality\""));
     }
 
     #[test]

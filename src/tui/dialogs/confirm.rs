@@ -118,7 +118,7 @@ impl ConfirmDialog {
             DialogTarget::Key(code) => {
                 self.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
             }
-            DialogTarget::Field(_) => DialogResult::Used,
+            DialogTarget::Field(_) | DialogTarget::Row(_) => DialogResult::Used,
         }
     }
 

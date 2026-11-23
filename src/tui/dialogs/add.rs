@@ -173,6 +173,7 @@ impl AddDialog {
             DialogTarget::Key(code) => {
                 self.handle_event(&Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
             }
+            DialogTarget::Row(_) => DialogResult::Used,
         }
     }
 
@@ -278,6 +279,7 @@ impl AddDialog {
                 connections: connections.map(|n| n as usize),
                 max_bytes_per_sec,
                 context: None,
+                quality: None,
             })
             .collect())
     }
@@ -463,6 +465,7 @@ mod tests {
                 connections: Some(4),
                 max_bytes_per_sec: Some(512 * 1024),
                 context: None,
+                quality: None,
             }]
         );
         assert!(dialog.is_pending());
@@ -595,6 +598,7 @@ mod tests {
         app.apply_outcome(Ok(crate::tui::daemon_link::Outcome {
             message: "Added dl_1 (queued)".into(),
             select: Some("dl_1".into()),
+            ..Default::default()
         }));
         assert!(app.dialogs.is_empty());
         assert_eq!(app.selected.as_deref(), Some("dl_1"));

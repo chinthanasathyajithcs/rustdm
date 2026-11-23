@@ -28,23 +28,25 @@ pub fn age_text(last_checked_unix: Option<u64>, now_unix: u64) -> String {
     }
 }
 
+/// "Getting yt-dlp: 12/24 MB", or "Getting yt-dlp: 12 MB" while the size is unknown.
+pub fn getting_text(name: &str, downloaded: u64, total: Option<u64>) -> String {
+    match total {
+        Some(total) => format!(
+            "Getting {name}: {:.0}/{:.0} MB",
+            downloaded as f64 / MB,
+            total as f64 / MB
+        ),
+        None => format!("Getting {name}: {:.0} MB", downloaded as f64 / MB),
+    }
+}
+
 /// What is happening with the tool: progress while it is being fetched, the
 /// reason for the last failure, or whether it is installed.
 pub fn state_text(info: &ToolInfo) -> String {
     let name = tool_label(info.tool);
     match info.phase {
         ToolPhase::Checking => format!("Checking for a newer {name}"),
-        ToolPhase::Downloading => match info.total_bytes {
-            Some(total) => format!(
-                "Getting {name}: {:.0}/{:.0} MB",
-                info.downloaded_bytes as f64 / MB,
-                total as f64 / MB
-            ),
-            None => format!(
-                "Getting {name}: {:.0} MB",
-                info.downloaded_bytes as f64 / MB
-            ),
-        },
+        ToolPhase::Downloading => getting_text(name, info.downloaded_bytes, info.total_bytes),
         ToolPhase::Verifying => format!("Verifying {name}"),
         ToolPhase::Installing => format!("Installing {name}"),
         ToolPhase::Idle => match (&info.error, &info.installed) {

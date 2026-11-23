@@ -91,6 +91,9 @@ enum Commands {
         /// User-Agent to send instead of rustdm's own
         #[arg(long)]
         user_agent: Option<String>,
+        /// For a video page: best, audio, or a height such as 1080p (default: ask)
+        #[arg(long)]
+        quality: Option<String>,
     },
     /// List the background daemon's downloads in queue order
     List,
@@ -294,6 +297,7 @@ async fn run(cli: Cli) -> CliResult {
             max_speed,
             referer,
             user_agent,
+            quality,
         } => {
             // No --cookie: a value on the command line lands in shell history
             // and in the process list. Cookies come from the browser link.
@@ -309,6 +313,7 @@ async fn run(cli: Cli) -> CliResult {
                 connections,
                 max_bytes_per_sec: max_speed,
                 context,
+                quality,
             };
             add(&endpoint, params).await
         }

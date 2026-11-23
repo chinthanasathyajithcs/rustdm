@@ -287,6 +287,16 @@ mod tests {
     }
 
     #[test]
+    fn a_choosing_row_shows_its_status_whole() {
+        for width in [120, 80] {
+            let mut app = sample_app();
+            app.set_downloads(vec![summary("dl_1", DownloadStatus::Choosing)]);
+            let text = draw(&mut app, width, 30);
+            assert!(text.contains("choose "), "{width}: {text}");
+        }
+    }
+
+    #[test]
     fn every_cell_shows_whole_at_any_width() {
         for width in [140, 100, 92, 91, 85, 80, 70, 66, 60, 50] {
             let mut app = sample_app();

@@ -1,9 +1,10 @@
 //! The Downloads screen: the table of downloads, its toolbar and tabs.
 
-use crate::ipc::protocol::QueuePosition;
+use crate::ipc::protocol::{DownloadStatus, QueuePosition};
 use crate::tui::action::Action;
 use crate::tui::dialogs::add::AddDialog;
 use crate::tui::dialogs::confirm::ConfirmDialog;
+use crate::tui::dialogs::quality::QualityDialog;
 use crate::tui::dialogs::speed::SpeedDialog;
 use crate::tui::dialogs::Dialog;
 use crate::tui::screens::hit;
@@ -86,6 +87,10 @@ fn handle_key(app: &mut App, key: &KeyEvent) -> Option<Action> {
         KeyCode::Char('x') | KeyCode::Delete => press(app, Button::Remove),
         KeyCode::Char('v') => press(app, Button::Speed),
         KeyCode::Char('o') => open_selected_folder(app),
+        KeyCode::Enter => {
+            open_quality_list(app);
+            None
+        }
         _ => None,
     }
 }
@@ -141,6 +146,25 @@ fn open_selected_folder(app: &mut App) -> Option<Action> {
         d.destination.join(&d.filename)
     };
     Some(Action::OpenFolder(path))
+}
+
+/// Open the quality list of the selected download, if it is waiting for one.
+fn open_quality_list(app: &mut App) {
+    let Some(d) = app
+        .selected_summary()
+        .filter(|d| d.status == DownloadStatus::Choosing)
+        .cloned()
+    else {
+        return;
+    };
+    match QualityDialog::new(&d, app.defaults.as_ref()) {
+        Some(dialog) => {
+            // Opened by hand, so it must not open again by itself.
+            app.own_adds.remove(&d.id);
+            app.dialogs.push(Dialog::Quality(Box::new(dialog)));
+        }
+        None => app.notify("No qualities to choose from yet", true),
+    }
 }
 
 fn open_add_dialog(app: &mut App, paste: Option<&str>) {
@@ -572,5 +596,59 @@ mod tests {
         assert!(text.contains("Add a download"), "{text}");
         assert!(text.contains("http://example.com/a"), "{text}");
         assert!(!app.hits.dialog.is_empty());
+    }
+
+    fn draw(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, app))
+            .unwrap();
+        screen_text(&terminal)
+    }
+
+    #[test]
+    fn enter_on_a_choosing_row_opens_the_list() {
+        let mut app = App::default();
+        app.set_downloads(vec![
+            crate::tui::state::test_support::choosing_summary("dl_1"),
+            crate::tui::state::test_support::summary("dl_2", DownloadStatus::Active),
+        ]);
+        assert_eq!(handle_event(&mut app, &key(KeyCode::Enter)), None);
+        let Some(Dialog::Quality(dialog)) = app.dialogs.last() else {
+            panic!("the quality list did not open");
+        };
+        assert_eq!(dialog.id(), "dl_1");
+
+        // On a row that isn't waiting for a quality, Enter does nothing.
+        app.dialogs.clear();
+        app.move_selection(1);
+        assert_eq!(handle_event(&mut app, &key(KeyCode::Enter)), None);
+        assert!(app.dialogs.is_empty());
+    }
+
+    #[test]
+    fn the_row_shows_the_step_while_looking() {
+        use crate::tui::state::test_support::summary;
+        let mut looking = summary("dl_1", DownloadStatus::Active);
+        looking.step = Some("Looking for a video on this page…".to_string());
+        let mut app = App::default();
+        app.set_downloads(vec![looking]);
+        for (w, h) in [(100, 32), (80, 24)] {
+            let text = draw(&mut app, w, h);
+            assert!(
+                text.contains("Looking for a video on this page…"),
+                "{w}x{h}: {text}"
+            );
+        }
+
+        let mut waiting = crate::tui::state::test_support::choosing_summary("dl_1");
+        app.set_downloads(vec![waiting.clone()]);
+        let text = draw(&mut app, 100, 32);
+        assert!(text.contains("Choose a quality (Enter)"), "{text}");
+
+        waiting.step = Some("Getting yt-dlp: 12/24 MB".to_string());
+        app.set_downloads(vec![waiting]);
+        let text = draw(&mut app, 100, 32);
+        assert!(text.contains("Getting yt-dlp: 12/24 MB"), "{text}");
     }
 }

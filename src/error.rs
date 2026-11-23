@@ -19,6 +19,11 @@ pub enum Error {
     /// may go away by itself.
     #[error("{message}")]
     Tool { message: String, transient: bool },
+    /// A video page could not be read, or has no video rustdm can download.
+    /// `message` is shown to the user as it is; `transient` marks trouble that
+    /// may go away by itself.
+    #[error("{message}")]
+    Video { message: String, transient: bool },
     #[error("insufficient disk space on {target}: required {required} bytes, available {available} bytes")]
     InsufficientDiskSpace {
         target: String,
@@ -82,7 +87,7 @@ impl Error {
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Http(_) | Error::Protocol(_) => true,
-            Error::Tool { transient, .. } => *transient,
+            Error::Tool { transient, .. } | Error::Video { transient, .. } => *transient,
             _ => false,
         }
     }
@@ -99,6 +104,16 @@ mod tests {
         assert!(!Error::LinkExpired { status: 404 }.is_transient());
         assert!(!Error::Cancelled.is_transient());
         assert!(!Error::WebPage.is_transient());
+        assert!(Error::Video {
+            message: "slow".into(),
+            transient: true
+        }
+        .is_transient());
+        assert!(!Error::Video {
+            message: "gone".into(),
+            transient: false
+        }
+        .is_transient());
         let disk_full = std::io::Error::new(std::io::ErrorKind::StorageFull, "full");
         assert!(!Error::Io(disk_full).is_transient());
         assert!(!Error::InsufficientDiskSpace {
@@ -107,6 +122,15 @@ mod tests {
             available: 1
         }
         .is_transient());
+    }
+
+    #[test]
+    fn a_video_error_shows_its_message_as_it_is() {
+        let error = Error::Video {
+            message: "This is a live stream.".into(),
+            transient: false,
+        };
+        assert_eq!(error.to_string(), "This is a live stream.");
     }
 
     #[test]

@@ -112,21 +112,30 @@ pub const CONFIRM: Style = bold(AMBER);
 pub const STALLED: Style = fg(CORAL);
 
 pub fn status_style(status: DownloadStatus) -> Style {
-    let color = match status {
-        DownloadStatus::Active => AMBER,
-        DownloadStatus::Queued => STONE,
-        DownloadStatus::Pausing | DownloadStatus::Paused => FAINT,
-        DownloadStatus::Retrying => LAVENDER,
-        DownloadStatus::Completed => SAGE,
-        DownloadStatus::Failed => RED,
-        DownloadStatus::Cancelled => DUSK,
-    };
-    fg(color)
+    match status {
+        DownloadStatus::Active => fg(AMBER),
+        DownloadStatus::Queued => fg(STONE),
+        DownloadStatus::Pausing | DownloadStatus::Paused => fg(FAINT),
+        DownloadStatus::Retrying => fg(LAVENDER),
+        DownloadStatus::Completed => fg(SAGE),
+        DownloadStatus::Failed => fg(RED),
+        DownloadStatus::Cancelled => fg(DUSK),
+        // Waiting for the user, so it stands out from the downloads that run alone.
+        DownloadStatus::Choosing => CONFIRM,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn choosing_is_amber_and_bold_so_it_reads_as_needing_you() {
+        let style = status_style(DownloadStatus::Choosing);
+        assert_eq!(style.fg, Some(AMBER));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert_ne!(style, status_style(DownloadStatus::Active));
+    }
 
     #[test]
     fn every_status_has_its_own_colour_except_the_two_kinds_of_pause() {
@@ -138,6 +147,7 @@ mod tests {
             DownloadStatus::Completed,
             DownloadStatus::Failed,
             DownloadStatus::Cancelled,
+            DownloadStatus::Choosing,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {

@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use crate::ipc::protocol::{
-    AddDownloadParams, QueuePosition, SetDefaultsParams, SetLimitsParams, ToolName,
+    AddDownloadParams, ChooseQualityParams, QueuePosition, SetDefaultsParams, SetLimitsParams,
+    ToolName,
 };
 
 /// Something the dashboard asks the daemon to do.
@@ -11,6 +12,8 @@ use crate::ipc::protocol::{
 pub enum Action {
     /// Add each of these downloads, one `download.add` per link.
     Add(Vec<AddDownloadParams>),
+    /// Pick the quality (and folder and name) of a video waiting for one.
+    ChooseQuality(ChooseQualityParams),
     Pause(String),
     Resume(String),
     /// Stop a download for good; `delete_files` also removes its partial files.

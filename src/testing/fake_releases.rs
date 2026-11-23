@@ -4,6 +4,7 @@
 use super::tools::{sign, test_pinned_key, SigSpec, TEST_CREATION_TIME};
 use super::{Route, TestServer};
 use crate::tools::checksum::sha256_hex;
+use crate::tools::pins::{Archive, Pin};
 use crate::tools::release::Sources;
 use std::collections::HashMap;
 use std::io::Write;
@@ -35,17 +36,12 @@ pub fn test_sources(server: &TestServer) -> Sources {
 }
 
 /// Marks the version a fake program built from `rdmd` prints.
-const FAKE_VERSION_MARKER: &[u8] = b"\0rdm-fake-version=";
+pub(super) use super::tool_program::VERSION_MARKER as FAKE_VERSION_MARKER;
 
 /// The version appended to a fake program (see `fake_program`), if it has one.
 /// The version ends at a NUL byte, so a test may pad the program after it.
 pub fn fake_version_in(program: &[u8]) -> Option<String> {
-    let at = program
-        .windows(FAKE_VERSION_MARKER.len())
-        .rposition(|window| window == FAKE_VERSION_MARKER)?;
-    let rest = &program[at + FAKE_VERSION_MARKER.len()..];
-    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-    String::from_utf8(rest[..end].to_vec()).ok()
+    super::tool_program::version_in(program)
 }
 
 /// For `rdmd` in a test build: when it was started as a fake program (see
@@ -90,6 +86,53 @@ pub fn fake_program(version: &str) -> Vec<u8> {
 /// A fake program that exits with `code`, for any arguments (Unix only).
 pub fn failing_program(code: i32) -> Vec<u8> {
     format!("#!/bin/sh\nexit {code}\n").into_bytes()
+}
+
+/// A zip file holding `entries` (name and contents), as a pinned tool archive.
+pub fn zip_bytes(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    zip_with(entries, zip::CompressionMethod::Deflated)
+}
+
+/// Like `zip_bytes`, but without compressing: a big entry (a copy of a test
+/// program) would take many seconds to deflate in a debug build.
+pub fn zip_bytes_stored(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    zip_with(entries, zip::CompressionMethod::Stored)
+}
+
+fn zip_with(entries: &[(&str, Vec<u8>)], method: zip::CompressionMethod) -> Vec<u8> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(method)
+        .unix_permissions(0o755);
+    for (name, data) in entries {
+        writer.start_file(*name, options).unwrap();
+        writer.write_all(data).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+/// A pin for `archive`, to be served at `/pins/tool.zip`.
+pub fn zip_pin(
+    archive: &[u8],
+    version: &str,
+    strip: usize,
+    wanted: &[&str],
+    exe: &str,
+    exe_dir: &str,
+) -> Pin {
+    Pin {
+        version: version.to_string(),
+        path: "pins/tool.zip".to_string(),
+        asset: "tool.zip".to_string(),
+        sha256: sha256_hex(archive),
+        archive: Archive::Zip,
+        strip_components: strip,
+        wanted: wanted.iter().map(|s| s.to_string()).collect(),
+        exe: exe.to_string(),
+        exe_dir: exe_dir.to_string(),
+        unpacked_bytes: 1000,
+        published_checksums_path: String::new(),
+    }
 }
 
 /// What `publish_ytdlp_with` should serve, so a test can break one part of a release.

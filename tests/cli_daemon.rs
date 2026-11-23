@@ -372,3 +372,64 @@ async fn rdm_add_without_dir_follows_the_default_folder() {
         body
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_add_quality_is_passed_to_the_daemon() {
+    let body = pattern_bytes(128 * 1024);
+    let mock = TestServer::start(body.clone(), Mode::Normal).await;
+    let dir = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+    let url = mock.url().to_string();
+    let dest = downloads.path().to_string_lossy().into_owned();
+
+    // The daemon checks the value, so a bad one coming back as its error
+    // shows that the flag reached it; a good one is accepted for a plain file.
+    tokio::task::block_in_place(|| {
+        let bad = rdm.run(&["add", &url, "--dir", &dest, "--quality", "hd"]);
+        assert!(!bad.status.success());
+        let added = rdm.ok(&[
+            "add",
+            &url,
+            "--dir",
+            &dest,
+            "--name",
+            "q.bin",
+            "--quality",
+            "1080p",
+        ]);
+        assert!(added.contains("dl_1"), "{added}");
+        rdm.wait_for_list("completed");
+    });
+    assert_eq!(std::fs::read(downloads.path().join("q.bin")).unwrap(), body);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_add_rejects_a_bad_quality() {
+    let dir = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+
+    let out = tokio::task::block_in_place(|| {
+        rdm.run(&["add", "http://127.0.0.1:9/x", "--quality", "hd"])
+    });
+
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("quality must be best, audio or a height such as 1080p"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rdm_add_help_explains_the_quality_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let rdm = Rdm::new(dir.path());
+
+    let help = rdm.ok(&["add", "--help"]);
+
+    assert!(
+        help.contains("For a video page: best, audio, or a height such as 1080p (default: ask)"),
+        "{help}"
+    );
+}

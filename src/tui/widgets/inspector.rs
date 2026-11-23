@@ -1,7 +1,7 @@
 //! The inspector pane under the table: details of the selected download.
 
 use crate::ipc::protocol::{DownloadSummary, TelemetryTick};
-use crate::tui::format::{format_eta, format_speed, format_speed_cap, status_span};
+use crate::tui::format::{format_eta, format_speed, format_speed_cap, status_span, step_text};
 use crate::tui::state::App;
 use crate::tui::theme;
 use crate::tui::widgets::lanes::{render_lanes, MAX_LANE_LINES};
@@ -65,16 +65,20 @@ fn render_info(
 ) {
     let label = theme::MUTED;
     let first = status_line(d, tick, stall.is_some(), area.width as usize);
-    let last = match (stall, &d.error_message) {
-        (Some(reason), _) => Line::from(vec![
+    let last = match (stall, &d.error_message, step_text(d)) {
+        (Some(reason), _, _) => Line::from(vec![
             Span::styled("Waiting ", label),
             Span::styled(reason.to_string(), theme::STALLED),
         ]),
-        (None, Some(err)) => Line::from(vec![
+        (None, Some(err), _) => Line::from(vec![
             Span::styled("Error ", label),
             Span::styled(err.clone(), theme::ERROR),
         ]),
-        (None, None) => Line::from(vec![
+        (None, None, Some(step)) => Line::from(vec![
+            Span::styled("Now ", label),
+            Span::styled(step, theme::WORKING),
+        ]),
+        (None, None, None) => Line::from(vec![
             Span::styled("Saved to ", label),
             Span::raw(d.destination.display().to_string()),
         ]),
