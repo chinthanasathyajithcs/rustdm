@@ -36,17 +36,12 @@ pub fn test_sources(server: &TestServer) -> Sources {
 }
 
 /// Marks the version a fake program built from `rdmd` prints.
-pub(super) const FAKE_VERSION_MARKER: &[u8] = b"\0rdm-fake-version=";
+pub(super) use super::tool_program::VERSION_MARKER as FAKE_VERSION_MARKER;
 
 /// The version appended to a fake program (see `fake_program`), if it has one.
 /// The version ends at a NUL byte, so a test may pad the program after it.
 pub fn fake_version_in(program: &[u8]) -> Option<String> {
-    let at = program
-        .windows(FAKE_VERSION_MARKER.len())
-        .rposition(|window| window == FAKE_VERSION_MARKER)?;
-    let rest = &program[at + FAKE_VERSION_MARKER.len()..];
-    let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-    String::from_utf8(rest[..end].to_vec()).ok()
+    super::tool_program::version_in(program)
 }
 
 /// For `rdmd` in a test build: when it was started as a fake program (see
