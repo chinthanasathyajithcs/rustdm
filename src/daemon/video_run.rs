@@ -4,7 +4,9 @@
 
 use super::core::DaemonCore;
 use super::task::TaskRecord;
-use super::video_fields::{step_text, stream_file_name, video_space_needed, video_total};
+use super::video_fields::{
+    joining_text, step_text, stream_file_name, video_space_needed, video_total,
+};
 use crate::disk::{ensure_disk_space, volume_label, SAFETY_MARGIN_BYTES};
 use crate::engine::{self, DownloadRequest, Outcome, Progress, ResumeOptions, Timeouts};
 use crate::error::Error;
@@ -13,17 +15,18 @@ use crate::ranges::RangeSet;
 use crate::request_context::{stream_client, RequestContext};
 use crate::state::{part_path, state_path};
 use crate::template::collision_name;
+use crate::tools::{FetchCtx, Freshness, Installed, Tool, ToolError};
 use crate::tui::format::format_bytes;
-use crate::video::errors::NO_VIDEO;
-use crate::video::{StreamPlan, VideoPlan, VideoStep};
+use crate::video::errors::{join_failed_message, NO_VIDEO};
+use crate::video::join::{join, joining_path, JoinFailure, JoinRequest, UNKNOWN_PERCENT};
+use crate::video::{Container, StreamKind, StreamPlan, VideoPlan, VideoStep};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use url::Url;
 
-/// What a video of two streams ends with until the join arrives.
-const JOIN_LATER: &str = "Joining arrives in the next task";
 /// Where the engine saves a stream: the name given, in the download's folder.
 const STREAM_TEMPLATE: &str = "{downloads}/{name}";
 /// Why the disk check asks for twice the size.
@@ -52,6 +55,24 @@ struct StreamJob {
     progress: Arc<Progress>,
 }
 
+/// ffmpeg being fetched while the streams download, so the join need not wait.
+struct FfmpegFetch {
+    handle: JoinHandle<Result<Installed, ToolError>>,
+    progress: Arc<Progress>,
+}
+
+/// What the join needs, copied out of the record.
+struct JoinJob {
+    video: PathBuf,
+    audio: PathBuf,
+    container: Container,
+    duration_secs: Option<u64>,
+    folder: PathBuf,
+    /// The free final name; ffmpeg writes `<final_path>.joining`.
+    final_path: PathBuf,
+    percent: Arc<AtomicU8>,
+}
+
 impl DaemonCore {
     /// Run a video whose quality is chosen, from `plan.step` on, until the
     /// download settles. Called with the download `Active` and running.
@@ -63,15 +84,23 @@ impl DaemonCore {
         if let Err(e) = begin_video_run(record) {
             return self.finish_task(record, Err(e));
         }
+        let mut ffmpeg: Option<FfmpegFetch> = None;
         loop {
             match next_step(record, &cancel) {
                 Next::Stop => return self.finish_task(record, Err(Error::Cancelled)),
-                Next::Stream(index) => match self.run_stream(record, index, cancel.clone()).await {
-                    Ok(Outcome::Completed { path, .. }) => self.stream_done(record, index, path),
-                    // Task 6 takes `LinkExpired` over: it refreshes the links.
-                    other => return self.finish_task(record, other),
-                },
-                Next::Join => return self.join_streams(record),
+                Next::Stream(index) => {
+                    if index == 0 && ffmpeg.is_none() && has_two_streams(record) {
+                        ffmpeg = self.start_ffmpeg_fetch(record, &cancel).ok();
+                    }
+                    match self.run_stream(record, index, cancel.clone()).await {
+                        Ok(Outcome::Completed { path, .. }) => {
+                            self.stream_done(record, index, path)
+                        }
+                        // Task 6 takes `LinkExpired` over: it refreshes the links.
+                        other => return self.finish_task(record, other),
+                    }
+                }
+                Next::Join => return self.join_streams(record, ffmpeg, cancel).await,
                 Next::Done(path) => {
                     let outcome = complete_at(&path, &stream_files(record));
                     return self.finish_task(record, outcome);
@@ -154,11 +183,15 @@ impl DaemonCore {
     }
 
     /// Make the final file of the downloaded streams. One stream is renamed to
-    /// the final name; two wait for the join (Task 5).
-    fn join_streams(&self, record: &Arc<Mutex<TaskRecord>>) {
+    /// the final name; two are joined with ffmpeg.
+    async fn join_streams(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        ffmpeg: Option<FfmpegFetch>,
+        cancel: watch::Receiver<bool>,
+    ) {
         let files = stream_files(record);
         let outcome = match files.as_slice() {
-            [] => Err(no_video()),
             [_] => {
                 // The free name and `Done` are saved before the rename, so a
                 // restart in between finds the rename to finish, or finished.
@@ -166,12 +199,154 @@ impl DaemonCore {
                 self.persist();
                 complete_at(&final_path, &files)
             }
-            _ => Err(Error::Video {
-                message: JOIN_LATER.to_string(),
-                transient: false,
-            }),
+            [_, _] => self.join_two_streams(record, ffmpeg, cancel).await,
+            _ => Err(no_video()),
         };
+        record.lock().unwrap().join_percent = None;
         self.finish_task(record, outcome);
+    }
+
+    /// Join the video and the audio into `<final>.joining`, then make that the
+    /// final file. The free name is kept in the record before ffmpeg starts, so
+    /// a restart joins under the same name; `Done` is saved before the rename,
+    /// so a restart in between finds the joined file to rename.
+    async fn join_two_streams(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        ffmpeg: Option<FfmpegFetch>,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<Outcome, Error> {
+        let job = join_job(record)?;
+        self.persist();
+        let ffmpeg = self.ffmpeg_for(record, ffmpeg, &cancel).await?;
+        let temp = joining_path(&job.final_path);
+        let request = JoinRequest {
+            video: &job.video,
+            audio: &job.audio,
+            container: job.container,
+            temp: &temp,
+            duration_secs: job.duration_secs,
+            percent: &job.percent,
+            cancel,
+        };
+        join(&ffmpeg, request)
+            .await
+            .map_err(|failure| join_error(failure, &job.folder))?;
+        // The name may have been taken while ffmpeg ran: nothing is overwritten.
+        let free = free_final_path(&job.final_path);
+        if free != job.final_path {
+            std::fs::rename(&temp, joining_path(&free))?;
+        }
+        let final_path = mark_done(record);
+        self.persist();
+        complete_at(&final_path, &stream_files(record))
+    }
+
+    /// Start getting ffmpeg in the background, with its progress ready to show.
+    fn start_ffmpeg_fetch(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<FfmpegFetch, Error> {
+        let Some(tools) = self.tools.clone() else {
+            return Err(Error::Tool {
+                message: "This daemon has no tools folder.".to_string(),
+                transient: false,
+            });
+        };
+        let progress = {
+            let rec = record.lock().unwrap();
+            Arc::new(Progress::with_rate_limiters(
+                Arc::clone(&rec.share_limiter),
+                Arc::clone(&rec.speed_limiter),
+            ))
+        };
+        let ctx = FetchCtx {
+            progress: Arc::clone(&progress),
+            cancel: Some(cancel.clone()),
+        };
+        let handle = tokio::spawn(async move {
+            tools
+                .ensure(Tool::Ffmpeg, Freshness::CheckIfStale, ctx)
+                .await
+        });
+        Ok(FfmpegFetch { handle, progress })
+    }
+
+    /// ffmpeg, from the fetch begun with the first stream, or begun now (after
+    /// a restart). The row shows its progress while it is being fetched.
+    async fn ffmpeg_for(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        started: Option<FfmpegFetch>,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<Installed, Error> {
+        let fetch = match started {
+            Some(fetch) => fetch,
+            None => self.start_ffmpeg_fetch(record, cancel)?,
+        };
+        record.lock().unwrap().lookup_progress = Some((Tool::Ffmpeg, fetch.progress));
+        let result = fetch.handle.await;
+        record.lock().unwrap().lookup_progress = None;
+        match result {
+            Ok(installed) => Ok(installed?),
+            Err(e) => Err(Error::Tool {
+                message: format!("Getting ffmpeg was interrupted: {e}"),
+                transient: true,
+            }),
+        }
+    }
+}
+
+fn has_two_streams(record: &Arc<Mutex<TaskRecord>>) -> bool {
+    let rec = record.lock().unwrap();
+    rec.video
+        .as_ref()
+        .is_some_and(|plan| plan.streams.len() > 1)
+}
+
+/// Copy out what the join needs, and keep the free final name in the record
+/// (the row shows it, and a restart joins to the same temporary file).
+fn join_job(record: &Arc<Mutex<TaskRecord>>) -> Result<JoinJob, Error> {
+    let mut guard = record.lock().unwrap();
+    let rec = &mut *guard;
+    let plan = rec.video.as_ref().ok_or_else(no_video)?;
+    let file_of = |kind| {
+        let stream = plan.streams.iter().find(|s| s.kind == kind);
+        stream.and_then(|s| s.file.clone())
+    };
+    let (Some(video), Some(audio)) = (file_of(StreamKind::Video), file_of(StreamKind::Audio))
+    else {
+        return Err(no_video());
+    };
+    let container = plan.choice.as_ref().map_or(Container::Mp4, |c| c.container);
+    let duration_secs = plan.duration_secs;
+    let final_path = free_final_path(&rec.directory.join(&rec.filename));
+    if let Some(name) = final_path.file_name() {
+        rec.filename = name.to_string_lossy().into_owned();
+    }
+    rec.output = Some(final_path.clone());
+    let percent = Arc::new(AtomicU8::new(UNKNOWN_PERCENT));
+    rec.join_percent = Some(Arc::clone(&percent));
+    rec.step = Some(joining_text(None));
+    Ok(JoinJob {
+        video,
+        audio,
+        container,
+        duration_secs,
+        folder: rec.directory.clone(),
+        final_path,
+        percent,
+    })
+}
+
+fn join_error(failure: JoinFailure, folder: &Path) -> Error {
+    match failure {
+        JoinFailure::Cancelled => Error::Cancelled,
+        JoinFailure::Exited { last_line } | JoinFailure::Spawn(last_line) => Error::Video {
+            message: join_failed_message(&last_line, folder),
+            transient: false,
+        },
     }
 }
 
@@ -202,27 +377,56 @@ fn mark_done(record: &Arc<Mutex<TaskRecord>>) -> PathBuf {
     final_path
 }
 
-/// Finish a video whose final file is `final_path`: done when it is there,
-/// else its one stream is moved there.
+/// Finish a video whose final file is `final_path`: a joined file waiting
+/// under its temporary name is renamed to it, else it is done when the file is
+/// there, else its one stream is moved there. A joined video's streams are
+/// removed.
 fn complete_at(final_path: &Path, stream_files: &[PathBuf]) -> Result<Outcome, Error> {
-    let done = || {
+    let completed = |path: &Path| {
         Ok(Outcome::Completed {
-            path: final_path.to_path_buf(),
+            path: path.to_path_buf(),
             steals: 0,
         })
     };
+    let joined = joining_path(final_path);
+    if joined.is_file() {
+        // The name was free when it was chosen; if it is not now, the other
+        // file stays and the video takes the next free name.
+        let target = free_final_path(final_path);
+        std::fs::rename(&joined, &target)?;
+        remove_stream_files(stream_files);
+        return completed(&target);
+    }
     if final_path.is_file() {
-        return done();
+        if stream_files.len() > 1 {
+            remove_stream_files(stream_files);
+        }
+        return completed(final_path);
     }
     match stream_files {
         [only] if only.is_file() => {
             std::fs::rename(only, final_path)?;
-            done()
+            completed(final_path)
         }
         _ => Err(Error::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("cannot find {}", final_path.display()),
         ))),
+    }
+}
+
+/// Delete the streams of a joined video, with their part and state files.
+/// Best effort: a file that stays is only clutter, and is logged.
+fn remove_stream_files(stream_files: &[PathBuf]) {
+    let files = stream_files
+        .iter()
+        .flat_map(|file| [file.clone(), part_path(file), state_path(file)]);
+    for file in files {
+        match std::fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(path = %file.display(), "couldn't remove a stream file: {e}"),
+        }
     }
 }
 
@@ -397,8 +601,10 @@ pub(super) fn refresh_stream_step(task: &mut TaskRecord) {
     let Some(plan) = task.video.as_ref() else {
         return;
     };
-    let VideoStep::Stream(index) = plan.step else {
-        return;
+    let index = match plan.step {
+        VideoStep::Stream(index) => index,
+        VideoStep::Join => return refresh_join_step(task),
+        _ => return,
     };
     let Some(stream) = plan.streams.get(index) else {
         return;
@@ -408,6 +614,20 @@ pub(super) fn refresh_stream_step(task: &mut TaskRecord) {
     let total = Some(engine_total).filter(|&t| t > 0).or(stream.size);
     let percent = total.map_or(0, |t| downloaded.saturating_mul(100) / t.max(1));
     task.step = Some(step_text(plan, index, percent.min(100) as u8));
+}
+
+/// Show how far ffmpeg is as the row's step: `Joining 64%`. While ffmpeg is
+/// being fetched the step says so instead.
+fn refresh_join_step(task: &mut TaskRecord) {
+    let Some(percent) = task
+        .join_percent
+        .as_ref()
+        .filter(|_| task.lookup_progress.is_none())
+    else {
+        return;
+    };
+    let percent = Some(percent.load(Ordering::Relaxed)).filter(|&p| p != UNKNOWN_PERCENT);
+    task.step = Some(joining_text(percent));
 }
 
 #[cfg(test)]
@@ -479,6 +699,69 @@ mod tests {
         // Neither there: a plain failure, never a completed download.
         let missing = dir.path().join("Other.m4a");
         assert!(complete_at(&missing, std::slice::from_ref(&stream)).is_err());
+    }
+
+    #[test]
+    fn a_joined_file_cut_short_before_its_rename_is_renamed_on_the_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("Clip.mp4");
+        let streams = [
+            dir.path().join("Clip.f137.mp4"),
+            dir.path().join("Clip.f140.m4a"),
+        ];
+        for stream in &streams {
+            std::fs::write(stream, "part").unwrap();
+            std::fs::write(part_path(stream), "").unwrap();
+        }
+        std::fs::write(joining_path(&final_path), "joined").unwrap();
+
+        let placed = completed_path(complete_at(&final_path, &streams));
+
+        assert_eq!(placed, final_path);
+        assert_eq!(std::fs::read_to_string(&final_path).unwrap(), "joined");
+        assert_eq!(names(dir.path()), ["Clip.mp4"]);
+    }
+
+    #[test]
+    fn a_file_that_took_the_final_name_meanwhile_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("Clip.mp4");
+        std::fs::write(&final_path, "someone else's").unwrap();
+        std::fs::write(joining_path(&final_path), "joined").unwrap();
+
+        let placed = completed_path(complete_at(&final_path, &[]));
+
+        assert_eq!(placed, dir.path().join("Clip (1).mp4"));
+        assert_eq!(
+            std::fs::read_to_string(&final_path).unwrap(),
+            "someone else's"
+        );
+        assert_eq!(std::fs::read_to_string(&placed).unwrap(), "joined");
+    }
+
+    #[test]
+    fn a_joined_video_found_done_after_its_rename_drops_the_streams_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("Clip.mp4");
+        std::fs::write(&final_path, "joined").unwrap();
+        let streams = [
+            dir.path().join("Clip.f137.mp4"),
+            dir.path().join("Clip.f140.m4a"),
+        ];
+        std::fs::write(&streams[0], "left over").unwrap();
+
+        completed_path(complete_at(&final_path, &streams));
+
+        assert_eq!(names(dir.path()), ["Clip.mp4"]);
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     /// A record half way through its one stream, with a state file covering `covered` bytes.

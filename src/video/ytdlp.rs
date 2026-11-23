@@ -341,7 +341,7 @@ async fn read_capped(
 }
 
 /// Read to the end, keeping only the last `keep` bytes.
-async fn read_tail(mut reader: impl AsyncRead + Unpin, keep: usize) -> String {
+pub(super) async fn read_tail(mut reader: impl AsyncRead + Unpin, keep: usize) -> String {
     let mut tail: Vec<u8> = Vec::new();
     let mut chunk = vec![0u8; READ_CHUNK];
     while let Ok(n) = reader.read(&mut chunk).await {

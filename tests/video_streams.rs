@@ -22,8 +22,6 @@ const AUDIO_BYTES: u64 = 300_000;
 const CHUNK: u64 = 500_000;
 const VIDEO_PATH: &str = "/stream/137";
 const AUDIO_PATH: &str = "/stream/140";
-/// What a two-stream video fails with until the join arrives (Task 5).
-const JOIN_LATER: &str = "Joining arrives in the next task";
 /// The engine's size probe, which is not part of the file.
 const PROBE_RANGE: &str = "bytes=0-0";
 
@@ -135,6 +133,11 @@ impl Setup {
     fn file(&self, name: &str) -> Vec<u8> {
         std::fs::read(self.folder.path().join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
     }
+}
+
+/// What the stand-in ffmpeg makes of the two streams: the video, then the audio.
+fn joined_bytes() -> Vec<u8> {
+    [pattern_bytes(VIDEO_BYTES), pattern_bytes(AUDIO_BYTES)].concat()
 }
 
 fn requests_to(requests: &[RequestLog], path: &str) -> Vec<RequestLog> {
@@ -253,11 +256,11 @@ async fn two_streams_download_one_after_the_other_in_capped_requests() {
         })
         .unwrap();
     assert_eq!(chosen.status, DownloadStatus::Queued);
-    let ended = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    let ended = wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
 
-    assert_eq!(ended.error_message.as_deref(), Some(JOIN_LATER));
-    assert_eq!(s.file("A test video.f137.mp4"), pattern_bytes(VIDEO_BYTES));
-    assert_eq!(s.file("A test video.f140.m4a"), pattern_bytes(AUDIO_BYTES));
+    assert_eq!(ended.error_message, None);
+    assert_eq!(s.file("A test video.mp4"), joined_bytes());
+    assert_eq!(names_in(s.folder.path()), ["A test video.mp4"]);
     let streams: Vec<RequestLog> = s
         .server
         .requests()
@@ -304,7 +307,7 @@ async fn the_row_counts_both_streams() {
     .await;
     // The audio counts on from the finished video.
     assert!(audio.downloaded_bytes >= VIDEO_BYTES, "{audio:?}");
-    let ended = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    let ended = wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
     assert_eq!(ended.total_bytes, Some(VIDEO_BYTES + AUDIO_BYTES));
 }
 
@@ -361,12 +364,12 @@ async fn a_restart_mid_stream_continues_the_same_stream_file() {
     s.server.set_route(VIDEO_PATH, video_route());
     let again = new_core(&s.world, s.data.path());
     again.schedule();
-    let ended = wait_for(&again, &added.id, DownloadStatus::Failed).await;
+    let ended = wait_for(&again, &added.id, DownloadStatus::Completed).await;
 
-    assert_eq!(ended.error_message.as_deref(), Some(JOIN_LATER));
+    assert_eq!(ended.error_message, None);
     let names = names_in(s.folder.path());
-    assert!(!names.iter().any(|n| n.contains("(1)")), "{names:?}");
-    assert_eq!(s.file("A test video.f137.mp4"), pattern_bytes(VIDEO_BYTES));
+    assert_eq!(names, ["A test video.mp4"]);
+    assert_eq!(s.file("A test video.mp4"), joined_bytes());
     let after = requests_to(&s.server.requests()[before..], VIDEO_PATH);
     let fetched: u64 = range_sizes(&after).iter().sum();
     assert!(fetched < VIDEO_BYTES, "fetched {fetched} after the restart");
@@ -405,6 +408,18 @@ async fn a_title_with_forbidden_characters_gives_safe_stream_names() {
     let mut spec = s.page();
     spec.title = "A: b/c?".to_string();
     s.answer(&spec);
+
+    // A failed join keeps the stream files, which are the ones to look at.
+    let fails = ToolResponse {
+        exit_code: 1,
+        ..ToolResponse::default()
+    };
+    write_script(
+        &s.world.ffmpeg.exe,
+        &ToolScript {
+            responses: vec![fails],
+        },
+    );
 
     let added = s.add(Some("1080p"));
     wait_for(&s.core, &added.id, DownloadStatus::Failed).await;

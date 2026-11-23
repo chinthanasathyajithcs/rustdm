@@ -21,6 +21,14 @@ pub enum LookupFailure {
 
 /// What a page with nothing to download is told.
 pub const NO_VIDEO: &str = "This link is a web page, not a file, and no video was found on it.";
+/// The message of a join that failed; `folder` holds the two kept parts.
+pub fn join_failed_message(last_line: &str, folder: &std::path::Path) -> String {
+    format!(
+        "Couldn't join the video and audio: {last_line}. The two parts are kept in {}; \
+         press r to try again.",
+        folder.display()
+    )
+}
 const SIGN_IN_NEEDED: &str =
     "This video needs you to be signed in. Add it from your browser so rustdm gets your sign-in.";
 const LIVE: &str = "This is a live stream; rustdm downloads finished videos only.";

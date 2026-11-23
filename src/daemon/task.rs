@@ -15,7 +15,7 @@ use crate::state::{part_path, state_path};
 use crate::tools::Tool;
 use crate::video::{Quality, VideoPlan};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -103,6 +103,9 @@ pub struct TaskRecord {
     /// user's resume) goes straight to the lookup without the link check.
     /// Not saved.
     pub lookup_next: bool,
+    /// How far ffmpeg is in joining a video's streams, while it runs (255 until
+    /// it says). Not saved.
+    pub join_percent: Option<Arc<AtomicU8>>,
     /// Bytes of a video's streams before the one `progress` counts. Not saved.
     pub progress_base: u64,
 }
@@ -161,6 +164,7 @@ impl TaskRecord {
             step: None,
             lookup_progress: None,
             lookup_next: false,
+            join_percent: None,
             progress_base: 0,
         }
     }

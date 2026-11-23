@@ -2,13 +2,11 @@
 
 use crate::ipc::protocol::VideoSummary;
 use crate::state::{part_path, state_path};
+use crate::video::join::joining_path;
 use crate::video::{
     parse_quality, Container, Quality, StreamKind, StreamPlan, VideoPlan, VideoStep,
 };
 use std::path::{Path, PathBuf};
-
-/// Ending of the file ffmpeg writes before it is renamed to the final name.
-const JOINING_SUFFIX: &str = ".joining";
 
 /// The file a stream is saved as: `<stem>.f<format_id>.<ext>`, where `<stem>`
 /// is the final name without its container ending. A stream without an ending
@@ -40,9 +38,7 @@ pub fn video_leftovers(plan: &VideoPlan, final_path: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = streams
         .flat_map(|file| [part_path(file), state_path(file), file.to_path_buf()])
         .collect();
-    let mut joining = final_path.as_os_str().to_os_string();
-    joining.push(JOINING_SUFFIX);
-    files.push(PathBuf::from(joining));
+    files.push(joining_path(final_path));
     files
 }
 
@@ -57,6 +53,15 @@ pub fn step_text(plan: &VideoPlan, index: usize, percent: u8) -> String {
         index + 1,
         plan.streams.len()
     )
+}
+
+/// What the row says while the streams are joined: `Joining 64%`, or
+/// `Joining…` while ffmpeg has not said how far it is.
+pub fn joining_text(percent: Option<u8>) -> String {
+    match percent {
+        Some(percent) => format!("Joining {percent}%"),
+        None => "Joining…".to_string(),
+    }
 }
 
 /// The free space a video needs before its first stream, without the safety
@@ -136,6 +141,12 @@ pub fn read_saved_quality(id: &str, text: Option<String>) -> (Option<Quality>, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_joining_step_shows_a_percent_once_it_is_known() {
+        assert_eq!(joining_text(Some(64)), "Joining 64%");
+        assert_eq!(joining_text(None), "Joining…");
+    }
     use crate::video::VideoChoice;
 
     fn plan_with(rows: usize, default: usize) -> VideoPlan {

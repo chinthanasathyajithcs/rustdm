@@ -5,6 +5,7 @@ pub mod choices;
 pub mod errors;
 pub mod headers;
 pub mod info;
+pub mod join;
 pub mod streams;
 pub mod ytdlp;
 

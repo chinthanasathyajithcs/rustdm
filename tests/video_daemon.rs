@@ -25,9 +25,6 @@ use url::Url;
 
 const NO_VIDEO: &str = "This link is a web page, not a file, and no video was found on it.";
 const LOOKING: &str = "Looking for a video on this page…";
-/// What a chosen two-stream video ends with until the join arrives (Task 5
-/// rewrites these assertions).
-const JOIN_LATER: &str = "Joining arrives in the next task";
 /// The streams a chosen quality of `Setup::page` fetches from the page server.
 const MEDIA: [&str; 3] = ["/media/136", "/media/137", "/media/140"];
 const NEWER_YTDLP: &str = "2026.11.14";
@@ -650,9 +647,8 @@ async fn a_quality_given_at_add_is_chosen_at_once() {
     params.quality = Some("720".to_string());
 
     let added = s.core.add_download(params).unwrap();
-    let done = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    let done = wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
 
-    assert_eq!(done.error_message.as_deref(), Some(JOIN_LATER));
     assert!(s.requests_to(&["/media/136"]) > 0, "the video stream ran");
     let video = done.video.expect("a video summary");
     let chosen = video.chosen.expect("a chosen quality");
@@ -675,7 +671,7 @@ async fn a_name_asked_for_at_add_names_the_video_file() {
     let waiting = s.core.add_download(waits).unwrap();
     let waiting = wait_for(&s.core, &waiting.id, DownloadStatus::Choosing).await;
     let chosen = s.core.add_download(chooses).unwrap();
-    let chosen = wait_for(&s.core, &chosen.id, DownloadStatus::Failed).await;
+    let chosen = wait_for(&s.core, &chosen.id, DownloadStatus::Completed).await;
 
     assert_eq!(waiting.filename, "My clip.mp4");
     assert_eq!(chosen.filename, "My clip.mp4");
@@ -789,8 +785,7 @@ async fn choosing_a_quality_stores_the_plan() {
 
     // Chosen, it waits for a slot like any download, then runs its streams.
     assert_eq!(chosen.status, DownloadStatus::Queued);
-    let ended = wait_for(&s.core, &waiting.id, DownloadStatus::Failed).await;
-    assert_eq!(ended.error_message.as_deref(), Some(JOIN_LATER));
+    let ended = wait_for(&s.core, &waiting.id, DownloadStatus::Completed).await;
     for summary in [chosen, ended] {
         assert_eq!(summary.filename, "A test video.mp4");
         let video = summary.video.expect("a video summary");
@@ -800,7 +795,7 @@ async fn choosing_a_quality_stores_the_plan() {
     assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
     let again = DaemonCore::with_store(QueueStore::in_dir(s.data.path())).unwrap();
     let kept = again.get_status(&waiting.id).unwrap();
-    assert_eq!(kept.status, DownloadStatus::Failed);
+    assert_eq!(kept.status, DownloadStatus::Completed);
     assert_eq!(kept.video.unwrap().chosen.unwrap().choice_id, "720-mp4");
 }
 
@@ -827,7 +822,7 @@ async fn a_quality_given_at_add_skips_the_question() {
     params.quality = Some("1080p".to_string());
 
     let added = s.core.add_download(params).unwrap();
-    let done = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    let done = wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
 
     assert_eq!(done.video.unwrap().chosen.unwrap().label, "1080p");
 }
@@ -840,7 +835,7 @@ async fn a_missing_height_takes_the_nearest_below() {
     params.quality = Some("900p".to_string());
 
     let added = s.core.add_download(params).unwrap();
-    let done = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    let done = wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
 
     assert_eq!(done.video.unwrap().chosen.unwrap().label, "720p");
 }
@@ -937,6 +932,18 @@ async fn choose_quality_is_routed_by_its_method_name() {
 #[tokio::test]
 async fn resuming_a_chosen_video_needs_no_new_lookup_or_link_check() {
     let s = setup().await;
+    // The first join fails, so the download waits for the user's resume.
+    let fails = ToolResponse {
+        stderr: "Invalid data found\n".to_string(),
+        exit_code: 1,
+        join_inputs: true,
+        ..ToolResponse::default()
+    };
+    let joins = ToolResponse {
+        join_inputs: true,
+        ..ToolResponse::default()
+    };
+    write_script(&s.world.ffmpeg.exe, &script(vec![fails, joins]));
     let waiting = choosing(&s, "/watch").await;
     s.core
         .choose_quality(choose(&waiting.id, "720-mp4"))
@@ -949,8 +956,7 @@ async fn resuming_a_chosen_video_needs_no_new_lookup_or_link_check() {
     assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
 
     let again = s.core.get_status(&waiting.id).unwrap();
-    assert_eq!(again.status, DownloadStatus::Failed);
-    assert_eq!(again.error_message.as_deref(), Some(JOIN_LATER));
+    assert_eq!(again.status, DownloadStatus::Completed);
     assert_eq!(s.lookups(), 1);
     assert_eq!(s.requests_to(&["/watch"]), pages);
     // Both streams were already there.
@@ -981,7 +987,7 @@ async fn choosing_a_quality_keeps_its_streams_and_no_cookies() {
         .choose_quality(choose(&added.id, "1080-mp4"))
         .unwrap();
 
-    wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
     assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
     let text = std::fs::read_to_string(s.data.path().join("queue.json")).unwrap();
     let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
