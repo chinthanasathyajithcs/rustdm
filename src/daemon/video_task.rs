@@ -271,8 +271,8 @@ impl DaemonCore {
     }
 
     /// The download's browser cookies, from the secret store. Empty when it has
-    /// none, or when this daemon keeps none (no data folder): the lookup then
-    /// runs without them.
+    /// none, or when this daemon keeps none (no data folder): the lookup or
+    /// the stream then runs without them.
     pub(super) fn cookies_for(&self, id: &str) -> Vec<ContextCookie> {
         let has_cookies = {
             let state = self.state.lock().unwrap();
@@ -289,7 +289,7 @@ impl DaemonCore {
         match loaded {
             Ok(cookies) => cookies,
             Err(kind) => {
-                tracing::info!("{id}: looking the page up without its sign-in ({kind})");
+                tracing::info!("{id}: going on without its sign-in ({kind})");
                 Vec::new()
             }
         }

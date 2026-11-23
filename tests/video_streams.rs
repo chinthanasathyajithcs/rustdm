@@ -252,7 +252,7 @@ async fn two_streams_download_one_after_the_other_in_capped_requests() {
             filename: None,
         })
         .unwrap();
-    assert_ne!(chosen.status, DownloadStatus::Failed);
+    assert_eq!(chosen.status, DownloadStatus::Queued);
     let ended = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
 
     assert_eq!(ended.error_message.as_deref(), Some(JOIN_LATER));

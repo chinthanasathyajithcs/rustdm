@@ -9,6 +9,7 @@ use crate::disk::{ensure_disk_space, volume_label, SAFETY_MARGIN_BYTES};
 use crate::engine::{self, DownloadRequest, Outcome, Progress, ResumeOptions, Timeouts};
 use crate::error::Error;
 use crate::ipc::protocol::DownloadStatus;
+use crate::ranges::RangeSet;
 use crate::request_context::{stream_client, RequestContext};
 use crate::state::{part_path, state_path};
 use crate::template::collision_name;
@@ -72,7 +73,8 @@ impl DaemonCore {
                 },
                 Next::Join => return self.join_streams(record),
                 Next::Done(path) => {
-                    return self.finish_task(record, Ok(Outcome::Completed { path, steals: 0 }))
+                    let outcome = complete_at(&path, &stream_files(record));
+                    return self.finish_task(record, outcome);
                 }
             }
         }
@@ -154,29 +156,73 @@ impl DaemonCore {
     /// Make the final file of the downloaded streams. One stream is renamed to
     /// the final name; two wait for the join (Task 5).
     fn join_streams(&self, record: &Arc<Mutex<TaskRecord>>) {
-        let (files, final_path) = {
-            let rec = record.lock().unwrap();
-            let files: Option<Vec<PathBuf>> = rec
-                .video
-                .iter()
-                .flat_map(|plan| &plan.streams)
-                .map(|s| s.file.clone())
-                .collect();
-            let final_path = rec.directory.join(&rec.filename);
-            (files.unwrap_or_default(), final_path)
-        };
+        let files = stream_files(record);
         let outcome = match files.as_slice() {
             [] => Err(no_video()),
-            [only] => place_final(only, &final_path).map(|path| {
-                set_step(record, VideoStep::Done);
-                Outcome::Completed { path, steals: 0 }
-            }),
+            [_] => {
+                // The free name and `Done` are saved before the rename, so a
+                // restart in between finds the rename to finish, or finished.
+                let final_path = mark_done(record);
+                self.persist();
+                complete_at(&final_path, &files)
+            }
             _ => Err(Error::Video {
                 message: JOIN_LATER.to_string(),
                 transient: false,
             }),
         };
         self.finish_task(record, outcome);
+    }
+}
+
+/// Every stream's file, or none when one of them has none yet.
+fn stream_files(record: &Arc<Mutex<TaskRecord>>) -> Vec<PathBuf> {
+    let rec = record.lock().unwrap();
+    let files: Option<Vec<PathBuf>> = rec
+        .video
+        .iter()
+        .flat_map(|plan| &plan.streams)
+        .map(|s| s.file.clone())
+        .collect();
+    files.unwrap_or_default()
+}
+
+/// Pick the free final name, and record it with the step `Done`. Returns the
+/// final path.
+fn mark_done(record: &Arc<Mutex<TaskRecord>>) -> PathBuf {
+    let mut rec = record.lock().unwrap();
+    let final_path = free_final_path(&rec.directory.join(&rec.filename));
+    if let Some(name) = final_path.file_name() {
+        rec.filename = name.to_string_lossy().into_owned();
+    }
+    rec.output = Some(final_path.clone());
+    if let Some(plan) = rec.video.as_mut() {
+        plan.step = VideoStep::Done;
+    }
+    final_path
+}
+
+/// Finish a video whose final file is `final_path`: done when it is there,
+/// else its one stream is moved there.
+fn complete_at(final_path: &Path, stream_files: &[PathBuf]) -> Result<Outcome, Error> {
+    let done = || {
+        Ok(Outcome::Completed {
+            path: final_path.to_path_buf(),
+            steals: 0,
+        })
+    };
+    if final_path.is_file() {
+        return done();
+    }
+    match stream_files {
+        [only] if only.is_file() => {
+            std::fs::rename(only, final_path)?;
+            done()
+        }
+        _ => Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("cannot find {}", final_path.display()),
+        ))),
     }
 }
 
@@ -195,11 +241,14 @@ fn begin_video_run(record: &Arc<Mutex<TaskRecord>>) -> Result<(), Error> {
             .flatten()
             .map(|needed| (needed, plan.streams.len() > 1));
         let finished = finished_bytes(plan);
+        // The resumed stream reports what its state file already covers as
+        // downloaded; it was not downloaded by this run, so retries count on.
+        let covered = covered_in_current_stream(plan);
         rec.total_bytes = video_total(plan);
         rec.output = Some(rec.directory.join(&rec.filename));
         rec.progress_base = finished;
         rec.downloaded_bytes = finished;
-        rec.bytes_at_start = finished;
+        rec.bytes_at_start = finished + covered;
         (check, rec.directory.clone())
     };
     match check {
@@ -255,12 +304,6 @@ fn fresh_progress(rec: &TaskRecord) -> Arc<Progress> {
     ))
 }
 
-fn set_step(record: &Arc<Mutex<TaskRecord>>, step: VideoStep) {
-    if let Some(plan) = record.lock().unwrap().video.as_mut() {
-        plan.step = step;
-    }
-}
-
 /// Bytes of the streams finished before the current step.
 fn finished_bytes(plan: &VideoPlan) -> u64 {
     let finished = match plan.step {
@@ -269,6 +312,24 @@ fn finished_bytes(plan: &VideoPlan) -> u64 {
         VideoStep::Join | VideoStep::Done => plan.streams.len(),
     };
     plan.streams[..finished].iter().map(stream_bytes).sum()
+}
+
+/// Bytes the current stream's state file already covers; 0 without one.
+fn covered_in_current_stream(plan: &VideoPlan) -> u64 {
+    let VideoStep::Stream(index) = plan.step else {
+        return 0;
+    };
+    let Some(file) = plan.streams.get(index).and_then(|s| s.file.as_deref()) else {
+        return 0;
+    };
+    let Ok(state) = crate::state::load(&state_path(file)) else {
+        return 0;
+    };
+    let mut ranges = RangeSet::new();
+    for range in state.completed {
+        ranges.insert(range);
+    }
+    ranges.covered()
 }
 
 /// A finished stream's bytes: its size, else its file's length.
@@ -304,9 +365,9 @@ fn space_message(volume: &str, required: u64, available: u64, joined: bool) -> S
     )
 }
 
-/// Move `file` to `final_path`, or to the first free numbered name beside it
-/// (`Title (1).mp4`); nothing is overwritten.
-fn place_final(file: &Path, final_path: &Path) -> Result<PathBuf, Error> {
+/// `final_path`, or the first free numbered name beside it (`Title (1).mp4`),
+/// so nothing is overwritten.
+fn free_final_path(final_path: &Path) -> PathBuf {
     let folder = final_path.parent().unwrap_or(Path::new(""));
     let name = final_path
         .file_name()
@@ -318,8 +379,7 @@ fn place_final(file: &Path, final_path: &Path) -> Result<PathBuf, Error> {
         n += 1;
         candidate = folder.join(collision_name(&name, n));
     }
-    std::fs::rename(file, &candidate)?;
-    Ok(candidate)
+    candidate
 }
 
 fn no_video() -> Error {
@@ -367,6 +427,19 @@ mod tests {
         );
     }
 
+    use crate::daemon::task::MAX_AUTO_RETRIES;
+    use crate::probe::Validator;
+    use crate::ranges::ByteRange;
+    use crate::state::{save_atomic, State, STATE_VERSION};
+    use crate::video::{ChosenQuality, Container, StreamKind};
+
+    fn completed_path(outcome: Result<Outcome, Error>) -> PathBuf {
+        match outcome {
+            Ok(Outcome::Completed { path, .. }) => path,
+            other => panic!("not completed: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_taken_final_name_gets_a_number() {
         let dir = tempfile::tempdir().unwrap();
@@ -374,7 +447,8 @@ mod tests {
         std::fs::write(&stream, "new").unwrap();
         std::fs::write(dir.path().join("Clip.m4a"), "old").unwrap();
 
-        let placed = place_final(&stream, &dir.path().join("Clip.m4a")).unwrap();
+        let free = free_final_path(&dir.path().join("Clip.m4a"));
+        let placed = completed_path(complete_at(&free, std::slice::from_ref(&stream)));
 
         assert_eq!(placed, dir.path().join("Clip (1).m4a"));
         assert_eq!(std::fs::read_to_string(&placed).unwrap(), "new");
@@ -383,5 +457,98 @@ mod tests {
             "old"
         );
         assert!(!stream.exists());
+    }
+
+    #[test]
+    fn a_rename_cut_short_by_a_restart_finishes_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let stream = dir.path().join("Clip.f140.m4a");
+        let final_path = dir.path().join("Clip.m4a");
+        std::fs::write(&stream, "audio").unwrap();
+
+        // Stopped before the rename: the stream is moved now.
+        let placed = completed_path(complete_at(&final_path, std::slice::from_ref(&stream)));
+        assert_eq!(placed, final_path);
+        assert!(!stream.exists());
+
+        // Stopped after it: the final file is there, the stream is gone.
+        let again = completed_path(complete_at(&final_path, std::slice::from_ref(&stream)));
+        assert_eq!(again, final_path);
+        assert_eq!(std::fs::read_to_string(&final_path).unwrap(), "audio");
+
+        // Neither there: a plain failure, never a completed download.
+        let missing = dir.path().join("Other.m4a");
+        assert!(complete_at(&missing, std::slice::from_ref(&stream)).is_err());
+    }
+
+    /// A record half way through its one stream, with a state file covering `covered` bytes.
+    fn half_done_record(dir: &Path, covered: u64) -> TaskRecord {
+        let file = dir.join("Clip.f140.m4a");
+        let state = State {
+            version: STATE_VERSION,
+            url: "https://video.test/stream".to_string(),
+            final_url: "https://video.test/stream".to_string(),
+            total: 2 * covered,
+            validator: Validator::default(),
+            completed: vec![ByteRange::new(0, covered)],
+            output: file.clone(),
+            connections: Some(1),
+        };
+        save_atomic(&state_path(&file), &state).unwrap();
+        let mut rec = TaskRecord::new(
+            "dl_1".to_string(),
+            "https://video.test/watch".to_string(),
+            dir.to_path_buf(),
+            None,
+            1,
+        );
+        rec.filename = "Clip.m4a".to_string();
+        rec.video = Some(VideoPlan {
+            page_url: "https://video.test/watch".to_string(),
+            title: "Clip".to_string(),
+            duration_secs: None,
+            choice: Some(ChosenQuality {
+                label: "Audio only".to_string(),
+                container: Container::M4a,
+                choice_id: "audio-m4a".to_string(),
+            }),
+            choices: Vec::new(),
+            offered: Vec::new(),
+            default: 0,
+            streams: vec![StreamPlan {
+                format_id: "140".to_string(),
+                kind: StreamKind::Audio,
+                ext: "m4a".to_string(),
+                url: "https://video.test/stream".to_string(),
+                size: Some(2 * covered),
+                headers: Vec::new(),
+                request_bytes: None,
+                file: Some(file),
+            }],
+            step: VideoStep::Stream(0),
+            refreshes: Vec::new(),
+        });
+        rec
+    }
+
+    #[test]
+    fn bytes_a_resumed_stream_already_had_are_not_progress_of_this_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = Arc::new(Mutex::new(half_done_record(dir.path(), 500_000)));
+
+        begin_video_run(&record).unwrap();
+
+        let mut rec = record.lock().unwrap();
+        assert_eq!(rec.progress_base, 0);
+        assert_eq!(rec.bytes_at_start, 500_000);
+        // The resume reports the covered bytes; the ranges then keep failing.
+        rec.progress.downloaded.store(500_000, Ordering::Relaxed);
+        rec.status = DownloadStatus::Active;
+        rec.retries = MAX_AUTO_RETRIES - 1;
+        rec.apply_outcome(Err(Error::Protocol("status 500".into())));
+        assert_eq!(rec.retries, MAX_AUTO_RETRIES, "the retries count on");
+        rec.status = DownloadStatus::Active;
+        rec.apply_outcome(Err(Error::Protocol("status 500".into())));
+        assert_eq!(rec.status, DownloadStatus::Failed);
     }
 }
