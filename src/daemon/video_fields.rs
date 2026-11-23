@@ -56,6 +56,7 @@ mod tests {
             duration_secs: None,
             choice: None,
             choices: (1..=rows).map(choice).collect(),
+            offered: Vec::new(),
             default,
             streams: Vec::new(),
             step: VideoStep::Choosing,

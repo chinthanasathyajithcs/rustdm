@@ -202,6 +202,8 @@ pub struct RequestLog {
     pub user_agent: Option<String>,
     pub cookie: Option<String>,
     pub referer: Option<String>,
+    /// Every request header, names in lower case.
+    pub headers: Vec<(String, String)>,
 }
 
 pub struct TestServer {
@@ -367,6 +369,7 @@ impl TestServer {
                                 user_agent: user_agent_hdr,
                                 cookie: cookie_hdr,
                                 referer: referer_hdr,
+                                headers: all_headers.clone(),
                             };
 
                             reqs_lock.lock().unwrap().push(log_entry);

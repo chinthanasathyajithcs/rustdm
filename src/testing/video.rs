@@ -148,6 +148,8 @@ pub struct FormatSpec {
     pub has_drm: bool,
     /// Becomes `downloader_options.http_chunk_size`, which YouTube needs.
     pub http_chunk_size: Option<u64>,
+    /// Becomes `http_headers`; `browser_headers()` unless a test sets more.
+    pub http_headers: Vec<(String, String)>,
     pub url: String,
 }
 
@@ -161,6 +163,21 @@ pub struct PageSpec {
     /// `Some` makes the page a playlist of that many entries.
     pub playlist_count: Option<u32>,
     pub formats: Vec<FormatSpec>,
+}
+
+/// The headers yt-dlp lists on every format of a page.
+pub fn browser_headers() -> Vec<(String, String)> {
+    [
+        ("User-Agent", "Mozilla/5.0 (test) rustdm"),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ),
+        ("Accept-Language", "en-us,en;q=0.5"),
+        ("Sec-Fetch-Mode", "navigate"),
+    ]
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .into()
 }
 
 fn format_json(format: &FormatSpec) -> serde_json::Value {
@@ -178,12 +195,7 @@ fn format_json(format: &FormatSpec) -> serde_json::Value {
         "language_preference": format.language_preference,
         "format_note": format.format_note,
         "has_drm": format.has_drm,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (test) rustdm",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-us,en;q=0.5",
-            "Sec-Fetch-Mode": "navigate",
-        },
+        "http_headers": format.http_headers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
     });
     if let Some(chunk) = format.http_chunk_size {
         json["downloader_options"] = serde_json::json!({ "http_chunk_size": chunk });
@@ -234,6 +246,7 @@ fn video_format(base: &Url, id: &str, ext: &str, vcodec: &str, height: u32) -> F
         format_note: Some(format!("{height}p")),
         has_drm: false,
         http_chunk_size: Some(YOUTUBE_CHUNK_SIZE),
+        http_headers: browser_headers(),
         url: media_url(base, &format!("media/{id}")),
     }
 }
@@ -254,6 +267,7 @@ fn audio_format(base: &Url, id: &str, ext: &str, acodec: &str, preference: i32) 
         format_note: Some(if dub { "dub, medium" } else { "medium" }.to_string()),
         has_drm: false,
         http_chunk_size: Some(YOUTUBE_CHUNK_SIZE),
+        http_headers: browser_headers(),
         url: media_url(base, &format!("media/{id}")),
     }
 }

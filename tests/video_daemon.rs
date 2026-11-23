@@ -930,3 +930,69 @@ async fn resuming_a_chosen_video_gives_the_placeholder_again() {
     assert_eq!(s.lookups(), 1);
     assert_eq!(s.pages.requests().len(), requests);
 }
+
+#[tokio::test]
+async fn choosing_a_quality_keeps_its_streams_and_no_cookies() {
+    let s = setup().await;
+    let mut spec = youtube_like(&base());
+    for format in &mut spec.formats {
+        format.http_headers.extend(
+            [
+                ("Cookie", "sid=abc"),
+                ("Authorization", "Bearer abc"),
+                ("X-Foo", "bar"),
+            ]
+            .map(|(name, value)| (name.to_string(), value.to_string())),
+        );
+    }
+    s.answer(page_answer(&spec));
+    let mut params = s.params("/watch");
+    params.context = Some(cookie_context());
+    let added = s.core.add_download(params).unwrap();
+    wait_for(&s.core, &added.id, DownloadStatus::Choosing).await;
+
+    s.core
+        .choose_quality(choose(&added.id, "1080-mp4"))
+        .unwrap();
+
+    assert!(s.core.wait_until_settled(Duration::from_secs(5)).await);
+    let text = std::fs::read_to_string(s.data.path().join("queue.json")).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let plan = &saved["downloads"][0]["video"];
+    let streams = plan["streams"].as_array().unwrap();
+    let ids: Vec<&str> = streams
+        .iter()
+        .map(|s| s["format_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["137", "140"]);
+    let kinds: Vec<&str> = streams
+        .iter()
+        .map(|s| s["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["video", "audio"]);
+    assert_eq!(streams[0]["url"], "https://video.test/media/137");
+    assert_eq!(streams[1]["url"], "https://video.test/media/140");
+    assert_eq!(streams[0]["size"], 1080 * 40_000);
+    assert_eq!(streams[1]["size"], 3_000_000);
+    assert_eq!(streams[0]["ext"], "mp4");
+    assert_eq!(streams[1]["ext"], "m4a");
+    for stream in streams {
+        assert_eq!(stream["request_bytes"], 10_485_760);
+        let names: Vec<&str> = stream["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| pair[0].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["Accept", "Accept-Language", "Sec-Fetch-Mode", "User-Agent"]
+        );
+    }
+    assert_eq!(plan["offered"], serde_json::json!([]));
+    assert_eq!(plan["choices"], serde_json::json!([]));
+    assert!(
+        !text.contains("abc"),
+        "a cookie value reached the queue file"
+    );
+}

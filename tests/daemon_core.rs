@@ -776,6 +776,7 @@ fn saved_download(
             duration_secs: None,
             choice: None,
             choices: Vec::new(),
+            offered: Vec::new(),
             default: 0,
             streams: Vec::new(),
             step: VideoStep::Choosing,

@@ -71,6 +71,13 @@ async fn cookie_referer_and_user_agent_reach_the_probe_and_every_worker() {
     );
     for request in &requests {
         assert_eq!(cookie_of(request), Some("sid=abc123"), "{request:?}");
+        // The log keeps every header, names in lower case.
+        assert!(
+            request
+                .headers
+                .contains(&("cookie".to_string(), "sid=abc123".to_string())),
+            "{request:?}"
+        );
         assert_eq!(request.referer.as_deref(), Some(REFERER), "{request:?}");
         assert_eq!(
             request.user_agent.as_deref(),

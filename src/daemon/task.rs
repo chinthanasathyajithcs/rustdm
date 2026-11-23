@@ -541,6 +541,7 @@ mod tests {
             duration_secs: None,
             choice: None,
             choices: vec![choice("1080-mp4", "1080p"), choice("720-mp4", "720p")],
+            offered: Vec::new(),
             default: 1,
             streams: Vec::new(),
             step: VideoStep::Choosing,

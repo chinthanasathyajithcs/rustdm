@@ -15,8 +15,11 @@ use crate::video::errors::{
     failure_message, is_extractor_error, page_message, LookupFailure, NO_VIDEO,
 };
 use crate::video::info::PageInfo;
+use crate::video::streams::stream_plans;
 use crate::video::ytdlp::{look_up, LookupRequest};
-use crate::video::{site_name, ChosenQuality, Container, VideoChoices, VideoPlan, VideoStep};
+use crate::video::{
+    site_name, ChosenQuality, Container, StreamPlan, VideoChoices, VideoPlan, VideoStep,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -360,7 +363,7 @@ impl DaemonCore {
                     choices.choices.len(),
                     info.extractor_key.as_deref().unwrap_or("a web page")
                 );
-                rec.video = Some(plan_of(&rec.url, choices));
+                rec.video = Some(plan_of(&rec.url, choices, info));
                 rec.lookup_next = false;
                 match rec.quality {
                     Some(quality) => apply_choice(&mut rec, pick(choices, quality)),
@@ -513,13 +516,14 @@ fn outcome_of_page(info: PageInfo, page_url: &Url) -> LookupOutcome {
     }
 }
 
-fn plan_of(page_url: &str, choices: &VideoChoices) -> VideoPlan {
+fn plan_of(page_url: &str, choices: &VideoChoices, info: &PageInfo) -> VideoPlan {
     VideoPlan {
         page_url: page_url.to_string(),
         title: choices.title.clone(),
         duration_secs: choices.duration_secs,
         choice: None,
         choices: choices.choices.clone(),
+        offered: stream_plans(info),
         default: choices.default,
         streams: Vec::new(),
         step: VideoStep::Choosing,
@@ -572,13 +576,33 @@ pub(super) fn apply_choice(rec: &mut TaskRecord, index: usize) {
         rec.error_message = Some(NO_VIDEO.to_string());
         return;
     };
+    // The choice's streams, video first, each from what the lookup offered.
+    let streams: Option<Vec<StreamPlan>> = row
+        .streams
+        .iter()
+        .map(|pick| {
+            plan.offered
+                .iter()
+                .find(|offered| offered.format_id == pick.format_id)
+                .cloned()
+        })
+        .collect();
+    let Some(streams) = streams else {
+        // Offered streams missing (a plan from before they were kept).
+        rec.status = DownloadStatus::Failed;
+        rec.retry_at = None;
+        rec.error_message = Some(NO_VIDEO.to_string());
+        return;
+    };
     plan.choice = Some(ChosenQuality {
         label: row.label,
         container: row.container,
         choice_id: row.id,
     });
+    plan.streams = streams;
     plan.step = VideoStep::Stream(0);
     plan.choices = Vec::new();
+    plan.offered = Vec::new();
     let title = plan.title.clone();
     rec.filename = video_file_name(rec.requested_name.as_deref(), &title, row.container);
     fail_with_placeholder(rec);
@@ -663,7 +687,7 @@ mod tests {
             ],
             default: 0,
         };
-        rec.video = Some(plan_of(&rec.url, &choices));
+        rec.video = Some(plan_of(&rec.url, &choices, &PageInfo::default()));
         rec
     }
 
