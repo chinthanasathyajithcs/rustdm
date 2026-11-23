@@ -51,19 +51,49 @@ fn completed(outcome: Outcome) -> std::path::PathBuf {
     }
 }
 
-#[tokio::test]
-async fn a_capped_download_never_asks_for_more_than_the_cap() {
-    let body = pattern_bytes(FILE_SIZE);
+/// Download `size` bytes with `cap` and check every request kept to it.
+async fn assert_capped_download(size: u64, cap: Option<u64>, limit: u64, at_least: usize) {
+    let body = pattern_bytes(size);
     let srv = TestServer::start(body.clone(), Mode::Normal).await;
     let dir = tempfile::tempdir().unwrap();
 
-    let outcome = download(&build_client(), request(&srv, dir.path(), Some(CAP)))
+    let outcome = download(&build_client(), request(&srv, dir.path(), cap))
         .await
         .unwrap();
 
     let sizes = range_sizes(&srv.requests());
-    assert!(sizes.len() >= 10, "{sizes:?}");
-    assert!(sizes.iter().all(|&size| size <= CAP), "{sizes:?}");
+    assert!(sizes.len() >= at_least, "{sizes:?}");
+    assert!(sizes.iter().all(|&size| size <= limit), "{sizes:?}");
+    assert_eq!(std::fs::read(completed(outcome)).unwrap(), body);
+}
+
+#[tokio::test]
+async fn a_capped_download_never_asks_for_more_than_the_cap() {
+    assert_capped_download(FILE_SIZE, Some(CAP), CAP, 10).await;
+}
+
+#[tokio::test]
+async fn a_capped_download_on_two_lanes_never_asks_for_more_than_the_cap() {
+    assert_capped_download(TWO_LANE_FILE_SIZE, Some(CAP), CAP, 20).await;
+}
+
+#[tokio::test]
+async fn a_cap_of_zero_is_no_cap() {
+    assert_capped_download(FILE_SIZE, Some(0), FILE_SIZE, 1).await;
+}
+
+#[tokio::test]
+async fn refusals_spread_over_a_long_lane_do_not_fail_the_download() {
+    // Every second request is refused with 503: 20 requests of 50 kB give 10
+    // refusals, twice the 5 attempts a lane gets, but never two in a row.
+    let body = pattern_bytes(FILE_SIZE);
+    let srv = TestServer::start(body.clone(), Mode::RefuseEvery { every: 2 }).await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let outcome = download(&build_client(), request(&srv, dir.path(), Some(50_000)))
+        .await
+        .unwrap();
+
     assert_eq!(std::fs::read(completed(outcome)).unwrap(), body);
 }
 
@@ -84,7 +114,7 @@ async fn an_uncapped_download_asks_once_per_lane() {
 #[tokio::test]
 async fn a_capped_resume_keeps_the_cap() {
     let body = pattern_bytes(FILE_SIZE);
-    // Slow enough to cancel part-way: 2 connections at 400 kB/s each.
+    // Slow enough to cancel part-way: every request is sent at 400 kB/s.
     let srv = TestServer::start(
         body.clone(),
         Mode::Throttle {

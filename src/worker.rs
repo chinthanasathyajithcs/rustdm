@@ -59,8 +59,10 @@ pub async fn fetch_lane(
     max_request_bytes: Option<u64>,
 ) -> Result<LaneEnd, Error> {
     let mut current_offset = lane.cursor.load(Ordering::SeqCst);
-    // Failed attempts in a row. Any attempt that writes bytes resets it, so a
-    // connection that keeps dropping but keeps making progress never gives up.
+    // A cap of 0 would ask for no bytes: treat it as no cap.
+    let max_request_bytes = max_request_bytes.filter(|&cap| cap > 0);
+    // Failed attempts in a row. Any request that writes bytes resets it, so a
+    // connection that keeps failing but keeps making progress never gives up.
     let mut attempt = 0u32;
     let cancel = cancel.as_ref();
 
@@ -252,11 +254,14 @@ pub async fn fetch_lane(
             }
         }
 
+        // Whether it ended cleanly or dropped, a request that wrote bytes is progress.
+        if current_offset > offset_at_start {
+            attempt = 0;
+        }
         let target_end = lane.end.load(Ordering::SeqCst);
         if stream_failed && current_offset < target_end {
             // It was making progress: reconnect at once, with a fresh set of attempts.
             if current_offset > offset_at_start {
-                attempt = 0;
                 progress.note_retry(RetryCause::Dropped, std::time::Duration::ZERO);
                 continue;
             }

@@ -67,6 +67,12 @@ pub enum Mode {
         limit: usize,
         bytes_per_sec: u64,
     },
+    /// Every `every`-th data request (the probe not counted) gets 503 with
+    /// `Retry-After: 0`; the others are served like `Normal`. With `every` of 2
+    /// no two refusals come in a row.
+    RefuseEvery {
+        every: u32,
+    },
     /// Every `every`-th data request (the probe not counted) crawls at
     /// `bytes_per_sec`; the others go at `fast_bytes_per_sec`, or at once.
     SlowEvery {
@@ -694,6 +700,27 @@ impl TestServer {
                                     let header = partial_header(start, end, total, &current_etag, last_modified);
                                     let _ = socket.write_all(header.as_bytes()).await;
                                     write_throttled(&mut socket, &body_ref[start..=end], *bytes_per_sec).await;
+                                    let _ = socket.shutdown().await;
+                                    return;
+                                }
+                                Mode::RefuseEvery { every } => {
+                                    let refused = !is_probe
+                                        && (counter.fetch_add(1, Ordering::SeqCst) + 1).is_multiple_of((*every).max(1));
+                                    if refused {
+                                        let _ = socket
+                                            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                                            .await;
+                                        let _ = socket.shutdown().await;
+                                        return;
+                                    }
+                                    let total = body_ref.len();
+                                    let (start, end) = range_hdr
+                                        .as_deref()
+                                        .and_then(|r| parse_range(r, total))
+                                        .unwrap_or((0, total.saturating_sub(1)));
+                                    let header = partial_header(start, end, total, &current_etag, last_modified);
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    let _ = socket.write_all(&body_ref[start..=end]).await;
                                     let _ = socket.shutdown().await;
                                     return;
                                 }
