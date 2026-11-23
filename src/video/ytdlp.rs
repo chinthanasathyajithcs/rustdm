@@ -56,7 +56,9 @@ pub fn lookup_args(req: &LookupRequest, cookies_file: Option<&Path>) -> Vec<OsSt
         .map(OsString::from)
         .into();
     args.push(deno);
-    args.extend(["-J", "--no-playlist", "--no-warnings"].map(OsString::from));
+    // --flat-playlist: a playlist link is listed, not opened video by video
+    // (that took over the time limit on a 38-video playlist).
+    args.extend(["-J", "--no-playlist", "--flat-playlist", "--no-warnings"].map(OsString::from));
     if let Some(file) = cookies_file {
         args.push("--cookies".into());
         args.push(file.into());

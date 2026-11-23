@@ -117,6 +117,7 @@ async fn the_args_are_fixed_and_the_link_comes_after_the_double_dash() {
         "--no-js-runtimes",
         "-J",
         "--no-playlist",
+        "--flat-playlist",
         "--no-warnings",
     ] {
         assert!(args.iter().any(|a| a == flag), "{flag}");
@@ -154,13 +155,16 @@ async fn the_options_come_in_the_fixed_order() {
         deno.as_str(),
         "-J",
         "--no-playlist",
+        // A playlist is listed, not opened video by video: a 38-video
+        // playlist took over a minute without it and 2 s with it.
+        "--flat-playlist",
         "--no-warnings",
         "--cookies",
     ];
-    assert_eq!(args[..8], expected_start);
-    assert_eq!(args[8], file.to_string_lossy());
+    assert_eq!(args[..9], expected_start);
+    assert_eq!(args[9], file.to_string_lossy());
     assert_eq!(
-        args[9..],
+        args[10..],
         [
             "--user-agent",
             "Agent/1.0",
