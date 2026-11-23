@@ -803,6 +803,7 @@ impl DaemonCore {
                             connections,
                             progress,
                             cancel: Some(cancel_rx),
+                            max_request_bytes: None,
                         };
                         engine::download(&client, req).await
                     }

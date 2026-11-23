@@ -39,6 +39,7 @@ async fn fetch(client: &reqwest::Client, url: url::Url, connections: u32) -> Vec
         connections,
         progress: Arc::new(Progress::new()),
         cancel: None,
+        max_request_bytes: None,
     };
     match download(client, req).await.unwrap() {
         Outcome::Completed { path, .. } => std::fs::read(path).unwrap(),

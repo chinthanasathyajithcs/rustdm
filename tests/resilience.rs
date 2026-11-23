@@ -33,6 +33,7 @@ fn request(srv: &TestServer, name: &str, template: &str, dir: &Path) -> Download
         connections: 1,
         progress: Arc::new(Progress::new()),
         cancel: None,
+        max_request_bytes: None,
     }
 }
 
@@ -355,6 +356,7 @@ async fn cancelling_while_the_server_never_answers_stops_a_new_download_at_once(
         connections: 4,
         progress: Arc::new(Progress::new()),
         cancel: Some(cancel_rx),
+        max_request_bytes: None,
     };
     let running = tokio::spawn(async move { download(&build_client(), req).await });
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -465,6 +467,7 @@ async fn a_server_that_never_answers_is_noted_as_not_answering() {
         connections: 1,
         progress: Arc::clone(&progress),
         cancel: Some(cancel_rx),
+        max_request_bytes: None,
     };
     let running = tokio::spawn(async move { download(&impatient_client(), req).await });
 

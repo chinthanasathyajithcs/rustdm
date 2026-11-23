@@ -39,9 +39,11 @@ pub async fn fetch_range(
     progress: Arc<Progress>,
 ) -> Result<(), Error> {
     let lane = Arc::new(Lane::new(range.start, range.end, std::time::Instant::now()));
-    fetch_lane(client, url, validator, lane, part, progress, None, None)
-        .await
-        .map(|_| ())
+    fetch_lane(
+        client, url, validator, lane, part, progress, None, None, None,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -54,6 +56,7 @@ pub async fn fetch_lane(
     progress: Arc<Progress>,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
     crew: Option<&Crew>,
+    max_request_bytes: Option<u64>,
 ) -> Result<LaneEnd, Error> {
     let mut current_offset = lane.cursor.load(Ordering::SeqCst);
     // Failed attempts in a row. Any attempt that writes bytes resets it, so a
@@ -66,10 +69,13 @@ pub async fn fetch_lane(
             return Err(Error::Cancelled);
         }
 
-        let current_end = lane.end.load(Ordering::SeqCst);
-        if current_offset >= current_end {
+        let lane_end = lane.end.load(Ordering::SeqCst);
+        if current_offset >= lane_end {
             break;
         }
+        let current_end = max_request_bytes.map_or(lane_end, |cap| {
+            lane_end.min(current_offset.saturating_add(cap))
+        });
 
         if attempt >= MAX_SEGMENT_ATTEMPTS {
             return Err(Error::Protocol(format!(

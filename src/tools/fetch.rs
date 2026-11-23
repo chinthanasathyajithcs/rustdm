@@ -102,6 +102,7 @@ async fn run_engine(
             connections: DOWNLOAD_CONNECTIONS,
             progress: fetch.progress.clone(),
             cancel: fetch.cancel.clone(),
+            max_request_bytes: None,
         },
     )
     .await
