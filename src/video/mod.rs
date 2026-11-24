@@ -4,6 +4,7 @@
 pub mod choices;
 pub mod errors;
 pub mod headers;
+pub mod hls;
 pub mod info;
 pub mod join;
 pub mod refresh;
