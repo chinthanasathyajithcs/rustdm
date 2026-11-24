@@ -165,6 +165,7 @@ mod tests {
             step: crate::video::VideoStep::Stream(0),
             refreshes: Vec::new(),
             site: String::new(),
+            origin: crate::video::PlanOrigin::Page,
         };
 
         assert_eq!(plan_site(&plan), "example.com");

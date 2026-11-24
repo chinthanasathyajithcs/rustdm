@@ -191,6 +191,7 @@ mod tests {
             step: VideoStep::Choosing,
             refreshes: Vec::new(),
             site: String::new(),
+            origin: crate::video::PlanOrigin::Page,
         }
     }
 

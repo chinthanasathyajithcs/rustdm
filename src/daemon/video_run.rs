@@ -441,6 +441,7 @@ mod tests {
             step: VideoStep::Stream(0),
             refreshes: Vec::new(),
             site: String::new(),
+            origin: crate::video::PlanOrigin::Page,
         });
         rec
     }

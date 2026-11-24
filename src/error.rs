@@ -8,6 +8,9 @@ pub enum Error {
     LinkExpired { status: u16 },
     #[error("the link opened a web page, not a file")]
     WebPage,
+    /// The link is an HLS playlist: it is read as a video, not saved as a file.
+    #[error("the link is a video playlist")]
+    Playlist,
     #[error("server file changed between sessions")]
     FileChanged,
     #[error("protocol error: {0}")]

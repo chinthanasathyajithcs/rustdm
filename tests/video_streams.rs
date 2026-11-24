@@ -503,6 +503,7 @@ fn plan_of(streams: Vec<StreamPlan>) -> VideoPlan {
         step: VideoStep::Stream(0),
         refreshes: Vec::new(),
         site: String::new(),
+        origin: rustdm::video::PlanOrigin::Page,
     }
 }
 

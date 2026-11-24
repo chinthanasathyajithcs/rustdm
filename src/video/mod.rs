@@ -205,6 +205,20 @@ pub struct VideoPlan {
     /// The site's name for messages (`site_name`); empty in plans saved by 1a.
     #[serde(default)]
     pub site: String,
+    /// Where the plan came from; plans saved before 1c are pages.
+    #[serde(default)]
+    pub origin: PlanOrigin,
+}
+
+/// Where a video plan came from, which says how its links are refreshed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlanOrigin {
+    /// A page looked up by yt-dlp.
+    #[default]
+    Page,
+    /// A direct `.m3u8` link, read by rustdm.
+    Playlist,
 }
 
 /// The site's name for messages: yt-dlp's extractor name (any `Youtube...`
@@ -307,6 +321,7 @@ mod tests {
             step: VideoStep::Stream(0),
             refreshes: vec![1_700_000_000],
             site: "YouTube".to_string(),
+            origin: crate::video::PlanOrigin::Page,
         };
 
         let json = serde_json::to_string(&plan).unwrap();
