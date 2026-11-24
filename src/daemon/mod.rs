@@ -16,6 +16,7 @@ pub mod stall;
 pub mod task;
 pub mod tools_rpc;
 pub mod video_fields;
+mod video_join;
 mod video_refresh;
 pub(crate) mod video_run;
 pub(crate) mod video_task;
