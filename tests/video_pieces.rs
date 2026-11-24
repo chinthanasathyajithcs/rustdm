@@ -83,6 +83,16 @@ async fn setup(slow: bool) -> Setup {
             "/hls/a.m3u8".to_string(),
             playlist_route(media_playlist("a", AUDIO_PIECES, true, None)),
         ),
+        // The same video at other links, as a refresh gives it.
+        (
+            "/hls2/v.m3u8".to_string(),
+            playlist_route(media_playlist("v", VIDEO_PIECES, true, None)),
+        ),
+        // Another video: one piece more.
+        (
+            "/hls3/v.m3u8".to_string(),
+            playlist_route(media_playlist("v", VIDEO_PIECES + 1, true, None)),
+        ),
     ];
     for (stream, n) in [('v', VIDEO_PIECES), ('a', AUDIO_PIECES)] {
         for i in 0..n {
@@ -93,6 +103,8 @@ async fn setup(slow: bool) -> Setup {
                 route
             };
             routes.push((format!("/hls/{stream}/{i}"), route.clone()));
+            routes.push((format!("/hls2/{stream}/{i}"), route.clone()));
+            routes.push((format!("/hls3/{stream}/{i}"), route.clone()));
             routes.push((format!("/dash/{stream}/{i}"), route));
         }
     }
@@ -169,24 +181,44 @@ impl Setup {
     }
 
     fn answer(&self, formats: Vec<FormatSpec>) {
-        let spec = PageSpec {
-            title: "A test video".to_string(),
-            extractor_key: "Generic".to_string(),
-            duration: 32,
-            is_live: false,
-            playlist_count: None,
-            formats,
-        };
-        let response = ToolResponse {
-            stdout: video_page_json(&spec),
-            ..ToolResponse::default()
-        };
-        write_script(
-            &self.world.ytdlp.exe,
-            &ToolScript {
-                responses: vec![response],
-            },
-        );
+        self.answers(vec![formats]);
+    }
+
+    /// yt-dlp answers with these pages in turn, the last from then on.
+    fn answers(&self, pages: Vec<Vec<FormatSpec>>) {
+        let responses = pages
+            .into_iter()
+            .map(|formats| {
+                let spec = PageSpec {
+                    title: "A test video".to_string(),
+                    extractor_key: "Generic".to_string(),
+                    duration: 32,
+                    is_live: false,
+                    playlist_count: None,
+                    formats,
+                };
+                ToolResponse {
+                    stdout: video_page_json(&spec),
+                    ..ToolResponse::default()
+                }
+            })
+            .collect();
+        write_script(&self.world.ytdlp.exe, &ToolScript { responses });
+    }
+
+    /// The HLS pair with the video's playlist at `path`.
+    fn hls_formats_at(&self, path: &str) -> Vec<FormatSpec> {
+        let mut formats = self.hls_formats();
+        formats[0].url = self.link(path);
+        formats
+    }
+
+    fn asked(&self, path: &str) -> usize {
+        self.server
+            .requests()
+            .iter()
+            .filter(|r| r.path == path)
+            .count()
     }
 
     fn add(&self, quality: &str) -> DownloadSummary {
@@ -459,5 +491,42 @@ async fn a_single_hls_stream_is_remuxed() {
     assert!(
         args.last().unwrap().ends_with("A test video.mp4.joining"),
         "{args:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_piece_refreshes_through_yt_dlp() {
+    let s = setup(false).await;
+    s.server.set_route("/hls/v/5", Route::status(403));
+    s.answers(vec![s.hls_formats(), s.hls_formats_at("/hls2/v.m3u8")]);
+
+    let added = s.add("1080p");
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+
+    assert_eq!(s.file(TITLE_FILE), joined());
+    assert_eq!(
+        recorded_args(&s.world.ytdlp.exe).len(),
+        2,
+        "one lookup, one refresh"
+    );
+    for i in 0..2 {
+        assert_eq!(s.asked(&format!("/hls/v/{i}")), 1, "piece {i}");
+        assert_eq!(s.asked(&format!("/hls2/v/{i}")), 0, "piece {i} kept");
+    }
+    assert!(s.asked("/hls2/v/5") > 0);
+}
+
+#[tokio::test]
+async fn a_refresh_with_other_pieces_is_a_changed_video() {
+    let s = setup(false).await;
+    s.server.set_route("/hls/v/5", Route::status(403));
+    s.answers(vec![s.hls_formats(), s.hls_formats_at("/hls3/v.m3u8")]);
+
+    let added = s.add("1080p");
+    let failed = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+
+    assert_eq!(
+        failed.error_message.as_deref(),
+        Some("This video changed on the site; download it again to get the new version.")
     );
 }

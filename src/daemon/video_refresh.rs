@@ -8,11 +8,11 @@ use crate::engine::{Outcome, PauseReason};
 use crate::error::Error;
 use crate::ipc::protocol::DownloadStatus;
 use crate::video::refresh::{
-    may_refresh, note_refresh, refresh_limit_message, refreshed_streams, REFRESH_STEP,
-    VIDEO_CHANGED,
+    may_refresh, may_refresh_playlist, note_refresh, refresh_limit_message, refreshed_streams,
+    DIRECT_EXPIRED, REFRESH_STEP, VIDEO_CHANGED,
 };
 use crate::video::streams::stream_plans;
-use crate::video::{site_name, VideoPlan};
+use crate::video::{site_name, PlanOrigin, VideoPlan};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -37,7 +37,7 @@ impl DaemonCore {
         cancel: &watch::Receiver<bool>,
     ) -> Refreshed {
         let now = unix_now();
-        let id = {
+        let (id, from_playlist) = {
             let mut guard = record.lock().unwrap();
             let rec = &mut *guard;
             // The stream's file must be in the plan before it is run again,
@@ -46,13 +46,21 @@ impl DaemonCore {
             let Some(plan) = rec.video.as_mut() else {
                 return Refreshed::Settle(Error::Cancelled);
             };
-            if !may_refresh(&plan.refreshes, now) {
+            let from_playlist = plan.origin == PlanOrigin::Playlist;
+            if from_playlist && !may_refresh_playlist(&plan.refreshes, now) {
+                return Refreshed::Pause(DIRECT_EXPIRED.to_string());
+            }
+            if !from_playlist && !may_refresh(&plan.refreshes, now) {
                 return Refreshed::Pause(refresh_limit_message(&plan_site(plan)));
             }
             note_refresh(&mut plan.refreshes, now);
-            rec.id.clone()
+            (rec.id.clone(), from_playlist)
         };
         self.persist();
+        // A direct link has no page to ask: the next run reads its playlist again.
+        if from_playlist {
+            return Refreshed::Again;
+        }
         let cookies = self.cookies_for(&id);
         let found = self
             .look_up_video(record, cookies, REFRESH_STEP, cancel.clone())

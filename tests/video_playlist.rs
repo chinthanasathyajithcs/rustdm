@@ -16,6 +16,7 @@ const PIECES: usize = 5;
 const PIECE_BYTES: usize = 10_000;
 const UNREADABLE: &str = "This video's playlist couldn't be read.";
 const LIVE: &str = "This is a live stream; rustdm downloads finished videos only.";
+const EXPIRED: &str = "This video's link expired; add it again from its page.";
 
 const MASTER: &str = "#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",DEFAULT=YES,URI=\"aud/index.m3u8\"
@@ -120,6 +121,14 @@ impl Setup {
 
     fn file(&self, name: &str) -> Vec<u8> {
         std::fs::read(self.folder.path().join(name)).unwrap()
+    }
+
+    fn asked(&self, path: &str) -> usize {
+        self.server
+            .requests()
+            .iter()
+            .filter(|r| r.path == path)
+            .count()
     }
 
     fn asked_under(&self, prefix: &str) -> usize {
@@ -261,4 +270,44 @@ async fn a_requested_name_wins() {
     wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
 
     assert_eq!(names_in(s.folder.path()), ["Mine.mp4"]);
+}
+
+#[tokio::test]
+async fn an_expired_direct_link_fetches_its_playlist_again_once() {
+    let s = setup().await;
+    // Refused once, as a link that expired; fine once the playlist is read again.
+    s.server.set_route(
+        "/m/p3",
+        Route::ok(piece_body("single", 3)).failing_first(1, 403),
+    );
+
+    let added = s.add("/m/single.m3u8", None, None);
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+
+    assert_eq!(s.file("single.mp4"), stream_bytes("single"));
+    assert_eq!(s.asked("/m/p3"), 2);
+    s.no_lookup();
+}
+
+#[tokio::test]
+async fn a_still_refused_direct_link_pauses_and_r_tries_again() {
+    let s = setup().await;
+    s.server.set_route("/m/p3", Route::status(403));
+
+    let added = s.add("/m/single.m3u8", None, None);
+    let paused = wait_for(&s.core, &added.id, DownloadStatus::Paused).await;
+
+    assert_eq!(paused.error_message.as_deref(), Some(EXPIRED));
+    assert_eq!(
+        s.asked("/m/p3"),
+        2,
+        "the piece was tried after one fresh read"
+    );
+    s.no_lookup();
+
+    s.server
+        .set_route("/m/p3", Route::ok(piece_body("single", 3)));
+    s.core.resume_download(&added.id).unwrap();
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+    assert_eq!(s.file("single.mp4"), stream_bytes("single"));
 }

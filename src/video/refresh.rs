@@ -15,6 +15,9 @@ pub const REFRESH_STEP: &str = "Link expired, getting a fresh one…";
 pub const VIDEO_CHANGED: &str =
     "This video changed on the site; download it again to get the new version.";
 
+/// Why a direct playlist link paused: a fresh read of its playlist did not help.
+pub const DIRECT_EXPIRED: &str = "This video's link expired; add it again from its page.";
+
 /// Why a video paused after too many refreshes.
 pub fn refresh_limit_message(site: &str) -> String {
     format!("{site} keeps refusing this video's links; press r to try again later.")
@@ -32,6 +35,11 @@ fn in_window(time: u64, now_unix: u64) -> bool {
 pub fn may_refresh(refreshes: &[u64], now_unix: u64) -> bool {
     let recent = refreshes.iter().filter(|&&t| in_window(t, now_unix));
     recent.count() < REFRESH_LIMIT
+}
+
+/// A direct playlist link is read again once per window (spec 1c, section 8).
+pub fn may_refresh_playlist(refreshes: &[u64], now_unix: u64) -> bool {
+    !refreshes.iter().any(|&t| in_window(t, now_unix))
 }
 
 /// Count a refresh at `now_unix`, forgetting the ones outside the window.
@@ -122,6 +130,13 @@ mod tests {
         assert!(!may_refresh(&refreshes, T + 30));
         assert!(may_refresh(&refreshes, T + 601));
         assert!(may_refresh(&refreshes[..2], T + 30));
+    }
+
+    #[test]
+    fn a_playlist_link_is_fetched_again_once_a_window() {
+        assert!(may_refresh_playlist(&[], T));
+        assert!(!may_refresh_playlist(&[T], T + 30));
+        assert!(may_refresh_playlist(&[T], T + 601));
     }
 
     #[test]
