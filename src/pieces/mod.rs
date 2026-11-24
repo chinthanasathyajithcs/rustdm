@@ -32,3 +32,6 @@ pub struct Key {
     pub url: Url,
     pub iv: [u8; 16],
 }
+
+mod store;
+pub use store::{fingerprint, leftovers, may_start, state_path, waiting_dir, PieceStore};
