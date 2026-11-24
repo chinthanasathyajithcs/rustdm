@@ -1,6 +1,8 @@
 use crate::daemon::queue_store::SavedDownload;
 use crate::daemon::speed::SpeedMeter;
-use crate::daemon::video_fields::{read_saved_quality, summarize};
+use crate::daemon::video_fields::{
+    forget_stream_files, read_saved_quality, record_stream_file, summarize, video_leftovers,
+};
 use crate::engine::{Outcome, PauseReason, Progress};
 use crate::error::{
     is_sign_in_status, link_status_message, sign_in_expired_message, web_page_with_cookies_message,
@@ -13,7 +15,7 @@ use crate::state::{part_path, state_path};
 use crate::tools::Tool;
 use crate::video::{Quality, VideoPlan};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -101,6 +103,11 @@ pub struct TaskRecord {
     /// user's resume) goes straight to the lookup without the link check.
     /// Not saved.
     pub lookup_next: bool,
+    /// How far ffmpeg is in joining a video's streams, while it runs (255 until
+    /// it says). Not saved.
+    pub join_percent: Option<Arc<AtomicU8>>,
+    /// Bytes of a video's streams before the one `progress` counts. Not saved.
+    pub progress_base: u64,
 }
 
 impl TaskRecord {
@@ -157,6 +164,8 @@ impl TaskRecord {
             step: None,
             lookup_progress: None,
             lookup_next: false,
+            join_percent: None,
+            progress_base: 0,
         }
     }
 
@@ -309,6 +318,12 @@ impl TaskRecord {
     /// Copy the total size and output path from the engine once it knows them.
     /// Returns true if anything changed.
     pub fn sync_from_progress(&mut self) -> bool {
+        // A video's total comes from its plan and its output is the final
+        // name; the engine's file is the current stream's.
+        if let Some(plan) = self.video.as_mut() {
+            let file = self.progress.output.lock().unwrap().clone();
+            return record_stream_file(plan, file);
+        }
         let mut changed = false;
         if self.total_bytes.is_none() {
             let total = self.progress.total.load(Ordering::Relaxed);
@@ -330,7 +345,19 @@ impl TaskRecord {
         changed
     }
 
-    pub fn delete_partial_files(&self) {
+    pub fn delete_partial_files(&mut self) {
+        if let Some(plan) = self.video.as_mut() {
+            let final_path = self
+                .output
+                .clone()
+                .unwrap_or_else(|| self.directory.join(&self.filename));
+            for file in video_leftovers(plan, &final_path) {
+                let _ = std::fs::remove_file(file);
+            }
+            // The streams are gone, so a resume starts them over.
+            forget_stream_files(plan);
+            return;
+        }
         if let Some(output) = &self.output {
             let _ = std::fs::remove_file(part_path(output));
             let _ = std::fs::remove_file(state_path(output));
@@ -349,7 +376,12 @@ impl TaskRecord {
     /// was stopped: cancelled, paused, or queued (sent back to the queue to free a slot).
     pub fn apply_outcome(&mut self, outcome: Result<Outcome, Error>) {
         self.sync_from_progress();
-        self.downloaded_bytes = self.progress.downloaded.load(Ordering::Relaxed);
+        self.downloaded_bytes =
+            self.progress_base + self.progress.downloaded.load(Ordering::Relaxed);
+        if self.video.is_some() {
+            // The stream's step text means nothing once the run has ended.
+            self.step = None;
+        }
         self.speed_bps = 0;
         self.eta_secs = None;
         self.cancel_tx = None;
@@ -459,7 +491,7 @@ impl TaskRecord {
     /// Update speed and time left from the engine's byte count at `now`.
     /// Returns the byte count.
     pub fn measure(&mut self, now: Instant) -> u64 {
-        let bytes = self.progress.downloaded.load(Ordering::Relaxed);
+        let bytes = self.progress_base + self.progress.downloaded.load(Ordering::Relaxed);
         if bytes != self.downloaded_bytes {
             self.moved_at = now;
         }
@@ -541,10 +573,12 @@ mod tests {
             duration_secs: None,
             choice: None,
             choices: vec![choice("1080-mp4", "1080p"), choice("720-mp4", "720p")],
+            offered: Vec::new(),
             default: 1,
             streams: Vec::new(),
             step: VideoStep::Choosing,
             refreshes: Vec::new(),
+            site: String::new(),
         }
     }
 

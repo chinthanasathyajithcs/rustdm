@@ -8,7 +8,7 @@
 use crate::engine::{client_builder, Timeouts};
 use crate::error::Error;
 use reqwest::cookie::Jar;
-use reqwest::header::{HeaderMap, HeaderValue, REFERER};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, REFERER};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -270,10 +270,11 @@ pub fn seed_jar(ctx: &RequestContext, now_unix: i64) -> Arc<Jar> {
     Arc::new(jar)
 }
 
-/// A client for one download: the usual timeouts, a jar seeded from the
-/// browser's cookies, and the browser's Referer and User-Agent on every request.
-/// `ctx` should have passed [`RequestContext::validated`].
-pub fn client_for(ctx: &RequestContext, timeouts: Timeouts) -> Result<reqwest::Client, Error> {
+/// The shared client's settings with `ctx`'s cookie jar, User-Agent and Referer added.
+fn browser_builder(
+    ctx: &RequestContext,
+    timeouts: Timeouts,
+) -> Result<reqwest::ClientBuilder, Error> {
     let mut builder = client_builder(timeouts).cookie_provider(seed_jar(ctx, now_unix()));
     if let Some(user_agent) = &ctx.user_agent {
         builder = builder.user_agent(header_value(user_agent, "user agent")?);
@@ -284,7 +285,49 @@ pub fn client_for(ctx: &RequestContext, timeouts: Timeouts) -> Result<reqwest::C
         // Without this, reqwest would swap in the previous URL after a redirect.
         builder = builder.default_headers(headers).referer(false);
     }
-    builder.build().map_err(Error::Http)
+    Ok(builder)
+}
+
+/// A client for one download: the usual timeouts, a jar seeded from the
+/// browser's cookies, and the browser's Referer and User-Agent on every request.
+/// `ctx` should have passed [`RequestContext::validated`].
+pub fn client_for(ctx: &RequestContext, timeouts: Timeouts) -> Result<reqwest::Client, Error> {
+    browser_builder(ctx, timeouts)?.build().map_err(Error::Http)
+}
+
+/// A client for one video stream: built like [`client_for`] (or the shared client
+/// when `ctx` is `None`), then `headers` become default headers. A stream's own
+/// User-Agent and Referer replace the browser's, because its address was made
+/// for another client. A header that cannot be sent is skipped; the caller has
+/// already filtered `headers` to an allowlist.
+pub fn stream_client(
+    ctx: Option<&RequestContext>,
+    headers: &[(String, String)],
+    timeouts: Timeouts,
+) -> Result<reqwest::Client, Error> {
+    let mut builder = match ctx {
+        Some(ctx) => browser_builder(ctx, timeouts)?,
+        None => client_builder(timeouts),
+    };
+    let mut stream_headers = HeaderMap::new();
+    for (name, value) in headers {
+        let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) else {
+            continue;
+        };
+        stream_headers.insert(name, value);
+    }
+    if stream_headers.contains_key(REFERER) {
+        // Without this, reqwest would swap in the previous URL after a redirect.
+        builder = builder.referer(false);
+    }
+    // Set after the browser's headers: each key here replaces the browser's.
+    builder
+        .default_headers(stream_headers)
+        .build()
+        .map_err(Error::Http)
 }
 
 fn header_value(text: &str, what: &str) -> Result<HeaderValue, Error> {

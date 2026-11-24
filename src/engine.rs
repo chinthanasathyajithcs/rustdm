@@ -132,6 +132,8 @@ pub struct DownloadRequest {
     pub connections: u32,
     pub progress: Arc<Progress>,
     pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Ask for at most this many bytes per HTTP request (some sites refuse more).
+    pub max_request_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -297,6 +299,7 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
             Some(&state_p),
             Some(&initial_state),
             req.cancel.clone(),
+            req.max_request_bytes,
         )
         .await
     } else {
@@ -363,7 +366,15 @@ pub async fn resume(
     state_path: &Path,
     url_override: Option<url::Url>,
 ) -> Result<Outcome, Error> {
-    resume_with_options(client, state_path, url_override, None, None).await
+    resume_with(
+        client,
+        state_path,
+        ResumeOptions {
+            url_override,
+            ..ResumeOptions::default()
+        },
+    )
+    .await
 }
 
 pub async fn resume_with_options(
@@ -373,6 +384,38 @@ pub async fn resume_with_options(
     custom_progress: Option<Arc<Progress>>,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<Outcome, Error> {
+    let opts = ResumeOptions {
+        url_override,
+        progress: custom_progress,
+        cancel,
+        max_request_bytes: None,
+    };
+    resume_with(client, state_path, opts).await
+}
+
+/// What a resume may change about how the download carries on.
+#[derive(Default)]
+pub struct ResumeOptions {
+    /// Fetch from this link instead of the saved one.
+    pub url_override: Option<url::Url>,
+    /// Report into this progress instead of a fresh one.
+    pub progress: Option<Arc<Progress>>,
+    pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Ask for at most this many bytes per HTTP request.
+    pub max_request_bytes: Option<u64>,
+}
+
+pub async fn resume_with(
+    client: &reqwest::Client,
+    state_path: &Path,
+    opts: ResumeOptions,
+) -> Result<Outcome, Error> {
+    let ResumeOptions {
+        url_override,
+        progress: custom_progress,
+        cancel,
+        max_request_bytes,
+    } = opts;
     let state = state::load(state_path)?;
 
     let part_p = state::part_path(&state.output);
@@ -446,6 +489,7 @@ pub async fn resume_with_options(
             Some(state_path),
             Some(&state),
             cancel,
+            max_request_bytes,
         )
         .await
     } else {
@@ -568,6 +612,7 @@ async fn download_ranges(
     state_file_path: Option<&Path>,
     state_template: Option<&State>,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    max_request_bytes: Option<u64>,
 ) -> Result<u32, Error> {
     // Lanes are added as workers start them, so stealing only splits work in progress.
     let lanes: SharedLanes = Arc::new(std::sync::RwLock::new(Vec::with_capacity(segments.len())));
@@ -663,6 +708,7 @@ async fn download_ranges(
                     Arc::clone(&prog_clone),
                     cancel_clone.clone(),
                     Some(&crew),
+                    max_request_bytes,
                 )
                 .await?;
                 let left = end == LaneEnd::Refused && hand_back(&lane, &pending_clone, &crew);

@@ -410,6 +410,7 @@ async fn download_foreground(url: &str, out: String, connections: u32) -> CliRes
         progress: Arc::clone(&progress),
         cancel: Some(pause_on_ctrl_c()),
         file_name: None,
+        max_request_bytes: None,
     };
 
     let printer = spawn_progress_printer(progress);

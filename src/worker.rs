@@ -39,9 +39,11 @@ pub async fn fetch_range(
     progress: Arc<Progress>,
 ) -> Result<(), Error> {
     let lane = Arc::new(Lane::new(range.start, range.end, std::time::Instant::now()));
-    fetch_lane(client, url, validator, lane, part, progress, None, None)
-        .await
-        .map(|_| ())
+    fetch_lane(
+        client, url, validator, lane, part, progress, None, None, None,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -54,10 +56,13 @@ pub async fn fetch_lane(
     progress: Arc<Progress>,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
     crew: Option<&Crew>,
+    max_request_bytes: Option<u64>,
 ) -> Result<LaneEnd, Error> {
     let mut current_offset = lane.cursor.load(Ordering::SeqCst);
-    // Failed attempts in a row. Any attempt that writes bytes resets it, so a
-    // connection that keeps dropping but keeps making progress never gives up.
+    // A cap of 0 would ask for no bytes: treat it as no cap.
+    let max_request_bytes = max_request_bytes.filter(|&cap| cap > 0);
+    // Failed attempts in a row. Any request that writes bytes resets it, so a
+    // connection that keeps failing but keeps making progress never gives up.
     let mut attempt = 0u32;
     let cancel = cancel.as_ref();
 
@@ -66,10 +71,13 @@ pub async fn fetch_lane(
             return Err(Error::Cancelled);
         }
 
-        let current_end = lane.end.load(Ordering::SeqCst);
-        if current_offset >= current_end {
+        let lane_end = lane.end.load(Ordering::SeqCst);
+        if current_offset >= lane_end {
             break;
         }
+        let current_end = max_request_bytes.map_or(lane_end, |cap| {
+            lane_end.min(current_offset.saturating_add(cap))
+        });
 
         if attempt >= MAX_SEGMENT_ATTEMPTS {
             return Err(Error::Protocol(format!(
@@ -246,11 +254,14 @@ pub async fn fetch_lane(
             }
         }
 
+        // Whether it ended cleanly or dropped, a request that wrote bytes is progress.
+        if current_offset > offset_at_start {
+            attempt = 0;
+        }
         let target_end = lane.end.load(Ordering::SeqCst);
         if stream_failed && current_offset < target_end {
             // It was making progress: reconnect at once, with a fresh set of attempts.
             if current_offset > offset_at_start {
-                attempt = 0;
                 progress.note_retry(RetryCause::Dropped, std::time::Duration::ZERO);
                 continue;
             }

@@ -1,9 +1,9 @@
-//! The whole of `rdm-test-tool`, the stand-in for yt-dlp and deno in tests,
+//! The whole of `rdm-test-tool`, the stand-in for yt-dlp, deno and ffmpeg in tests,
 //! and the types its scripts and logs use.
 //!
 //! This file uses only std, serde and serde_json: `src/bin/rdm-test-tool.rs`
 //! includes it with `#[path]` instead of linking the rustdm library, which
-//! keeps the program small. Each video test world installs two copies of it.
+//! keeps the program small. Each video test world installs three copies of it.
 //!
 //! The stand-in finds its script, its call counter and its args log next to
 //! its own exe, never in the environment: tests in one process run in
@@ -41,6 +41,9 @@ pub struct ToolResponse {
     pub sleep_ms: u64,
     /// Print `stdout` this many times (when more than 1), for the oversize test.
     pub stdout_repeat: u64,
+    /// Play ffmpeg: write every `-i` file's bytes, one after the other, into
+    /// the last argument, and print `stdout`, before waiting.
+    pub join_inputs: bool,
 }
 
 /// What the stand-in saw in the file named by `--cookies`, when it was called.
@@ -70,7 +73,7 @@ pub fn exe_dir(exe: &Path) -> &Path {
 pub fn run_test_tool() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().expect("the test tool knows where it is");
-    if args == ["--version"] {
+    if args == ["--version"] || args == ["-version"] {
         let version = tail_of(&exe, VERSION_TAIL_BYTES).and_then(|bytes| version_in(&bytes));
         return match version {
             Some(version) => {
@@ -83,15 +86,43 @@ pub fn run_test_tool() -> i32 {
     let dir = exe_dir(&exe);
     record_call(dir, &args);
     let response = next_response(dir);
+    // A running ffmpeg has made its file and reported progress before it is done.
+    if response.join_inputs {
+        write_joined(&args);
+        write_output(&response);
+    }
     std::thread::sleep(std::time::Duration::from_millis(response.sleep_ms));
+    if !response.join_inputs {
+        write_output(&response);
+    }
+    let _ = std::io::stderr().write_all(response.stderr.as_bytes());
+    response.exit_code
+}
+
+fn write_output(response: &ToolResponse) {
     // The reader may stop reading early (an oversize test); that is not an error here.
     let mut stdout = std::io::stdout().lock();
     for _ in 0..response.stdout_repeat.max(1) {
         let _ = stdout.write_all(response.stdout.as_bytes());
     }
     let _ = stdout.flush();
-    let _ = std::io::stderr().write_all(response.stderr.as_bytes());
-    response.exit_code
+}
+
+/// What ffmpeg would write: the `-i` files joined end to end, into the last
+/// argument. A failed write is left to show as a missing file.
+fn write_joined(args: &[String]) {
+    let Some(output) = args.last() else {
+        return;
+    };
+    let inputs = args
+        .windows(2)
+        .filter(|pair| pair[0] == "-i")
+        .map(|pair| &pair[1]);
+    let mut joined = Vec::new();
+    for input in inputs {
+        joined.extend(std::fs::read(input).unwrap_or_default());
+    }
+    let _ = std::fs::write(output, joined);
 }
 
 /// The last `bytes` of the file at `path`, where the version and an embedded

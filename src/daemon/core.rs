@@ -2,6 +2,7 @@ use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
 use crate::daemon::secrets::SecretStore;
 use crate::daemon::task::TaskRecord;
+use crate::daemon::video_run;
 use crate::daemon::video_task::{self, ExtractorUpdateGate};
 use crate::daemon::{defaults, fair_share, queue_order, sign_in};
 use crate::engine::{self, build_client, DownloadRequest, Outcome, Progress};
@@ -156,6 +157,9 @@ pub struct DaemonCore {
     pub(super) secrets: Option<Arc<SecretStore>>,
     /// Lets extractor errors ask for a newer yt-dlp once an hour, daemon-wide.
     pub(super) extractor_gate: Arc<ExtractorUpdateGate>,
+    /// Final names that running video downloads have claimed but not yet
+    /// written, so two of them never take the same one.
+    pub(super) claimed_names: Arc<Mutex<std::collections::HashSet<std::path::PathBuf>>>,
 }
 
 impl Default for DaemonCore {
@@ -256,6 +260,7 @@ impl DaemonCore {
             tools,
             secrets,
             extractor_gate: Arc::default(),
+            claimed_names: Arc::default(),
         };
         if restored_changes {
             core.persist();
@@ -508,7 +513,13 @@ impl DaemonCore {
                 DownloadStatus::Paused
                 | DownloadStatus::Failed
                 | DownloadStatus::Retrying
-                | DownloadStatus::Cancelled => task.requeue(),
+                | DownloadStatus::Cancelled => {
+                    task.requeue();
+                    // The user's `r` lets a video's links be refreshed again.
+                    if let Some(plan) = task.video.as_mut() {
+                        plan.refreshes.clear();
+                    }
+                }
             }
         }
 
@@ -803,6 +814,7 @@ impl DaemonCore {
                             connections,
                             progress,
                             cancel: Some(cancel_rx),
+                            max_request_bytes: None,
                         };
                         engine::download(&client, req).await
                     }
@@ -879,6 +891,7 @@ impl DaemonCore {
                 }
                 changed |= task.sync_from_progress();
                 video_task::refresh_step(&mut task);
+                video_run::refresh_stream_step(&mut task);
                 let current_bytes = task.measure(now);
                 let speed = task.speed_bps;
 
@@ -927,7 +940,7 @@ impl DaemonCore {
                     active_connections,
                     segments,
                     lanes,
-                    stall: if video_task::is_looking_up(&task) {
+                    stall: if video_task::is_waiting_on_video_work(&task) {
                         None
                     } else {
                         task.stall(now)

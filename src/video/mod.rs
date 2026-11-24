@@ -3,7 +3,11 @@
 
 pub mod choices;
 pub mod errors;
+pub mod headers;
 pub mod info;
+pub mod join;
+pub mod refresh;
+pub mod streams;
 pub mod ytdlp;
 
 use info::PageInfo;
@@ -136,6 +140,9 @@ pub enum VideoStep {
 pub struct StreamPlan {
     pub format_id: String,
     pub kind: StreamKind,
+    /// The stream file's ending: `mp4`, `m4a`, `webm`.
+    #[serde(default)]
+    pub ext: String,
     /// Expires; refreshed when the server refuses it.
     pub url: String,
     pub size: Option<u64>,
@@ -160,6 +167,9 @@ pub struct VideoPlan {
     pub choice: Option<ChosenQuality>,
     /// Kept only while choosing; emptied after the choice.
     pub choices: Vec<VideoChoice>,
+    /// Every stream the choices use; kept only while choosing, emptied by the choice.
+    #[serde(default)]
+    pub offered: Vec<StreamPlan>,
     /// Index into `choices` of the row to offer first.
     #[serde(default)]
     pub default: usize,
@@ -168,6 +178,9 @@ pub struct VideoPlan {
     pub step: VideoStep,
     /// Unix seconds of recent link refreshes.
     pub refreshes: Vec<u64>,
+    /// The site's name for messages (`site_name`); empty in plans saved by 1a.
+    #[serde(default)]
+    pub site: String,
 }
 
 /// The site's name for messages: yt-dlp's extractor name (any `Youtube...`
@@ -252,10 +265,12 @@ mod tests {
                 choice_id: "1080-mp4".to_string(),
             }),
             choices: vec![choice],
+            offered: Vec::new(),
             default: 0,
             streams: vec![StreamPlan {
                 format_id: "137".to_string(),
                 kind: StreamKind::Video,
+                ext: "mp4".to_string(),
                 url: "https://video.test/media/137".to_string(),
                 size: Some(1_000),
                 headers: vec![("User-Agent".to_string(), "x".to_string())],
@@ -264,6 +279,7 @@ mod tests {
             }],
             step: VideoStep::Stream(0),
             refreshes: vec![1_700_000_000],
+            site: "YouTube".to_string(),
         };
 
         let json = serde_json::to_string(&plan).unwrap();

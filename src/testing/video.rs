@@ -1,6 +1,7 @@
-//! Test helpers for the video features: a stand-in for yt-dlp (and deno) that
+//! Test helpers for the video features: a stand-in for yt-dlp (deno and ffmpeg) that
 //! plays scripted answers, a pretend yt-dlp `-J` page, and a world that has
-//! installed the stand-in through the real tools manager.
+//! installed the stand-in through the real tools manager. Its ffmpeg joins the
+//! inputs it is given end to end, until a test scripts it otherwise.
 //!
 //! The stand-in is the `rdm-test-tool` program; its code is in `tool_program`.
 
@@ -11,6 +12,7 @@ use super::tool_program::{
 pub use super::tool_program::{run_test_tool, CookiesSeen, ToolResponse, ToolScript};
 use super::{Route, TestServer};
 use crate::engine::build_client;
+use crate::tools::pins::Pin;
 use crate::tools::{FetchCtx, Freshness, Installed, Tool, ToolStore};
 use std::path::Path;
 use std::sync::Arc;
@@ -21,6 +23,12 @@ use url::Url;
 pub const WORLD_YTDLP_VERSION: &str = "2026.11.10";
 /// The deno version `VideoWorld` installs.
 pub const WORLD_DENO_VERSION: &str = "2.9.7";
+
+/// The ffmpeg version `VideoWorld` installs.
+pub const WORLD_FFMPEG_VERSION: &str = "7.1";
+/// The folder the stand-in ffmpeg's archive keeps its program in, below the
+/// one folder the pin strips.
+const FFMPEG_ARCHIVE_FOLDER: &str = "ffmpeg-test";
 
 /// Make the stand-in installed at `exe` play `script`, starting from its first answer.
 pub fn write_script(exe: &Path, script: &ToolScript) {
@@ -87,6 +95,7 @@ pub struct VideoWorld {
     pub store: Arc<ToolStore>,
     pub ytdlp: Installed,
     pub deno: Installed,
+    pub ffmpeg: Installed,
     _dir: TempDir,
 }
 
@@ -104,6 +113,7 @@ impl VideoWorld {
         server.set_route(&format!("/{}", pin.path), Route::ok(archive));
         let mut sources = test_sources(&server);
         sources.pins.insert(Tool::Deno, pin);
+        sources.pins.insert(Tool::Ffmpeg, ffmpeg_pin(&server));
 
         let dir = tempfile::tempdir().expect("a temporary folder");
         let store = Arc::new(
@@ -112,14 +122,43 @@ impl VideoWorld {
         );
         let ytdlp = ensure(&store, Tool::YtDlp).await;
         let deno = ensure(&store, Tool::Deno).await;
+        let ffmpeg = ensure(&store, Tool::Ffmpeg).await;
         VideoWorld {
             server,
             store,
             ytdlp,
             deno,
+            ffmpeg,
             _dir: dir,
         }
     }
+}
+
+/// Serve the stand-in as an ffmpeg build laid out like the real pin: the
+/// program is `bin/ffmpeg` inside one folder. It joins its inputs from its
+/// first call.
+fn ffmpeg_pin(server: &TestServer) -> Pin {
+    let name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let joining = ToolScript {
+        responses: vec![ToolResponse {
+            join_inputs: true,
+            ..ToolResponse::default()
+        }],
+    };
+    let program = test_tool_program_scripted(WORLD_FFMPEG_VERSION, &joining);
+    let inside = format!("{FFMPEG_ARCHIVE_FOLDER}/bin/{name}");
+    let archive = zip_bytes_stored(&[(inside.as_str(), program)]);
+    let exe = format!("bin/{name}");
+    let mut pin = zip_pin(&archive, WORLD_FFMPEG_VERSION, 1, &[&exe], &exe, "bin");
+    // Beside the deno archive, which `zip_pin` also names `pins/tool.zip`.
+    pin.path = "pins/ffmpeg.zip".to_string();
+    pin.asset = "ffmpeg.zip".to_string();
+    server.set_route(&format!("/{}", pin.path), Route::ok(archive));
+    pin
 }
 
 async fn ensure(store: &ToolStore, tool: Tool) -> Installed {
@@ -148,6 +187,8 @@ pub struct FormatSpec {
     pub has_drm: bool,
     /// Becomes `downloader_options.http_chunk_size`, which YouTube needs.
     pub http_chunk_size: Option<u64>,
+    /// Becomes `http_headers`; `browser_headers()` unless a test sets more.
+    pub http_headers: Vec<(String, String)>,
     pub url: String,
 }
 
@@ -161,6 +202,21 @@ pub struct PageSpec {
     /// `Some` makes the page a playlist of that many entries.
     pub playlist_count: Option<u32>,
     pub formats: Vec<FormatSpec>,
+}
+
+/// The headers yt-dlp lists on every format of a page.
+pub fn browser_headers() -> Vec<(String, String)> {
+    [
+        ("User-Agent", "Mozilla/5.0 (test) rustdm"),
+        (
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ),
+        ("Accept-Language", "en-us,en;q=0.5"),
+        ("Sec-Fetch-Mode", "navigate"),
+    ]
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .into()
 }
 
 fn format_json(format: &FormatSpec) -> serde_json::Value {
@@ -178,12 +234,7 @@ fn format_json(format: &FormatSpec) -> serde_json::Value {
         "language_preference": format.language_preference,
         "format_note": format.format_note,
         "has_drm": format.has_drm,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (test) rustdm",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-us,en;q=0.5",
-            "Sec-Fetch-Mode": "navigate",
-        },
+        "http_headers": format.http_headers.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
     });
     if let Some(chunk) = format.http_chunk_size {
         json["downloader_options"] = serde_json::json!({ "http_chunk_size": chunk });
@@ -234,6 +285,7 @@ fn video_format(base: &Url, id: &str, ext: &str, vcodec: &str, height: u32) -> F
         format_note: Some(format!("{height}p")),
         has_drm: false,
         http_chunk_size: Some(YOUTUBE_CHUNK_SIZE),
+        http_headers: browser_headers(),
         url: media_url(base, &format!("media/{id}")),
     }
 }
@@ -254,6 +306,7 @@ fn audio_format(base: &Url, id: &str, ext: &str, acodec: &str, preference: i32) 
         format_note: Some(if dub { "dub, medium" } else { "medium" }.to_string()),
         has_drm: false,
         http_chunk_size: Some(YOUTUBE_CHUNK_SIZE),
+        http_headers: browser_headers(),
         url: media_url(base, &format!("media/{id}")),
     }
 }
