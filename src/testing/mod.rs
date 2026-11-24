@@ -94,6 +94,8 @@ pub struct Route {
     pub body: Arc<[u8]>,
     /// Send the body at about this speed, so a test can stop it part-way.
     pub bytes_per_sec: Option<u64>,
+    /// Answer every request with the whole body, as a server without ranges does.
+    pub ignores_range: bool,
 }
 
 impl Route {
@@ -103,6 +105,7 @@ impl Route {
             headers: Vec::new(),
             body: Arc::from(body.into()),
             bytes_per_sec: None,
+            ignores_range: false,
         }
     }
 
@@ -120,6 +123,11 @@ impl Route {
 
     pub fn throttled(mut self, bytes_per_sec: u64) -> Self {
         self.bytes_per_sec = Some(bytes_per_sec);
+        self
+    }
+
+    pub fn ignoring_range(mut self) -> Self {
+        self.ignores_range = true;
         self
     }
 }
@@ -410,7 +418,7 @@ impl TestServer {
                                         return;
                                     };
                                     let total = route.body.len();
-                                    let range = if route.status == 200 {
+                                    let range = if route.status == 200 && !route.ignores_range {
                                         range_hdr.as_deref().and_then(|r| parse_range(r, total))
                                     } else {
                                         None
