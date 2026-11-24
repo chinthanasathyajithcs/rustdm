@@ -292,3 +292,89 @@ async fn the_speed_cap_holds_across_pieces() {
         started.elapsed()
     );
 }
+
+mod encrypted {
+    use super::*;
+    use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    use rustdm::pieces::Key;
+
+    const KEY: [u8; 16] = [0x42; 16];
+
+    fn sequence_iv(n: usize) -> [u8; 16] {
+        (n as u128).to_be_bytes()
+    }
+
+    fn sealed(i: usize) -> Vec<u8> {
+        cbc::Encryptor::<aes::Aes128>::new(&KEY.into(), &sequence_iv(i).into())
+            .encrypt_padded_vec_mut::<Pkcs7>(&body(i, PIECE_BYTES))
+    }
+
+    async fn encrypted_server(key: Vec<u8>) -> TestServer {
+        let mut routes: Vec<(String, Route)> = (0..6)
+            .map(|i| (format!("/p/{i}"), Route::ok(sealed(i))))
+            .collect();
+        routes.push(("/k.bin".to_string(), Route::ok(key)));
+        TestServer::start_routes(routes).await
+    }
+
+    fn keyed(server: &TestServer) -> Vec<Piece> {
+        let key_url = server.url().join("/k.bin").unwrap();
+        pieces_of(server, 6)
+            .into_iter()
+            .enumerate()
+            .map(|(i, piece)| Piece {
+                key: Some(Key {
+                    url: key_url.clone(),
+                    iv: sequence_iv(i),
+                }),
+                ..piece
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_stream_downloads_decrypted() {
+        let server = encrypted_server(KEY.to_vec()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("A.f1.mp4");
+        let r = run(keyed(&server), &file, 3, Progress::new());
+
+        download(r.request).await.unwrap();
+
+        assert_eq!(std::fs::read(&file).unwrap(), whole(6));
+        assert_eq!(asked(&server, "/k.bin"), 1, "the key is fetched once");
+    }
+
+    #[tokio::test]
+    async fn a_short_key_is_unreadable() {
+        let server = encrypted_server(vec![0x42; 15]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("A.f1.mp4");
+        let r = run(keyed(&server), &file, 2, Progress::new());
+
+        let result = download(r.request).await;
+
+        match result {
+            Err(Error::Video { message, .. }) => {
+                assert_eq!(message, "This video's playlist couldn't be read.")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_expired_key_stops_with_link_expired() {
+        let server = encrypted_server(KEY.to_vec()).await;
+        server.set_route("/k.bin", Route::status(403));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("A.f1.mp4");
+        let r = run(keyed(&server), &file, 2, Progress::new());
+
+        let result = download(r.request).await;
+
+        assert!(
+            matches!(result, Err(Error::LinkExpired { status: 403 })),
+            "{result:?}"
+        );
+    }
+}

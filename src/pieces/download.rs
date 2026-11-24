@@ -1,19 +1,23 @@
 //! Fetching a stream's pieces several at a time, through the download's speed
 //! caps and stop signal, and writing them in order (spec 1c, sections 7.3, 7.4).
 
-use super::{may_start, Piece, PieceStore};
+use super::{decrypt, may_start, Piece, PieceStore, UNREADABLE_PLAYLIST};
 use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::engine::Progress;
 use crate::error::{is_link_status, Error};
 use crate::retry::{backoff_delay, retry_after_secs, RetryCause, MAX_SEGMENT_ATTEMPTS};
 use reqwest::header::{CONTENT_RANGE, RANGE, RETRY_AFTER};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use url::Url;
+
+/// An AES-128 key's bytes and the IV of the piece it opens.
+type Sealed = Option<([u8; 16], [u8; 16])>;
 
 /// How many pieces are finished, of how many; the row's `piece 140 of 312`.
 #[derive(Debug, Default)]
@@ -58,6 +62,7 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
     let connections = connections.max(1);
     let mut running: JoinSet<(usize, Result<Vec<u8>, Error>)> = JoinSet::new();
     let mut in_flight = BTreeSet::new();
+    let mut keys: HashMap<Url, [u8; 16]> = HashMap::new();
     while store.written() < pieces.len() {
         if *cancel.borrow() {
             return Err(Error::Cancelled);
@@ -71,10 +76,18 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
             let Some(index) = next else {
                 break;
             };
+            let sealed = match &pieces[index].key {
+                Some(key) => Some((
+                    key_bytes(&mut keys, &client, &key.url, &cancel).await?,
+                    key.iv,
+                )),
+                None => None,
+            };
             in_flight.insert(index);
             let fetch = fetch_piece(
                 client.clone(),
                 pieces[index].clone(),
+                sealed,
                 Arc::clone(&progress),
                 cancel.clone(),
             );
@@ -98,6 +111,7 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
 async fn fetch_piece(
     client: reqwest::Client,
     piece: Piece,
+    sealed: Sealed,
     progress: Arc<Progress>,
     cancel: watch::Receiver<bool>,
 ) -> Result<Vec<u8>, Error> {
@@ -105,7 +119,12 @@ async fn fetch_piece(
     let mut attempt = 0u32;
     loop {
         let retry = match attempt_piece(&client, &piece, &progress, cancel).await? {
-            Attempt::Done(bytes) => return Ok(bytes),
+            Attempt::Done(bytes) => {
+                return match sealed {
+                    Some((key, iv)) => decrypt(&key, &iv, &bytes),
+                    None => Ok(bytes),
+                }
+            }
             Attempt::Retry(cause, wait) => (cause, wait),
         };
         attempt += 1;
@@ -119,6 +138,35 @@ async fn fetch_piece(
         progress.note_retry(cause, wait);
         sleep_or_cancel(wait, cancel).await?;
     }
+}
+
+/// The key at `url`, fetched once per run and kept in memory only.
+async fn key_bytes(
+    keys: &mut HashMap<Url, [u8; 16]>,
+    client: &reqwest::Client,
+    url: &Url,
+    cancel: &watch::Receiver<bool>,
+) -> Result<[u8; 16], Error> {
+    if let Some(key) = keys.get(url) {
+        return Ok(*key);
+    }
+    let response = or_cancel(client.get(url.clone()).send(), Some(cancel)).await??;
+    let status = response.status().as_u16();
+    if is_link_status(status) {
+        return Err(Error::LinkExpired { status });
+    }
+    if !response.status().is_success() {
+        return Err(Error::Protocol(format!(
+            "the server answered the video's key with status {status}"
+        )));
+    }
+    let bytes = or_cancel(response.bytes(), Some(cancel)).await??;
+    let key: [u8; 16] = bytes.as_ref().try_into().map_err(|_| Error::Video {
+        message: UNREADABLE_PLAYLIST.to_string(),
+        transient: false,
+    })?;
+    keys.insert(url.clone(), key);
+    Ok(key)
 }
 
 /// How one request for a piece ended.

@@ -7,6 +7,9 @@ use url::Url;
 /// The most pieces one stream may have.
 pub const MAX_PIECES: usize = 100_000;
 
+/// A playlist (or its key) that cannot be used.
+pub const UNREADABLE_PLAYLIST: &str = "This video's playlist couldn't be read.";
+
 /// One piece of a stream, in the order the stream is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Piece {
@@ -38,3 +41,6 @@ pub use store::{fingerprint, leftovers, may_start, state_path, waiting_dir, Piec
 
 mod download;
 pub use download::{download, PieceCounter, PiecesRequest};
+
+mod aes;
+pub use self::aes::decrypt;
