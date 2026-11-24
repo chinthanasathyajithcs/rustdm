@@ -53,6 +53,9 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
     } = req;
     *progress.output.lock().unwrap() = Some(file.clone());
     let mut store = PieceStore::open(&file, &pieces)?;
+    // Pieces kept before a crash, but not yet written, go in first: the
+    // scheduler starts only pieces that are neither written nor waiting.
+    store.flush()?;
     progress.downloaded.store(store.bytes(), Ordering::Relaxed);
     counter.total.store(pieces.len() as u64, Ordering::Relaxed);
     counter.done.store(

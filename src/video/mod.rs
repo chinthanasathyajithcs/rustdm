@@ -169,7 +169,15 @@ pub enum StreamSource {
     /// An HLS media playlist, read again on each run.
     Hls { playlist: String },
     /// DASH pieces in order, the init piece first.
-    Dash { pieces: Vec<String> },
+    Dash { pieces: Vec<DashPiece> },
+}
+
+/// One DASH piece: its link, and how long it plays (its fingerprint part).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashPiece {
+    pub link: String,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 impl StreamSource {

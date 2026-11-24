@@ -4,7 +4,7 @@
 use rustdm::engine::Progress;
 use rustdm::error::Error;
 use rustdm::limiter::RateLimiter;
-use rustdm::pieces::{download, state_path, Piece, PieceCounter, PiecesRequest, Slice};
+use rustdm::pieces::{download, state_path, Piece, PieceCounter, PieceStore, PiecesRequest, Slice};
 use rustdm::testing::{Route, TestServer};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -377,4 +377,29 @@ mod encrypted {
             "{result:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_resume_with_the_next_piece_waiting_finishes() {
+    // A crash after piece 1 was kept, before the flush that writes it.
+    let server = server_with(3, |i| Route::ok(body(i, PIECE_BYTES))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("A.f1.mp4");
+    let pieces = pieces_of(&server, 3);
+    let mut store = PieceStore::open(&file, &pieces).unwrap();
+    store.keep(0, &body(0, PIECE_BYTES)).unwrap();
+    store.flush().unwrap();
+    store.keep(2, &body(2, PIECE_BYTES)).unwrap();
+    store.flush().unwrap();
+    store.keep(1, &body(1, PIECE_BYTES)).unwrap();
+    drop(store);
+    let r = run(pieces, &file, 1, Progress::new());
+
+    download(r.request).await.unwrap();
+
+    assert_eq!(std::fs::read(&file).unwrap(), whole(3));
+    assert!(
+        server.requests().is_empty(),
+        "every piece was on disk already"
+    );
 }

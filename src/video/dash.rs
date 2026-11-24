@@ -2,11 +2,12 @@
 //! `fragment_base_url`); the first is the init piece (spec 1c, section 1.2).
 
 use super::info::FormatInfo;
+use super::DashPiece;
 use url::Url;
 
-/// Every piece's link, in order; None without pieces, or when one cannot be
-/// made into a link.
-pub fn dash_links(format: &FormatInfo) -> Option<Vec<String>> {
+/// Every piece's link and length, in order; None without pieces, or when one
+/// cannot be made into a link.
+pub fn dash_pieces(format: &FormatInfo) -> Option<Vec<DashPiece>> {
     if format.fragments.is_empty() {
         return None;
     }
@@ -14,12 +15,18 @@ pub fn dash_links(format: &FormatInfo) -> Option<Vec<String>> {
     format
         .fragments
         .iter()
-        .map(|fragment| match (&fragment.url, &fragment.path, &base) {
-            (Some(url), _, _) => Url::parse(url).ok(),
-            (None, Some(path), Some(Ok(base))) => base.join(path).ok(),
-            _ => None,
+        .map(|fragment| {
+            let link = match (&fragment.url, &fragment.path, &base) {
+                (Some(url), _, _) => Url::parse(url).ok(),
+                (None, Some(path), Some(Ok(base))) => base.join(path).ok(),
+                _ => None,
+            }?;
+            let seconds = fragment.duration.filter(|d| d.is_finite() && *d > 0.0);
+            Some(DashPiece {
+                link: link.into(),
+                duration_ms: seconds.map_or(0, |s| (s * 1000.0).round() as u64),
+            })
         })
-        .map(|link| link.map(String::from))
         .collect()
 }
 
@@ -47,17 +54,23 @@ mod tests {
         };
 
         assert_eq!(
-            dash_links(&format),
+            dash_pieces(&format),
             Some(vec![
-                "https://d.test/a/v/0.m4s".to_string(),
-                "https://x.test/1.m4s".to_string(),
+                DashPiece {
+                    link: "https://d.test/a/v/0.m4s".to_string(),
+                    duration_ms: 0,
+                },
+                DashPiece {
+                    link: "https://x.test/1.m4s".to_string(),
+                    duration_ms: 4000,
+                },
             ])
         );
     }
 
     #[test]
     fn no_fragments_or_a_bad_link_is_none() {
-        assert_eq!(dash_links(&FormatInfo::default()), None);
+        assert_eq!(dash_pieces(&FormatInfo::default()), None);
         let relative_without_base = FormatInfo {
             fragments: vec![Fragment {
                 path: Some("v/0.m4s".to_string()),
@@ -65,6 +78,6 @@ mod tests {
             }],
             ..FormatInfo::default()
         };
-        assert_eq!(dash_links(&relative_without_base), None);
+        assert_eq!(dash_pieces(&relative_without_base), None);
     }
 }

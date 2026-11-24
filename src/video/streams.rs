@@ -1,7 +1,7 @@
 //! The streams a page offers, as the engine will fetch them.
 
 use super::choices::{build_choices, is_pieces};
-use super::dash::dash_links;
+use super::dash::dash_pieces;
 use super::headers::allowed_headers;
 use super::info::{FormatInfo, PageInfo};
 use super::{StreamKind, StreamPlan, StreamSource};
@@ -20,7 +20,7 @@ fn source_of(format: &FormatInfo, url: &str) -> StreamSource {
     if !is_pieces(format) {
         return StreamSource::Direct;
     }
-    match dash_links(format) {
+    match dash_pieces(format) {
         Some(pieces) => StreamSource::Dash { pieces },
         None => StreamSource::Hls {
             playlist: url.to_string(),
@@ -93,7 +93,7 @@ pub fn stream_plans(info: &PageInfo) -> Vec<StreamPlan> {
 mod tests {
     use super::*;
     use crate::video::info::{DownloaderOptions, Fragment};
-    use crate::video::StreamSource;
+    use crate::video::{DashPiece, StreamSource};
 
     #[test]
     fn the_chunk_size_is_kept_between_1_byte_and_64_mib() {
@@ -205,8 +205,14 @@ mod tests {
             dash[0].source,
             StreamSource::Dash {
                 pieces: vec![
-                    "https://d.test/a/v/0.m4s".to_string(),
-                    "https://d.test/a/v/1.m4s".to_string(),
+                    DashPiece {
+                        link: "https://d.test/a/v/0.m4s".to_string(),
+                        duration_ms: 0,
+                    },
+                    DashPiece {
+                        link: "https://d.test/a/v/1.m4s".to_string(),
+                        duration_ms: 4000,
+                    },
                 ]
             }
         );

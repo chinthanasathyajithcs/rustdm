@@ -530,3 +530,61 @@ async fn a_refresh_with_other_pieces_is_a_changed_video() {
         Some("This video changed on the site; download it again to get the new version.")
     );
 }
+
+#[tokio::test]
+async fn a_paused_download_keeps_its_stream_name_from_another_of_the_same_title() {
+    let s = setup(true).await;
+    s.answer(s.hls_formats());
+    // A's playlist is slow, so A is paused before its pieces start.
+    let slow_playlist = playlist_route(media_playlist("v", VIDEO_PIECES, true, None)).throttled(20);
+    s.server.set_route("/hls/v.m3u8", slow_playlist);
+    let a = s.add("1080p");
+    wait_until(&s.core, &a.id, |r| {
+        r.step
+            .as_deref()
+            .is_some_and(|step| step.starts_with("video 1 of 2"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    s.core.pause_download(&a.id).unwrap();
+    wait_for(&s.core, &a.id, DownloadStatus::Paused).await;
+    s.server.set_route(
+        "/hls/v.m3u8",
+        playlist_route(media_playlist("v", VIDEO_PIECES, true, None)),
+    );
+
+    let b = s.add_at("/watch2", "1080p");
+    wait_until(&s.core, &b.id, |r| pieces_done(r).is_some_and(|n| n >= 1)).await;
+    s.core.resume_download(&a.id).unwrap();
+    wait_for(&s.core, &a.id, DownloadStatus::Completed).await;
+    wait_for(&s.core, &b.id, DownloadStatus::Completed).await;
+
+    assert_eq!(
+        names_in(s.folder.path()),
+        ["A test video (1).mp4", TITLE_FILE]
+    );
+    assert_eq!(s.file(TITLE_FILE), joined());
+    assert_eq!(s.file("A test video (1).mp4"), joined());
+}
+
+#[tokio::test]
+async fn a_dash_refresh_with_other_durations_is_a_changed_video() {
+    let s = setup(false).await;
+    s.server.set_route("/dash/v/5", Route::status(403));
+    let mut longer = s.dash_formats();
+    for format in &mut longer {
+        format.fragment_base_url = Some(s.link("/hls2/"));
+        for fragment in &mut format.fragments {
+            fragment.1 = fragment.1.map(|_| 5.0);
+        }
+    }
+    s.answers(vec![s.dash_formats(), longer]);
+
+    let added = s.add("1080p");
+    let failed = wait_for(&s.core, &added.id, DownloadStatus::Failed).await;
+
+    assert_eq!(
+        failed.error_message.as_deref(),
+        Some("This video changed on the site; download it again to get the new version.")
+    );
+}

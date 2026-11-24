@@ -91,6 +91,9 @@ impl DaemonCore {
             .find(free)
             .expect("some numbered name is free");
         claimed.insert(path.clone());
+        // An empty `.part` holds the name on disk too, beyond this run: a
+        // pause or a restart before the first piece must not free it.
+        let _ = std::fs::write(crate::state::part_path(&path), b"");
         NameClaim::new(path, Arc::clone(&self.claimed_names))
     }
 }
@@ -136,12 +139,12 @@ async fn pieces_of(
         }
         StreamSource::Dash { pieces } => pieces
             .iter()
-            .map(|link| {
-                let url = Url::parse(link).map_err(|_| unreadable())?;
+            .map(|piece| {
+                let url = Url::parse(&piece.link).map_err(|_| unreadable())?;
                 Ok(Piece {
                     url,
                     range: None,
-                    duration_ms: 0,
+                    duration_ms: piece.duration_ms,
                     key: None,
                 })
             })
