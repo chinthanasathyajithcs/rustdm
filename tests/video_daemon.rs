@@ -314,7 +314,7 @@ async fn resuming_after_no_video_checks_the_link_again() {
 }
 
 #[tokio::test]
-async fn live_drm_pieces_only_and_playlist_pages_say_why() {
+async fn live_drm_and_playlist_pages_say_why() {
     let s = setup().await;
     let live = PageSpec {
         is_live: true,
@@ -322,8 +322,6 @@ async fn live_drm_pieces_only_and_playlist_pages_say_why() {
     };
     let mut drm = youtube_like(&base());
     drm.formats.iter_mut().for_each(|f| f.has_drm = true);
-    let mut pieces = youtube_like(&base());
-    pieces.formats.retain(|f| f.protocol.starts_with("m3u8"));
     let playlist = PageSpec {
         playlist_count: Some(3),
         ..youtube_like(&base())
@@ -336,10 +334,6 @@ async fn live_drm_pieces_only_and_playlist_pages_say_why() {
         (
             drm,
             "This video is copy-protected; rustdm can't download it.",
-        ),
-        (
-            pieces,
-            "This site sends its video in small pieces; rustdm can't download that yet.",
         ),
         (
             playlist,

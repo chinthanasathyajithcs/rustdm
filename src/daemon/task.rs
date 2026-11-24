@@ -106,6 +106,8 @@ pub struct TaskRecord {
     /// How far ffmpeg is in joining a video's streams, while it runs (255 until
     /// it says). Not saved.
     pub join_percent: Option<Arc<AtomicU8>>,
+    /// How many pieces of a pieces stream are finished, while it runs. Not saved.
+    pub pieces_counter: Option<Arc<crate::pieces::PieceCounter>>,
     /// Bytes of a video's streams before the one `progress` counts. Not saved.
     pub progress_base: u64,
 }
@@ -165,6 +167,7 @@ impl TaskRecord {
             lookup_progress: None,
             lookup_next: false,
             join_percent: None,
+            pieces_counter: None,
             progress_base: 0,
         }
     }
@@ -352,7 +355,11 @@ impl TaskRecord {
                 .clone()
                 .unwrap_or_else(|| self.directory.join(&self.filename));
             for file in video_leftovers(plan, &final_path) {
-                let _ = std::fs::remove_file(file);
+                if file.is_dir() {
+                    let _ = std::fs::remove_dir_all(file);
+                } else {
+                    let _ = std::fs::remove_file(file);
+                }
             }
             // The streams are gone, so a resume starts them over.
             forget_stream_files(plan);

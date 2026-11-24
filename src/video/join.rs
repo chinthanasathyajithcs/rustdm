@@ -20,7 +20,8 @@ pub const UNKNOWN_PERCENT: u8 = u8::MAX;
 /// What to join, and where to watch and stop it.
 pub struct JoinRequest<'a> {
     pub video: &'a Path,
-    pub audio: &'a Path,
+    /// None: `video` alone is copied into the container (a remux).
+    pub audio: Option<&'a Path>,
     pub container: Container,
     /// Where ffmpeg writes; removed when the join is stopped or fails.
     pub temp: &'a Path,
@@ -62,9 +63,15 @@ pub fn joining_path(final_path: &Path) -> PathBuf {
 }
 
 /// ffmpeg's command line: copy the video of `video` and the audio of `audio`
-/// into `temp`, with progress on stdout. Each argument stands alone; no shell
-/// is involved. Only an MP4 is made to start playing before it is fully loaded.
-pub fn join_args(video: &Path, audio: &Path, container: Container, temp: &Path) -> Vec<OsString> {
+/// into `temp`, with progress on stdout; without `audio`, the video and audio
+/// tracks of `video` (a remux). Each argument stands alone; no shell is
+/// involved. Only an MP4 is made to start playing before it is fully loaded.
+pub fn join_args(
+    video: &Path,
+    audio: Option<&Path>,
+    container: Container,
+    temp: &Path,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "-nostdin",
         "-hide_banner",
@@ -77,9 +84,16 @@ pub fn join_args(video: &Path, audio: &Path, container: Container, temp: &Path) 
     .map(OsString::from)
     .into();
     args.push(video.into());
-    args.push("-i".into());
-    args.push(audio.into());
-    args.extend(["-map", "0:v:0", "-map", "1:a:0", "-c", "copy"].map(OsString::from));
+    let maps = match audio {
+        Some(audio) => {
+            args.push("-i".into());
+            args.push(audio.into());
+            ["-map", "0:v:0", "-map", "1:a:0"]
+        }
+        None => ["-map", "0:v?", "-map", "0:a?"],
+    };
+    args.extend(maps.map(OsString::from));
+    args.extend(["-c", "copy"].map(OsString::from));
     let format = match container {
         Container::Webm => "webm",
         Container::Mp4 | Container::M4a => {
@@ -247,7 +261,7 @@ mod tests {
     fn mp4_args_are_exact() {
         let args = join_args(
             Path::new("a.f137.mp4"),
-            Path::new("a.f140.m4a"),
+            Some(Path::new("a.f140.m4a")),
             Container::Mp4,
             Path::new("a.mp4.joining"),
         );
@@ -281,10 +295,39 @@ mod tests {
     }
 
     #[test]
+    fn one_stream_is_remuxed_with_its_video_and_audio() {
+        let args = join_args(
+            Path::new("a.fhls-720.mp4"),
+            None,
+            Container::Mp4,
+            Path::new("a.mp4.joining"),
+        );
+
+        assert_eq!(
+            strings(args)[6..],
+            [
+                "-i",
+                "a.fhls-720.mp4",
+                "-map",
+                "0:v?",
+                "-map",
+                "0:a?",
+                "-c",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "a.mp4.joining",
+            ]
+        );
+    }
+
+    #[test]
     fn webm_args_have_no_faststart() {
         let args = strings(join_args(
             Path::new("a.f248.webm"),
-            Path::new("a.f251.webm"),
+            Some(Path::new("a.f251.webm")),
             Container::Webm,
             Path::new("a.webm.joining"),
         ));
@@ -337,7 +380,7 @@ mod tests {
         let (_keep, cancel) = watch::channel(false);
         let request = JoinRequest {
             video: Path::new("v.mp4"),
-            audio: Path::new("a.m4a"),
+            audio: Some(Path::new("a.m4a")),
             container: Container::Mp4,
             temp: Path::new("/no/such/folder/out.joining"),
             duration_secs: None,

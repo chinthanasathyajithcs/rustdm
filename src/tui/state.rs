@@ -506,6 +506,7 @@ pub(crate) mod test_support {
                 choices,
                 default: Some(2),
                 chosen: None,
+                size_is_estimate: false,
             }),
             ..summary(id, DownloadStatus::Choosing)
         }

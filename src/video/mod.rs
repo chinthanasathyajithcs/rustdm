@@ -2,6 +2,7 @@
 //! stored plan of a video download.
 
 pub mod choices;
+pub mod dash;
 pub mod errors;
 pub mod headers;
 pub mod hls;
@@ -153,6 +154,28 @@ pub struct StreamPlan {
     pub request_bytes: Option<u64>,
     /// The stream's file, once the engine has named it.
     pub file: Option<PathBuf>,
+    /// How the stream is fetched; streams saved before pieces mode are direct.
+    #[serde(default)]
+    pub source: StreamSource,
+}
+
+/// How a stream is fetched.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum StreamSource {
+    /// One link, through the range engine.
+    #[default]
+    Direct,
+    /// An HLS media playlist, read again on each run.
+    Hls { playlist: String },
+    /// DASH pieces in order, the init piece first.
+    Dash { pieces: Vec<String> },
+}
+
+impl StreamSource {
+    pub fn is_pieces(&self) -> bool {
+        !matches!(self, StreamSource::Direct)
+    }
 }
 
 /// Everything stored with a video download.
@@ -277,6 +300,9 @@ mod tests {
                 headers: vec![("User-Agent".to_string(), "x".to_string())],
                 request_bytes: Some(10_485_760),
                 file: Some(std::path::PathBuf::from("a.part")),
+                source: StreamSource::Hls {
+                    playlist: "https://video.test/v.m3u8".to_string(),
+                },
             }],
             step: VideoStep::Stream(0),
             refreshes: vec![1_700_000_000],
@@ -289,6 +315,16 @@ mod tests {
         assert_eq!(back, plan);
         assert!(json.contains(r#""container":"mp4""#));
         assert!(json.contains(r#""kind":"video""#));
+    }
+
+    #[test]
+    fn a_stream_saved_before_pieces_mode_is_direct() {
+        let json = r#"{"format_id":"137","kind":"video","ext":"mp4","url":"u","size":1,
+            "headers":[],"request_bytes":null,"file":null}"#;
+
+        let stream: StreamPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(stream.source, StreamSource::Direct);
     }
 
     #[test]

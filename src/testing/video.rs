@@ -190,6 +190,10 @@ pub struct FormatSpec {
     /// Becomes `http_headers`; `browser_headers()` unless a test sets more.
     pub http_headers: Vec<(String, String)>,
     pub url: String,
+    /// DASH: where the fragment paths start.
+    pub fragment_base_url: Option<String>,
+    /// DASH: each fragment's path and duration, the init piece first.
+    pub fragments: Vec<(String, Option<f64>)>,
 }
 
 /// A pretend video (or playlist) page: what `yt-dlp -J` would print.
@@ -239,6 +243,16 @@ fn format_json(format: &FormatSpec) -> serde_json::Value {
     if let Some(chunk) = format.http_chunk_size {
         json["downloader_options"] = serde_json::json!({ "http_chunk_size": chunk });
     }
+    if let Some(base) = &format.fragment_base_url {
+        json["fragment_base_url"] = serde_json::json!(base);
+    }
+    if !format.fragments.is_empty() {
+        json["fragments"] = format
+            .fragments
+            .iter()
+            .map(|(path, duration)| serde_json::json!({ "path": path, "duration": duration }))
+            .collect();
+    }
     json
 }
 
@@ -287,6 +301,8 @@ fn video_format(base: &Url, id: &str, ext: &str, vcodec: &str, height: u32) -> F
         http_chunk_size: Some(YOUTUBE_CHUNK_SIZE),
         http_headers: browser_headers(),
         url: media_url(base, &format!("media/{id}")),
+        fragment_base_url: None,
+        fragments: Vec::new(),
     }
 }
 
@@ -308,6 +324,8 @@ fn audio_format(base: &Url, id: &str, ext: &str, acodec: &str, preference: i32) 
         http_chunk_size: Some(YOUTUBE_CHUNK_SIZE),
         http_headers: browser_headers(),
         url: media_url(base, &format!("media/{id}")),
+        fragment_base_url: None,
+        fragments: Vec::new(),
     }
 }
 

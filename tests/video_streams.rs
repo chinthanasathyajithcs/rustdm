@@ -11,7 +11,7 @@ use rustdm::testing::video::{
     video_page_json, write_script, youtube_like, PageSpec, ToolResponse, ToolScript, VideoWorld,
 };
 use rustdm::testing::{pattern_bytes, RequestLog, Route, TestServer};
-use rustdm::video::{StreamKind, StreamPlan, VideoPlan, VideoStep};
+use rustdm::video::{StreamKind, StreamPlan, StreamSource, VideoPlan, VideoStep};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -486,6 +486,7 @@ fn stream(format_id: &str, kind: StreamKind, size: Option<u64>) -> StreamPlan {
         headers: Vec::new(),
         request_bytes: None,
         file: None,
+        source: StreamSource::Direct,
     }
 }
 

@@ -1,9 +1,10 @@
 //! The streams a page offers, as the engine will fetch them.
 
-use super::choices::build_choices;
+use super::choices::{build_choices, is_pieces};
+use super::dash::dash_links;
 use super::headers::allowed_headers;
 use super::info::{FormatInfo, PageInfo};
-use super::{StreamKind, StreamPlan};
+use super::{StreamKind, StreamPlan, StreamSource};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The most bytes one request may ask for.
@@ -14,12 +15,43 @@ fn request_bytes(chunk_size: Option<u64>) -> Option<u64> {
     chunk_size.map(|n| n.clamp(1, MAX_REQUEST_BYTES))
 }
 
-fn stream_plan(format: &FormatInfo, url: &str, kind: StreamKind) -> StreamPlan {
+/// How the format is fetched: DASH pieces, an HLS playlist, else one link.
+fn source_of(format: &FormatInfo, url: &str) -> StreamSource {
+    if !is_pieces(format) {
+        return StreamSource::Direct;
+    }
+    match dash_links(format) {
+        Some(pieces) => StreamSource::Dash { pieces },
+        None => StreamSource::Hls {
+            playlist: url.to_string(),
+        },
+    }
+}
+
+/// A pieces stream's size when yt-dlp gives none: its bit rate (kbit/s) for
+/// the length of the video.
+fn estimated_size(format: &FormatInfo, duration_secs: Option<f64>) -> Option<u64> {
+    if !is_pieces(format) {
+        return None;
+    }
+    let bytes = format.tbr? * 1000.0 / 8.0 * duration_secs?;
+    (bytes.is_finite() && bytes > 0.0).then(|| bytes.round() as u64)
+}
+
+fn stream_plan(
+    format: &FormatInfo,
+    url: &str,
+    kind: StreamKind,
+    duration_secs: Option<f64>,
+) -> StreamPlan {
     StreamPlan {
         format_id: format.format_id.clone(),
         kind,
         url: url.to_string(),
-        size: format.filesize.or(format.filesize_approx),
+        size: format
+            .filesize
+            .or(format.filesize_approx)
+            .or_else(|| estimated_size(format, duration_secs)),
         headers: allowed_headers(&format.http_headers),
         request_bytes: request_bytes(
             format
@@ -29,6 +61,7 @@ fn stream_plan(format: &FormatInfo, url: &str, kind: StreamKind) -> StreamPlan {
         ),
         ext: format.ext.clone().unwrap_or_default(),
         file: None,
+        source: source_of(format, url),
     }
 }
 
@@ -51,7 +84,7 @@ pub fn stream_plans(info: &PageInfo) -> Vec<StreamPlan> {
             let kind = *kinds.get(f.format_id.as_str())?;
             let url = f.url.as_deref()?;
             seen.insert(f.format_id.as_str())
-                .then(|| stream_plan(f, url, kind))
+                .then(|| stream_plan(f, url, kind, info.duration))
         })
         .collect()
 }
@@ -59,7 +92,8 @@ pub fn stream_plans(info: &PageInfo) -> Vec<StreamPlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::info::DownloaderOptions;
+    use crate::video::info::{DownloaderOptions, Fragment};
+    use crate::video::StreamSource;
 
     #[test]
     fn the_chunk_size_is_kept_between_1_byte_and_64_mib() {
@@ -88,13 +122,20 @@ mod tests {
             &format(Some(100), Some(90)),
             "https://a.test/v",
             StreamKind::Video,
+            None,
         );
         let estimate = stream_plan(
             &format(None, Some(90)),
             "https://a.test/v",
             StreamKind::Video,
+            None,
         );
-        let unknown = stream_plan(&format(None, None), "https://a.test/v", StreamKind::Video);
+        let unknown = stream_plan(
+            &format(None, None),
+            "https://a.test/v",
+            StreamKind::Video,
+            None,
+        );
 
         assert_eq!(exact.size, Some(100));
         assert_eq!(estimate.size, Some(90));
@@ -102,6 +143,73 @@ mod tests {
         assert_eq!(exact.request_bytes, Some(MAX_REQUEST_BYTES));
         assert_eq!(exact.ext, "mp4");
         assert_eq!(exact.file, None);
+    }
+
+    #[test]
+    fn stream_plans_name_their_source() {
+        let video = |id: &str, protocol: &str| FormatInfo {
+            format_id: id.to_string(),
+            protocol: Some(protocol.to_string()),
+            url: Some(format!("https://a.test/{id}")),
+            ext: Some("mp4".to_string()),
+            vcodec: Some("avc1.640028".to_string()),
+            acodec: Some("none".to_string()),
+            height: Some(1080),
+            tbr: Some(800.0),
+            ..FormatInfo::default()
+        };
+        let dash = FormatInfo {
+            fragment_base_url: Some("https://d.test/a/".to_string()),
+            fragments: vec![
+                Fragment {
+                    path: Some("v/0.m4s".to_string()),
+                    ..Fragment::default()
+                },
+                Fragment {
+                    path: Some("v/1.m4s".to_string()),
+                    duration: Some(4.0),
+                    ..Fragment::default()
+                },
+            ],
+            ..video("dash-1", "http_dash_segments")
+        };
+        let audio = FormatInfo {
+            format_id: "140".to_string(),
+            vcodec: Some("none".to_string()),
+            acodec: Some("mp4a.40.2".to_string()),
+            ext: Some("m4a".to_string()),
+            height: None,
+            filesize: Some(5),
+            ..video("140", "https")
+        };
+        let page_of = |v: FormatInfo| PageInfo {
+            duration: Some(10.0),
+            formats: vec![v, audio.clone()],
+            ..PageInfo::default()
+        };
+
+        let hls = stream_plans(&page_of(video("hls-1", "m3u8_native")));
+        let dash = stream_plans(&page_of(dash));
+
+        assert_eq!(
+            hls[0].source,
+            StreamSource::Hls {
+                playlist: "https://a.test/hls-1".to_string()
+            }
+        );
+        // 800 kbit/s for 10 s.
+        assert_eq!(hls[0].size, Some(1_000_000));
+        assert_eq!(hls[1].source, StreamSource::Direct);
+        assert_eq!(hls[1].size, Some(5));
+        assert_eq!(
+            dash[0].source,
+            StreamSource::Dash {
+                pieces: vec![
+                    "https://d.test/a/v/0.m4s".to_string(),
+                    "https://d.test/a/v/1.m4s".to_string(),
+                ]
+            }
+        );
     }
 
     #[cfg(feature = "testing")]

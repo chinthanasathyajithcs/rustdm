@@ -584,6 +584,9 @@ pub struct VideoSummary {
     /// The quality that was chosen, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen: Option<ChosenQuality>,
+    /// The size is an estimate: some stream comes in pieces of unknown size.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub size_is_estimate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

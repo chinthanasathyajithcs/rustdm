@@ -54,7 +54,10 @@ pub fn refreshed_streams(
                 .iter()
                 .find(|f| f.format_id == stream.format_id)
                 .ok_or(Changed)?;
-            if let (Some(a), Some(b)) = (stream.size, new.size) {
+            // A pieces stream's size is an estimate; its pieces are compared
+            // when it runs again.
+            let both_direct = !stream.source.is_pieces() && !new.source.is_pieces();
+            if let (true, Some(a), Some(b)) = (both_direct, stream.size, new.size) {
                 if a != b {
                     return Err(Changed);
                 }
@@ -63,6 +66,7 @@ pub fn refreshed_streams(
                 url: new.url.clone(),
                 headers: new.headers.clone(),
                 request_bytes: new.request_bytes,
+                source: new.source.clone(),
                 ..stream.clone()
             })
         })
@@ -72,7 +76,7 @@ pub fn refreshed_streams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::StreamKind;
+    use crate::video::{StreamKind, StreamSource};
     use std::path::PathBuf;
 
     const T: u64 = 1_700_000_000;
@@ -87,7 +91,28 @@ mod tests {
             headers: vec![("User-Agent".to_string(), url.to_string())],
             request_bytes: Some(10),
             file: None,
+            source: StreamSource::Direct,
         }
+    }
+
+    #[test]
+    fn pieces_streams_take_their_fresh_source_without_a_size_check() {
+        let hls = |size, playlist: &str| StreamPlan {
+            source: StreamSource::Hls {
+                playlist: playlist.to_string(),
+            },
+            ..stream("hls-1", Some(size), playlist)
+        };
+
+        let streams = refreshed_streams(&[hls(100, "old")], &[hls(130, "new")]).unwrap();
+
+        assert_eq!(
+            streams[0].source,
+            StreamSource::Hls {
+                playlist: "new".to_string()
+            }
+        );
+        assert_eq!(streams[0].size, Some(100));
     }
 
     #[test]

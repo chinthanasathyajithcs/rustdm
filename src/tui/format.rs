@@ -93,9 +93,14 @@ pub fn fraction_done(d: &DownloadSummary) -> Option<f64> {
 
 /// One plain-text line per download, used by `rdm list` and the plain dashboard.
 pub fn format_row(d: &DownloadSummary) -> String {
+    let about = if d.video.as_ref().is_some_and(|v| v.size_is_estimate) {
+        "~"
+    } else {
+        ""
+    };
     let progress = match (d.total_bytes, fraction_done(d)) {
         (Some(total), Some(fraction)) if total > 0 => format!(
-            "{} / {} ({:.0}%)",
+            "{} / {about}{} ({:.0}%)",
             format_bytes(d.downloaded_bytes),
             format_bytes(total),
             fraction * 100.0
@@ -178,5 +183,24 @@ mod tests {
             ..summary
         };
         assert!(format_row(&capped).ends_with("a.iso  [cap 512.0 KiB/s]"));
+    }
+
+    #[test]
+    fn an_estimated_size_has_a_tilde() {
+        let mut summary = crate::tui::state::test_support::summary("dl_4", DownloadStatus::Active);
+        summary.downloaded_bytes = 25 * 1024 * 1024;
+        summary.total_bytes = Some(100 * 1024 * 1024);
+        summary.video = Some(crate::ipc::protocol::VideoSummary {
+            title: "A video".to_string(),
+            duration_secs: None,
+            choices: Vec::new(),
+            default: None,
+            chosen: None,
+            size_is_estimate: true,
+        });
+
+        let row = format_row(&summary);
+
+        assert!(row.contains("25.0 MiB / ~100.0 MiB (25%)"), "{row}");
     }
 }

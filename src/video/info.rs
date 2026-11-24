@@ -51,6 +51,20 @@ pub struct FormatInfo {
     pub has_drm: Option<serde_json::Value>,
     pub http_headers: BTreeMap<String, String>,
     pub downloader_options: Option<DownloaderOptions>,
+    /// DASH: where the `fragments` paths start.
+    pub fragment_base_url: Option<String>,
+    /// DASH: the pieces in order, the init piece first.
+    pub fragments: Vec<Fragment>,
+}
+
+/// One DASH piece as yt-dlp lists it: a `path` below `fragment_base_url`, or
+/// a whole `url`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Fragment {
+    pub path: Option<String>,
+    pub url: Option<String>,
+    pub duration: Option<f64>,
 }
 
 /// How yt-dlp itself would download the format.
