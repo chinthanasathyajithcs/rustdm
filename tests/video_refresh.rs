@@ -291,6 +291,9 @@ async fn a_refresh_keeps_the_sign_in() {
         s.page(VIDEO_PATH, VIDEO_BYTES),
         s.page(FRESH_VIDEO_PATH, VIDEO_BYTES),
     ]);
+    // The fresh link is slow too, so the download is still running (and
+    // holds its sign-in) when the test looks, even in a slow build.
+    s.server.set_route(FRESH_VIDEO_PATH, slow_video());
     let added = s.add(Some(cookie_context()));
     s.expire_after(&added.id, EXPIRE_AFTER).await;
 

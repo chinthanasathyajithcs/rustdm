@@ -233,7 +233,19 @@ async fn two_streams_end_as_one_file_and_the_parts_are_gone() {
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    assert_eq!(recorded_args(&s.world.ffmpeg.exe), [expected]);
+    let seen = recorded_args(&s.world.ffmpeg.exe);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(same_args(&seen[0], &expected), "{seen:?} != {expected:?}");
+}
+
+/// Equal argument lists, each argument compared as a path: the engine names
+/// a download's file `{downloads}/{name}`, which Windows writes with a `/`.
+fn same_args(seen: &[String], expected: &[String]) -> bool {
+    seen.len() == expected.len()
+        && seen
+            .iter()
+            .zip(expected)
+            .all(|(a, b)| Path::new(a) == Path::new(b))
 }
 
 #[tokio::test]
