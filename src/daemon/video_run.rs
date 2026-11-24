@@ -7,6 +7,7 @@ use super::task::TaskRecord;
 use super::video_fields::{
     joining_text, step_text, stream_file_name, video_space_needed, video_total,
 };
+use super::video_refresh::{link_expired_while_running, video_changed, Refreshed};
 use crate::disk::{ensure_disk_space, volume_label, SAFETY_MARGIN_BYTES};
 use crate::engine::{self, DownloadRequest, Outcome, Progress, ResumeOptions, Timeouts};
 use crate::error::Error;
@@ -19,6 +20,7 @@ use crate::tools::{FetchCtx, Freshness, Installed, Tool, ToolError};
 use crate::tui::format::format_bytes;
 use crate::video::errors::{join_failed_message, NO_VIDEO};
 use crate::video::join::{join, joining_path, JoinFailure, JoinRequest, UNKNOWN_PERCENT};
+use crate::video::refresh::REFRESH_STEP;
 use crate::video::{Container, StreamKind, StreamPlan, VideoPlan, VideoStep};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -112,11 +114,22 @@ impl DaemonCore {
                     if index == 0 && ffmpeg.is_none() && has_two_streams(record) {
                         ffmpeg = self.start_ffmpeg_fetch(record, &cancel).ok();
                     }
-                    match self.run_stream(record, index, cancel.clone()).await {
+                    let outcome = self.run_stream(record, index, cancel.clone()).await;
+                    if link_expired_while_running(&outcome, record, &cancel) {
+                        match self.refresh_links(record, &cancel).await {
+                            Refreshed::Again => continue,
+                            Refreshed::Pause(message) => return self.pause_with(record, message),
+                            Refreshed::Settle(e) => return self.finish_task(record, Err(e)),
+                        }
+                    }
+                    match outcome {
                         Ok(Outcome::Completed { path, .. }) => {
                             self.stream_done(record, index, path)
                         }
-                        // Task 6 takes `LinkExpired` over: it refreshes the links.
+                        // The stream on the site is no longer the one on disk.
+                        Err(Error::FileChanged) => {
+                            return self.finish_task(record, Err(video_changed()))
+                        }
                         other => return self.finish_task(record, other),
                     }
                 }
@@ -639,7 +652,9 @@ fn no_video() -> Error {
 
 /// Show the current stream's progress as the row's step: `video 1 of 2 · 37%`.
 pub(super) fn refresh_stream_step(task: &mut TaskRecord) {
-    if !task.running {
+    // A link refresh shows its own step, or the tool it is fetching.
+    let refreshing = task.step.as_deref() == Some(REFRESH_STEP) || task.lookup_progress.is_some();
+    if !task.running || refreshing {
         return;
     }
     let Some(plan) = task.video.as_ref() else {
@@ -854,6 +869,7 @@ mod tests {
             }],
             step: VideoStep::Stream(0),
             refreshes: Vec::new(),
+            site: String::new(),
         });
         rec
     }

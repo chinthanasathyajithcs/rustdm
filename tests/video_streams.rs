@@ -501,6 +501,7 @@ fn plan_of(streams: Vec<StreamPlan>) -> VideoPlan {
         streams,
         step: VideoStep::Stream(0),
         refreshes: Vec::new(),
+        site: String::new(),
     }
 }
 

@@ -15,6 +15,7 @@ use crate::video::errors::{
     failure_message, is_extractor_error, page_message, LookupFailure, NO_VIDEO,
 };
 use crate::video::info::PageInfo;
+use crate::video::refresh::REFRESH_STEP;
 use crate::video::streams::stream_plans;
 use crate::video::ytdlp::{look_up, LookupRequest};
 use crate::video::{
@@ -27,7 +28,7 @@ use tokio::sync::watch;
 use url::Url;
 
 /// What a row says while yt-dlp reads the page.
-const LOOKING_STEP: &str = "Looking for a video on this page…";
+pub(super) const LOOKING_STEP: &str = "Looking for a video on this page…";
 /// yt-dlp is asked for a newer version after an extractor error at most this often.
 pub const EXTRACTOR_UPDATE_EVERY: Duration = Duration::from_secs(60 * 60);
 /// What `look_up` reports when it was cancelled.
@@ -103,7 +104,9 @@ impl DaemonCore {
             rec.id.clone()
         };
         let cookies = self.cookies_for(&id);
-        let found = self.look_up_video(record, cookies, cancel.clone()).await;
+        let found = self
+            .look_up_video(record, cookies, LOOKING_STEP, cancel.clone())
+            .await;
         if self.finish_lookup(record, found) {
             self.run_video(record, cancel).await;
         }
@@ -163,7 +166,9 @@ impl DaemonCore {
             }
             Next::LookUp(id) => {
                 let cookies = self.cookies_for(&id);
-                let found = self.look_up_video(record, cookies, cancel.clone()).await;
+                let found = self
+                    .look_up_video(record, cookies, LOOKING_STEP, cancel.clone())
+                    .await;
                 if self.finish_lookup(record, found) {
                     self.run_video(record, cancel).await;
                 }
@@ -173,11 +178,12 @@ impl DaemonCore {
     }
 
     /// Look the download's page up with yt-dlp, getting yt-dlp and deno first
-    /// if need be. The row's `step` says so while it runs.
+    /// if need be. The row shows `step` while it runs (R1).
     pub(super) async fn look_up_video(
         &self,
         record: &Arc<Mutex<TaskRecord>>,
         client_cookies: Vec<ContextCookie>,
+        step: &'static str,
         cancel: watch::Receiver<bool>,
     ) -> LookupOutcome {
         let Some(tools) = self.tools.clone() else {
@@ -193,9 +199,9 @@ impl DaemonCore {
                 }
             }
         };
-        record.lock().unwrap().step = Some(LOOKING_STEP.to_string());
+        record.lock().unwrap().step = Some(step.to_string());
 
-        let fetch = |tool, fresh| self.fetch_tool(record, &tools, tool, fresh, &cancel);
+        let fetch = |tool, fresh| self.fetch_tool(record, &tools, tool, fresh, step, &cancel);
         let mut ytdlp = match fetch(Tool::YtDlp, Freshness::CheckIfStale).await {
             Ok(installed) => installed,
             Err(e) => return tool_outcome(e),
@@ -246,6 +252,7 @@ impl DaemonCore {
         tools: &crate::tools::ToolStore,
         tool: Tool,
         fresh: Freshness,
+        step: &'static str,
         cancel: &watch::Receiver<bool>,
     ) -> Result<Installed, ToolError> {
         let progress = {
@@ -265,7 +272,7 @@ impl DaemonCore {
         {
             let mut rec = record.lock().unwrap();
             rec.lookup_progress = None;
-            rec.step = Some(LOOKING_STEP.to_string());
+            rec.step = Some(step.to_string());
         }
         result
     }
@@ -547,6 +554,7 @@ fn plan_of(page_url: &str, choices: &VideoChoices, info: &PageInfo) -> VideoPlan
         streams: Vec::new(),
         step: VideoStep::Choosing,
         refreshes: Vec::new(),
+        site: Url::parse(page_url).map_or_else(|_| String::new(), |url| site_name(info, &url)),
     }
 }
 
@@ -646,7 +654,8 @@ pub(super) fn is_waiting_on_video_work(task: &TaskRecord) -> bool {
         .video
         .as_ref()
         .is_some_and(|plan| plan.step == VideoStep::Join);
-    joining || task.lookup_progress.is_some() || task.step.as_deref() == Some(LOOKING_STEP)
+    let looking = matches!(task.step.as_deref(), Some(LOOKING_STEP | REFRESH_STEP));
+    joining || task.lookup_progress.is_some() || looking
 }
 
 /// Remove cookies files that an earlier run left in `dir`. Best effort.
@@ -822,6 +831,16 @@ mod tests {
         assert!(!is_waiting_on_video_work(&rec));
 
         rec.video.as_mut().unwrap().step = VideoStep::Join;
+
+        assert!(is_waiting_on_video_work(&rec));
+    }
+
+    #[test]
+    fn a_video_getting_a_fresh_link_is_waiting_not_stalled() {
+        let mut rec = record_with_plan();
+        rec.video.as_mut().unwrap().step = VideoStep::Stream(0);
+
+        rec.step = Some(REFRESH_STEP.to_string());
 
         assert!(is_waiting_on_video_work(&rec));
     }

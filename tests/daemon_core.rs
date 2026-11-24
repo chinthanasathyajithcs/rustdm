@@ -781,6 +781,7 @@ fn saved_download(
             streams: Vec::new(),
             step: VideoStep::Choosing,
             refreshes: Vec::new(),
+            site: String::new(),
         }),
         quality: None,
     }

@@ -6,6 +6,7 @@ pub mod errors;
 pub mod headers;
 pub mod info;
 pub mod join;
+pub mod refresh;
 pub mod streams;
 pub mod ytdlp;
 
@@ -177,6 +178,9 @@ pub struct VideoPlan {
     pub step: VideoStep,
     /// Unix seconds of recent link refreshes.
     pub refreshes: Vec<u64>,
+    /// The site's name for messages (`site_name`); empty in plans saved by 1a.
+    #[serde(default)]
+    pub site: String,
 }
 
 /// The site's name for messages: yt-dlp's extractor name (any `Youtube...`
@@ -275,6 +279,7 @@ mod tests {
             }],
             step: VideoStep::Stream(0),
             refreshes: vec![1_700_000_000],
+            site: "YouTube".to_string(),
         };
 
         let json = serde_json::to_string(&plan).unwrap();

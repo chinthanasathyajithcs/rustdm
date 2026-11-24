@@ -513,7 +513,13 @@ impl DaemonCore {
                 DownloadStatus::Paused
                 | DownloadStatus::Failed
                 | DownloadStatus::Retrying
-                | DownloadStatus::Cancelled => task.requeue(),
+                | DownloadStatus::Cancelled => {
+                    task.requeue();
+                    // The user's `r` lets a video's links be refreshed again.
+                    if let Some(plan) = task.video.as_mut() {
+                        plan.refreshes.clear();
+                    }
+                }
             }
         }
 
