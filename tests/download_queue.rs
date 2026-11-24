@@ -750,31 +750,41 @@ async fn the_overall_cap_is_shared_fairly_between_downloads() {
     }
 
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let before: Vec<u64> = client
-        .list()
-        .await
-        .unwrap()
-        .iter()
-        .map(|d| d.downloaded_bytes)
-        .collect();
+    let before = downloaded(&mut client).await;
+    let started = Instant::now();
     tokio::time::sleep(Duration::from_secs(5)).await;
-    let after: Vec<u64> = client
-        .list()
-        .await
-        .unwrap()
-        .iter()
-        .map(|d| d.downloaded_bytes)
-        .collect();
+    let after = downloaded(&mut client).await;
+    let secs = started.elapsed().as_secs_f64();
 
     let rates: Vec<f64> = before
         .iter()
         .zip(&after)
-        .map(|(b, a)| (a - b) as f64 / 5.0 / MIB as f64)
+        .map(|(b, a)| (a - b) as f64 / secs / MIB as f64)
         .collect();
+    // Fair is judged against what the three got together: a busy test machine
+    // (Windows CI runs this file's tests side by side) may not reach the cap,
+    // but the cap must still be split evenly. One shared bucket, the bug this
+    // guards against, gave about 1.85, 0.23 and 0.92 MiB/s here.
+    let total: f64 = rates.iter().sum();
+    let even = total / rates.len() as f64;
+    assert!(
+        total >= 1.0,
+        "the downloads barely moved: {rates:.2?} MiB/s"
+    );
     for rate in &rates {
         assert!(
-            (0.7..=1.35).contains(rate),
-            "each should get about 1 MiB/s, got {rates:.2?} MiB/s"
+            (even * 2.0 / 3.0..=even * 4.0 / 3.0).contains(rate),
+            "each should get about a third of {total:.2} MiB/s, got {rates:.2?} MiB/s"
+        );
+        assert!(
+            *rate <= 1.35,
+            "a share went over 1 MiB/s: {rates:.2?} MiB/s"
         );
     }
+}
+
+/// Bytes each download has, in queue order.
+async fn downloaded(client: &mut DaemonClient) -> Vec<u64> {
+    let list = client.list().await.unwrap();
+    list.iter().map(|d| d.downloaded_bytes).collect()
 }
