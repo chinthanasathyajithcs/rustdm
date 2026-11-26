@@ -3,12 +3,17 @@
 
 use crate::daemon::launch::{daemon_exe_path, spawn_detached};
 use crate::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
-use crate::ipc::protocol::{CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS};
+use crate::ipc::protocol::{
+    AddedBy, ChooseQualityParams, DownloadSummary, CODE_DOWNLOAD_NOT_FOUND,
+    CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS,
+};
 use crate::ipc::transport::IpcEndpoint;
 use crate::nmhost::frame::{read_frame, write_frame, FrameError};
-use crate::nmhost::message::{add_params, HostErrorKind, HostReply, HostRequest, PROTOCOL_VERSION};
+use crate::nmhost::message::{
+    add_params, check_download_id, HostErrorKind, HostReply, HostRequest, PROTOCOL_VERSION,
+};
 use crate::request_context::RequestContext;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -166,16 +171,12 @@ async fn handle<S: Fn() -> io::Result<()>>(
             )
             .await
         }
-        // Replaced in the next step of video 1d; until then they are refused
-        // exactly as before.
-        HostRequest::Status { id, .. } | HostRequest::ChooseQuality { id, .. } => {
-            HostReply::failure(
-                Some(id),
-                HostErrorKind::Invalid,
-                None,
-                "invalid request: unknown type, unknown or missing field, or wrong value type",
-            )
-        }
+        HostRequest::Status { id, download_id } => status(id, &download_id, endpoint).await,
+        HostRequest::ChooseQuality {
+            id,
+            download_id,
+            choice_id,
+        } => choose_quality(id, &download_id, &choice_id, endpoint).await,
     }
 }
 
@@ -221,6 +222,122 @@ async fn add<S: Fn() -> io::Result<()>>(
     }
 }
 
+/// The one answer for a download that is missing or was not added by the
+/// browser, so the browser cannot tell other downloads exist.
+const NOT_FOUND: &str = "rustdm has no such download from this browser";
+
+/// How a download the browser added is doing. Never starts the daemon.
+async fn status(id: u64, download_id: &str, endpoint: &IpcEndpoint) -> HostReply {
+    let mut client = match DaemonClient::connect(endpoint).await {
+        Ok(client) => client,
+        Err(e) => return failure_for(id, e),
+    };
+    match browser_download(&mut client, download_id).await {
+        Ok(summary) => HostReply::success(id, trimmed_status(&summary)),
+        Err(reply) => reply.with_id(id),
+    }
+}
+
+/// Pick the quality of a download the browser added. Never starts the daemon.
+async fn choose_quality(
+    id: u64,
+    download_id: &str,
+    choice_id: &str,
+    endpoint: &IpcEndpoint,
+) -> HostReply {
+    let mut client = match DaemonClient::connect(endpoint).await {
+        Ok(client) => client,
+        Err(e) => return failure_for(id, e),
+    };
+    if let Err(reply) = browser_download(&mut client, download_id).await {
+        return reply.with_id(id);
+    }
+    let params = ChooseQualityParams {
+        id: download_id.to_string(),
+        choice_id: choice_id.to_string(),
+        destination: None,
+        filename: None,
+    };
+    match client.choose_quality(params).await {
+        Ok(summary) => HostReply::success(id, trimmed_status(&summary)),
+        // Not waiting for a quality any more, or no such choice: the daemon's
+        // words say which (spec 1d, 4.2).
+        Err(ClientError::Rpc(rpc)) => HostReply::failure(
+            Some(id),
+            HostErrorKind::Rejected,
+            Some(rpc.code),
+            rpc.message,
+        ),
+        Err(e) => failure_for(id, e),
+    }
+}
+
+/// The download, when it is there and the browser added it; else the reply
+/// to send (with no id yet).
+async fn browser_download(
+    client: &mut DaemonClient,
+    download_id: &str,
+) -> Result<DownloadSummary, HostReply> {
+    let not_found = || HostReply::failure(None, HostErrorKind::NotFound, None, NOT_FOUND);
+    match client.status(download_id).await {
+        Ok(summary) if summary.added_by == Some(AddedBy::Browser) => Ok(summary),
+        Ok(_) => Err(not_found()),
+        Err(ClientError::Rpc(rpc)) if rpc.code == CODE_DOWNLOAD_NOT_FOUND => Err(not_found()),
+        Err(e) => Err(failure_for(0, e)),
+    }
+}
+
+/// What the browser may know of a download: no folder, path, link, cookie or
+/// stream, and nothing about any other download.
+fn trimmed_status(summary: &DownloadSummary) -> Value {
+    let mut out = Map::new();
+    out.insert("download_id".into(), json!(summary.id));
+    out.insert("status".into(), json!(summary.status));
+    out.insert("filename".into(), json!(summary.filename));
+    if let Some(total) = summary.total_bytes.filter(|&t| t > 0) {
+        out.insert(
+            "progress".into(),
+            json!(summary.downloaded_bytes as f64 / total as f64),
+        );
+    }
+    if let Some(video) = &summary.video {
+        let choices: Vec<Value> = video
+            .choices
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "label": c.label,
+                    "container": c.container.label(),
+                    "height": c.height,
+                    "size_bytes": c.size_bytes,
+                    "size_is_estimate": c.size_is_estimate,
+                })
+            })
+            .collect();
+        let mut v = Map::new();
+        v.insert("title".into(), json!(video.title));
+        if let Some(secs) = video.duration_secs {
+            v.insert("duration_secs".into(), json!(secs));
+        }
+        v.insert("choices".into(), Value::Array(choices));
+        if let Some(default) = video.default {
+            v.insert("default".into(), json!(default));
+        }
+        if let Some(chosen) = &video.chosen {
+            v.insert(
+                "chosen".into(),
+                json!({"label": chosen.label, "container": chosen.container.label()}),
+            );
+        }
+        out.insert("video".into(), Value::Object(v));
+    }
+    if let Some(error) = &summary.error_message {
+        out.insert("error".into(), json!(error));
+    }
+    Value::Object(out)
+}
+
 /// Log a refused hand-off: the host name, the error kind and the daemon's code
 /// only. Messages can carry the whole URL (which can hold tokens), and cookies
 /// are never logged. A duplicate is routine, so it is not a warning.
@@ -252,7 +369,16 @@ fn failure_for(id: u64, error: ClientError) -> HostReply {
                 CODE_INVALID_PARAMS => HostErrorKind::Invalid,
                 _ => HostErrorKind::Rejected,
             };
-            HostReply::failure(id, kind, Some(rpc.code), rpc.message)
+            let existing_id = (kind == HostErrorKind::Duplicate)
+                .then(|| rpc.data.as_ref()?.get("existing_id")?.as_str())
+                .flatten()
+                .filter(|existing| check_download_id(existing).is_ok())
+                .map(str::to_string);
+            let mut reply = HostReply::failure(id, kind, Some(rpc.code), rpc.message);
+            if let Some(error) = reply.error.as_mut() {
+                error.existing_id = existing_id;
+            }
+            reply
         }
         other => HostReply::failure(id, HostErrorKind::Rejected, None, other.to_string()),
     }
@@ -261,7 +387,8 @@ fn failure_for(id: u64, error: ClientError) -> HostReply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::RpcError;
+    use crate::ipc::protocol::{AddedBy, DownloadStatus, RpcError, VideoSummary};
+    use crate::video::{ChosenQuality, Container, StreamKind, StreamPick, VideoChoice};
     use serde_json::Value;
 
     async fn replies_to(frames: &[&[u8]]) -> Vec<Value> {
@@ -411,5 +538,162 @@ mod tests {
 
         let gone = failure_for(2, ClientError::NotRunning);
         assert_eq!(gone.error.unwrap().kind, HostErrorKind::NotRunning);
+    }
+
+    fn summary(status: DownloadStatus) -> DownloadSummary {
+        DownloadSummary {
+            id: "dl_1".to_string(),
+            url: "https://e.com/watch?v=x".to_string(),
+            destination: std::path::PathBuf::from("/home/u/Downloads/x.mp4"),
+            filename: "Angel One.mp4".to_string(),
+            status,
+            downloaded_bytes: 50,
+            total_bytes: Some(200),
+            speed_bps: 0,
+            eta_secs: None,
+            error_message: None,
+            max_bytes_per_sec: 0,
+            video: None,
+            step: None,
+            added_by: Some(AddedBy::Browser),
+        }
+    }
+
+    fn choosing_video() -> VideoSummary {
+        VideoSummary {
+            title: "Angel One".to_string(),
+            duration_secs: Some(60),
+            choices: vec![VideoChoice {
+                id: "1080-mp4".to_string(),
+                label: "1080p".to_string(),
+                container: Container::Mp4,
+                height: Some(1080),
+                size_bytes: Some(40_000_000),
+                size_is_estimate: true,
+                streams: vec![StreamPick {
+                    format_id: "fmt-137-secret".to_string(),
+                    kind: StreamKind::Video,
+                    ext: "mp4".to_string(),
+                }],
+            }],
+            default: Some(0),
+            chosen: None,
+            size_is_estimate: true,
+        }
+    }
+
+    #[test]
+    fn status_of_a_browser_download_is_trimmed() {
+        let mut row = summary(DownloadStatus::Choosing);
+        row.video = Some(choosing_video());
+
+        let reply = trimmed_status(&row);
+
+        assert_eq!(reply["download_id"], "dl_1");
+        assert_eq!(reply["status"], "choosing");
+        assert_eq!(reply["filename"], "Angel One.mp4");
+        assert_eq!(reply["video"]["title"], "Angel One");
+        assert_eq!(reply["video"]["duration_secs"], 60);
+        assert_eq!(reply["video"]["default"], 0);
+        let choice = &reply["video"]["choices"][0];
+        assert_eq!(choice["id"], "1080-mp4");
+        assert_eq!(choice["label"], "1080p");
+        assert_eq!(choice["container"], "MP4");
+        assert_eq!(choice["height"], 1080);
+        assert_eq!(choice["size_bytes"], 40_000_000);
+        assert_eq!(choice["size_is_estimate"], true);
+        let text = reply.to_string();
+        for leak in [
+            "http",
+            "/home/",
+            "fmt-137-secret",
+            "streams",
+            "destination",
+            "\"url\"",
+        ] {
+            assert!(!text.contains(leak), "{leak} leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn a_chosen_quality_and_an_error_are_reported() {
+        let mut row = summary(DownloadStatus::Failed);
+        let mut video = choosing_video();
+        video.choices.clear();
+        video.chosen = Some(ChosenQuality {
+            label: "720p".to_string(),
+            container: Container::Webm,
+            choice_id: "720-webm".to_string(),
+        });
+        row.video = Some(video);
+        row.error_message = Some("The site refused the video.".to_string());
+
+        let reply = trimmed_status(&row);
+
+        assert_eq!(
+            reply["video"]["chosen"],
+            json!({"label": "720p", "container": "WebM"})
+        );
+        assert_eq!(reply["video"]["choices"], json!([]));
+        assert_eq!(reply["error"], "The site refused the video.");
+    }
+
+    #[test]
+    fn progress_is_the_done_share_when_known() {
+        assert_eq!(
+            trimmed_status(&summary(DownloadStatus::Active))["progress"],
+            0.25
+        );
+    }
+
+    #[test]
+    fn progress_is_left_out_when_the_total_is_unknown() {
+        for total in [None, Some(0)] {
+            let row = DownloadSummary {
+                total_bytes: total,
+                ..summary(DownloadStatus::Active)
+            };
+            let reply = trimmed_status(&row);
+            assert!(reply.get("progress").is_none(), "{total:?}");
+            assert!(reply.get("video").is_none());
+            assert!(reply.get("error").is_none());
+        }
+    }
+
+    #[test]
+    fn a_duplicate_carries_the_existing_id() {
+        let reply = failure_for(
+            3,
+            ClientError::Rpc(RpcError::duplicate_download("https://e.com/x", "dl_7")),
+        );
+        let value: Value = serde_json::from_slice(&reply.to_bytes()).unwrap();
+        assert_eq!(value["error"]["kind"], "duplicate");
+        assert_eq!(value["error"]["existing_id"], "dl_7");
+    }
+
+    #[test]
+    fn a_malformed_existing_id_is_dropped() {
+        for data in [
+            Some(json!({"existing_id": "dl 7/.."})),
+            Some(json!({"existing_id": 7})),
+            None,
+        ] {
+            let rpc = RpcError {
+                code: CODE_DUPLICATE_DOWNLOAD,
+                message: "dup".to_string(),
+                data: data.clone(),
+            };
+            let value: Value =
+                serde_json::from_slice(&failure_for(3, ClientError::Rpc(rpc)).to_bytes()).unwrap();
+            assert_eq!(value["error"]["kind"], "duplicate", "{data:?}");
+            assert!(value["error"].get("existing_id").is_none(), "{data:?}");
+        }
+    }
+
+    #[test]
+    fn other_failures_carry_no_existing_id() {
+        let value: Value =
+            serde_json::from_slice(&failure_for(3, ClientError::NotRunning).to_bytes()).unwrap();
+        assert!(value["error"].get("existing_id").is_none());
     }
 }

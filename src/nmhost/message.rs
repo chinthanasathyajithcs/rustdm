@@ -151,6 +151,9 @@ pub struct HostError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<i32>,
     pub message: String,
+    /// For a duplicate: the download that already has this link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -187,7 +190,16 @@ impl HostReply {
                 kind,
                 code,
                 message: message.into(),
+                existing_id: None,
             }),
+        }
+    }
+
+    /// The same reply, answering request `id`.
+    pub fn with_id(self, id: u64) -> Self {
+        Self {
+            id: Some(id),
+            ..self
         }
     }
 
