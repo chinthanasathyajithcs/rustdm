@@ -3,6 +3,7 @@
 pub mod action;
 #[cfg(windows)]
 mod clipboard;
+mod cursor_resync;
 pub mod daemon_link;
 pub mod dialogs;
 pub mod format;
@@ -17,6 +18,7 @@ pub mod widgets;
 use crate::ipc::client::DaemonClient;
 use crate::ipc::protocol::DownloadStatus;
 use crate::ipc::transport::IpcEndpoint;
+use cursor_resync::CursorResync;
 use format::format_row;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -99,7 +101,7 @@ fn read_batch() -> io::Result<Vec<event::Event>> {
     Ok(vec![event::read()?])
 }
 
-fn enter_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn enter_terminal() -> io::Result<Terminal<CursorResync<CrosstermBackend<io::Stdout>>>> {
     enable_raw_mode()?;
     execute!(
         io::stdout(),
@@ -107,7 +109,7 @@ fn enter_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
-    Terminal::new(CrosstermBackend::new(io::stdout()))
+    Terminal::new(CursorResync::new(CrosstermBackend::new(io::stdout())))
 }
 
 fn restore_terminal() {
