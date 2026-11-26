@@ -1,7 +1,7 @@
 //! What the extension and the host say to each other, and the shape checks on it.
 //! Content limits for cookies, Referer and User-Agent belong to the daemon.
 
-use crate::ipc::protocol::AddDownloadParams;
+use crate::ipc::protocol::{AddDownloadParams, AddedBy};
 use crate::request_context::RequestContext;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -12,9 +12,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_URL_BYTES: usize = 8 * 1024;
 /// Longest file name the host passes on.
 pub const MAX_FILENAME_BYTES: usize = 255;
+/// Longest download or choice id a request may name.
+pub const MAX_ID_BYTES: usize = 64;
 
-/// The only two things the extension can ask for, as they arrive. Anything
-/// else, including any extra field (such as `destination`), is refused.
+/// The only things the extension can ask for, as they arrive. Anything else,
+/// including any extra field (such as `destination`), is refused.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WireRequest {
@@ -28,6 +30,15 @@ enum WireRequest {
         filename: Option<String>,
         #[serde(default)]
         context: Option<Map<String, Value>>,
+    },
+    Status {
+        id: u64,
+        download_id: String,
+    },
+    ChooseQuality {
+        id: u64,
+        download_id: String,
+        choice_id: String,
     },
 }
 
@@ -43,6 +54,17 @@ pub enum HostRequest {
         url: String,
         filename: Option<String>,
         context: Option<RequestContext>,
+    },
+    /// How a download the browser added is doing.
+    Status {
+        id: u64,
+        download_id: String,
+    },
+    /// Pick the quality of a download the browser added.
+    ChooseQuality {
+        id: u64,
+        download_id: String,
+        choice_id: String,
     },
 }
 
@@ -79,12 +101,32 @@ impl HostRequest {
                     context,
                 })
             }
+            WireRequest::Status { id, download_id } => {
+                check_download_id(&download_id).map_err(|m| (Some(id), m))?;
+                Ok(Self::Status { id, download_id })
+            }
+            WireRequest::ChooseQuality {
+                id,
+                download_id,
+                choice_id,
+            } => {
+                check_download_id(&download_id).map_err(|m| (Some(id), m))?;
+                check_choice_id(&choice_id).map_err(|m| (Some(id), m))?;
+                Ok(Self::ChooseQuality {
+                    id,
+                    download_id,
+                    choice_id,
+                })
+            }
         }
     }
 
     pub fn id(&self) -> u64 {
         match self {
-            Self::Ping { id } | Self::Add { id, .. } => *id,
+            Self::Ping { id }
+            | Self::Add { id, .. }
+            | Self::Status { id, .. }
+            | Self::ChooseQuality { id, .. } => *id,
         }
     }
 }
@@ -99,6 +141,7 @@ pub enum HostErrorKind {
     Duplicate,
     Invalid,
     TooLarge,
+    NotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -173,6 +216,32 @@ fn check_add(
     context.map(typed_context).transpose()
 }
 
+/// A download id such as `dl_12`: short, letters, digits, `_` and `-` only.
+pub(crate) fn check_download_id(id: &str) -> Result<(), String> {
+    let fits = !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if fits {
+        Ok(())
+    } else {
+        Err(format!(
+            "download_id must be 1 to {MAX_ID_BYTES} letters, digits, '_' or '-'"
+        ))
+    }
+}
+
+/// A choice id such as `1080-mp4`: short and without control characters.
+fn check_choice_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.len() > MAX_ID_BYTES || id.chars().any(char::is_control) {
+        return Err(format!(
+            "choice_id must be 1 to {MAX_ID_BYTES} bytes without control characters"
+        ));
+    }
+    Ok(())
+}
+
 fn check_filename(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > MAX_FILENAME_BYTES {
         return Err(format!("filename must be 1 to {MAX_FILENAME_BYTES} bytes"));
@@ -215,7 +284,7 @@ pub fn add_params(
         max_bytes_per_sec: None,
         context: context.cloned(),
         quality: None,
-        added_by: None,
+        added_by: Some(AddedBy::Browser),
     }
 }
 
@@ -385,12 +454,12 @@ mod tests {
         assert_eq!(
             serde_json::to_value(params).unwrap(),
             json!({"url": "https://example.com/x", "filename": "x.zip",
-                "context": {"referer": "https://example.com/"}})
+                "context": {"referer": "https://example.com/"}, "added_by": "browser"})
         );
         let bare = add_params("https://example.com/x", None, None);
         assert_eq!(
             serde_json::to_value(bare).unwrap(),
-            json!({"url": "https://example.com/x"})
+            json!({"url": "https://example.com/x", "added_by": "browser"})
         );
     }
 
@@ -435,5 +504,81 @@ mod tests {
             panic!("an add")
         };
         assert_eq!(context.unwrap().title.as_deref(), Some("Angel One"));
+    }
+
+    #[test]
+    fn status_and_choose_quality_parse() {
+        assert_eq!(
+            parse(json!({"type": "status", "id": 3, "download_id": "dl_12"})).unwrap(),
+            HostRequest::Status {
+                id: 3,
+                download_id: "dl_12".to_string()
+            }
+        );
+        assert_eq!(
+            parse(json!({"type": "choose_quality", "id": 4, "download_id": "dl_12", "choice_id": "1080-mp4"}))
+                .unwrap(),
+            HostRequest::ChooseQuality {
+                id: 4,
+                download_id: "dl_12".to_string(),
+                choice_id: "1080-mp4".to_string()
+            }
+        );
+        assert_eq!(
+            parse(json!({"type": "status", "id": 3, "download_id": "dl_12"}))
+                .unwrap()
+                .id(),
+            3
+        );
+    }
+
+    #[test]
+    fn bad_download_ids_are_invalid() {
+        let long = "a".repeat(MAX_ID_BYTES + 1);
+        for bad in ["", "dl 1", "../x", "dl_1\n", long.as_str()] {
+            let (id, _) =
+                parse(json!({"type": "status", "id": 5, "download_id": bad})).unwrap_err();
+            assert_eq!(id, Some(5), "{bad:?}");
+        }
+        assert!(
+            parse(json!({"type": "status", "id": 5, "download_id": "a".repeat(MAX_ID_BYTES)}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn bad_choice_ids_are_invalid() {
+        let long = "a".repeat(MAX_ID_BYTES + 1);
+        for bad in ["", "a\nb", long.as_str()] {
+            let request =
+                json!({"type": "choose_quality", "id": 6, "download_id": "dl_1", "choice_id": bad});
+            let (id, _) = parse(request).unwrap_err();
+            assert_eq!(id, Some(6), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn extra_fields_on_the_new_requests_are_refused() {
+        assert!(parse(
+            json!({"type": "status", "id": 1, "download_id": "dl_1", "destination": "/tmp"})
+        )
+        .is_err());
+        assert!(parse(json!({"type": "choose_quality", "id": 1, "download_id": "dl_1", "choice_id": "a", "filename": "x"})).is_err());
+    }
+
+    #[test]
+    fn the_host_marks_its_adds_as_browser() {
+        assert_eq!(
+            add_params("https://e.com/x", None, None).added_by,
+            Some(AddedBy::Browser)
+        );
+    }
+
+    #[test]
+    fn not_found_is_snake_case_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(HostErrorKind::NotFound).unwrap(),
+            json!("not_found")
+        );
     }
 }

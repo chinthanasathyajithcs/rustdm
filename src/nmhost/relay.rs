@@ -166,6 +166,16 @@ async fn handle<S: Fn() -> io::Result<()>>(
             )
             .await
         }
+        // Replaced in the next step of video 1d; until then they are refused
+        // exactly as before.
+        HostRequest::Status { id, .. } | HostRequest::ChooseQuality { id, .. } => {
+            HostReply::failure(
+                Some(id),
+                HostErrorKind::Invalid,
+                None,
+                "invalid request: unknown type, unknown or missing field, or wrong value type",
+            )
+        }
     }
 }
 
