@@ -403,3 +403,67 @@ async fn a_resume_with_the_next_piece_waiting_finishes() {
         "every piece was on disk already"
     );
 }
+
+/// What a stopped stream really keeps: its `.part` and its waiting pieces.
+fn kept_on_disk(file: &Path) -> u64 {
+    let part = std::fs::metadata(format!("{}.part", file.display())).map_or(0, |m| m.len());
+    let waiting = rustdm::pieces::waiting_dir(file);
+    let waiting: u64 = std::fs::read_dir(waiting)
+        .map(|d| d.map(|e| e.unwrap().metadata().unwrap().len()).sum())
+        .unwrap_or(0);
+    part + waiting
+}
+
+#[tokio::test]
+async fn a_stop_counts_only_the_pieces_kept() {
+    // Piece 0 is slow, so the quick ones wait and the slow one is cut short.
+    let server = server_with(6, |i| match i {
+        0 => Route::ok(body(i, PIECE_BYTES)).throttled(1_000),
+        _ => Route::ok(body(i, PIECE_BYTES)),
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("A.f1.mp4");
+    let r = run(pieces_of(&server, 6), &file, 3, Progress::new());
+    let (progress, cancel) = (Arc::clone(&r.progress), r.cancel);
+
+    let running = tokio::spawn(download(r.request));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    cancel.send(true).unwrap();
+    let stopped = running.await.unwrap();
+
+    assert!(matches!(stopped, Err(Error::Cancelled)), "{stopped:?}");
+    let kept = kept_on_disk(&file);
+    assert!(kept > 0, "some quick pieces were kept");
+    assert_eq!(progress.downloaded.load(Ordering::Relaxed), kept);
+}
+
+#[tokio::test]
+async fn a_resume_counts_the_waiting_pieces() {
+    // Piece 1 is missing; piece 0 is written and piece 2 waits.
+    let server = server_with(3, |i| Route::ok(body(i, PIECE_BYTES)).throttled(1_000)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("A.f1.mp4");
+    let pieces = pieces_of(&server, 3);
+    let mut store = PieceStore::open(&file, &pieces).unwrap();
+    store.keep(0, &body(0, PIECE_BYTES)).unwrap();
+    store.flush().unwrap();
+    store.keep(2, &body(2, PIECE_BYTES)).unwrap();
+    drop(store);
+    let r = run(pieces, &file, 1, Progress::new());
+    let progress = Arc::clone(&r.progress);
+
+    let running = tokio::spawn(download(r.request));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        progress.downloaded.load(Ordering::Relaxed) >= (2 * PIECE_BYTES) as u64,
+        "the written and the waiting piece count from the start"
+    );
+    running.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), whole(3));
+    assert_eq!(
+        progress.downloaded.load(Ordering::Relaxed),
+        (3 * PIECE_BYTES) as u64
+    );
+}

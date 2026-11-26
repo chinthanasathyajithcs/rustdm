@@ -37,7 +37,9 @@ pub struct Key {
 }
 
 mod store;
-pub use store::{fingerprint, leftovers, may_start, state_path, waiting_dir, PieceStore};
+pub use store::{
+    fingerprint, kept_bytes, leftovers, may_start, state_path, waiting_dir, PieceStore,
+};
 
 mod download;
 pub use download::{download, PieceCounter, PiecesRequest};

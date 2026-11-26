@@ -85,6 +85,8 @@ pub struct PieceStore {
     written: usize,
     bytes: u64,
     waiting: BTreeSet<usize>,
+    /// The bytes of the waiting pieces.
+    waiting_bytes: u64,
 }
 
 impl PieceStore {
@@ -104,6 +106,7 @@ impl PieceStore {
             written: 0,
             bytes: 0,
             waiting: BTreeSet::new(),
+            waiting_bytes: 0,
         };
         let part = part_path(file);
         let resumed = saved.filter(|s| {
@@ -124,7 +127,7 @@ impl PieceStore {
             }
         }
         std::fs::create_dir_all(waiting_dir(file))?;
-        store.waiting = store.tidy_waiting()?;
+        (store.waiting, store.waiting_bytes) = store.tidy_waiting()?;
         store.save()?;
         Ok(store)
     }
@@ -135,6 +138,11 @@ impl PieceStore {
 
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+
+    /// Every byte kept on disk: the written ones and the waiting pieces'.
+    pub fn kept_bytes(&self) -> u64 {
+        self.bytes + self.waiting_bytes
     }
 
     /// Pieces waiting whole in the folder.
@@ -151,7 +159,9 @@ impl PieceStore {
         out.sync_data()?;
         drop(out);
         std::fs::rename(&temp, &path)?;
-        self.waiting.insert(index);
+        if self.waiting.insert(index) {
+            self.waiting_bytes += bytes.len() as u64;
+        }
         Ok(())
     }
 
@@ -173,6 +183,7 @@ impl PieceStore {
             };
             out.write_all(&bytes)?;
             self.waiting.remove(&self.written);
+            self.waiting_bytes = self.waiting_bytes.saturating_sub(bytes.len() as u64);
             self.written += 1;
             self.bytes += bytes.len() as u64;
             appended.push(path);
@@ -206,27 +217,25 @@ impl PieceStore {
         waiting_dir(&self.file).join(format!("{index:06}"))
     }
 
-    /// The whole pieces in the folder that are still to be written; half
-    /// written and already written ones are deleted.
-    fn tidy_waiting(&self) -> Result<BTreeSet<usize>, Error> {
+    /// The whole pieces in the folder that are still to be written, and their
+    /// bytes; half written and already written ones are deleted.
+    fn tidy_waiting(&self) -> Result<(BTreeSet<usize>, u64), Error> {
         let mut waiting = BTreeSet::new();
+        let mut bytes = 0;
         for entry in std::fs::read_dir(waiting_dir(&self.file))? {
-            let path = entry?.path();
-            let index = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .filter(|n| n.len() == 6)
-                .and_then(|n| n.parse::<usize>().ok());
-            match index {
+            let entry = entry?;
+            let path = entry.path();
+            match piece_index(&entry.file_name()) {
                 Some(i) if i >= self.written && i < self.count => {
                     waiting.insert(i);
+                    bytes += entry.metadata()?.len();
                 }
                 _ => {
                     let _ = std::fs::remove_file(path);
                 }
             }
         }
-        Ok(waiting)
+        Ok((waiting, bytes))
     }
 
     fn save(&self) -> Result<(), Error> {
@@ -241,6 +250,30 @@ impl PieceStore {
         crate::state::write_atomic(&state_path(&self.file), &json)?;
         Ok(())
     }
+}
+
+/// The bytes a paused pieces stream keeps for `file`, without touching it:
+/// what its state file says is written, and its waiting pieces.
+pub fn kept_bytes(file: &Path) -> u64 {
+    let Some(state) = load_state(&state_path(file)) else {
+        return 0;
+    };
+    let waiting = std::fs::read_dir(waiting_dir(file)).into_iter().flatten();
+    let waiting: u64 = waiting
+        .flatten()
+        .filter(|entry| {
+            piece_index(&entry.file_name()).is_some_and(|i| i >= state.written && i < state.count)
+        })
+        .filter_map(|entry| entry.metadata().ok().map(|m| m.len()))
+        .sum();
+    state.bytes + waiting
+}
+
+/// The piece a waiting file holds: its name is the index in six digits.
+fn piece_index(name: &std::ffi::OsStr) -> Option<usize> {
+    name.to_str()
+        .filter(|n| n.len() == 6)
+        .and_then(|n| n.parse().ok())
 }
 
 fn load_state(path: &Path) -> Option<SavedState> {

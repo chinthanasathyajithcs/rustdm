@@ -40,30 +40,54 @@ pub struct PiecesRequest {
 
 /// Fetch every piece into `req.file`. Stops with `Error::Cancelled` when told
 /// to, and with `Error::LinkExpired` when a piece's link is refused; either way
-/// the pieces written so far are kept for the next run.
+/// the pieces written so far are kept for the next run, and the progress then
+/// counts only them: a piece cut short is fetched whole again.
 pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
+    *req.progress.output.lock().unwrap() = Some(req.file.clone());
+    let mut store = PieceStore::open(&req.file, &req.pieces)?;
+    // Pieces kept before a crash, but not yet written, go in first: the
+    // scheduler starts only pieces that are neither written nor waiting.
+    store.flush()?;
+    req.progress
+        .downloaded
+        .store(store.kept_bytes(), Ordering::Relaxed);
+    req.counter
+        .total
+        .store(req.pieces.len() as u64, Ordering::Relaxed);
+    req.counter.done.store(
+        (store.written() + store.waiting().len()) as u64,
+        Ordering::Relaxed,
+    );
+    let mut running = JoinSet::new();
+    if let Err(e) = fetch_all(&req, &mut store, &mut running).await {
+        // The stopped pieces must not add bytes after the count below.
+        running.shutdown().await;
+        req.progress
+            .downloaded
+            .store(store.kept_bytes(), Ordering::Relaxed);
+        return Err(e);
+    }
+    store.finish()
+}
+
+type Running = JoinSet<(usize, Result<Vec<u8>, Error>)>;
+
+/// Run up to `connections` pieces at once until every piece is written.
+async fn fetch_all(
+    req: &PiecesRequest,
+    store: &mut PieceStore,
+    running: &mut Running,
+) -> Result<(), Error> {
     let PiecesRequest {
         client,
         pieces,
-        file,
         connections,
         progress,
         counter,
         cancel,
+        ..
     } = req;
-    *progress.output.lock().unwrap() = Some(file.clone());
-    let mut store = PieceStore::open(&file, &pieces)?;
-    // Pieces kept before a crash, but not yet written, go in first: the
-    // scheduler starts only pieces that are neither written nor waiting.
-    store.flush()?;
-    progress.downloaded.store(store.bytes(), Ordering::Relaxed);
-    counter.total.store(pieces.len() as u64, Ordering::Relaxed);
-    counter.done.store(
-        (store.written() + store.waiting().len()) as u64,
-        Ordering::Relaxed,
-    );
-    let connections = connections.max(1);
-    let mut running: JoinSet<(usize, Result<Vec<u8>, Error>)> = JoinSet::new();
+    let connections = (*connections).max(1);
     let mut in_flight = BTreeSet::new();
     let mut keys: HashMap<Url, [u8; 16]> = HashMap::new();
     while store.written() < pieces.len() {
@@ -81,7 +105,7 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
             };
             let sealed = match &pieces[index].key {
                 Some(key) => Some((
-                    key_bytes(&mut keys, &client, &key.url, &cancel).await?,
+                    key_bytes(&mut keys, client, &key.url, cancel).await?,
                     key.iv,
                 )),
                 None => None,
@@ -91,7 +115,7 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
                 client.clone(),
                 pieces[index].clone(),
                 sealed,
-                Arc::clone(&progress),
+                Arc::clone(progress),
                 cancel.clone(),
             );
             running.spawn(async move { (index, fetch.await) });
@@ -101,12 +125,11 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
         };
         let (index, fetched) = joined.map_err(|e| Error::State(e.to_string()))?;
         in_flight.remove(&index);
-        let bytes = fetched?;
-        store.keep(index, &bytes)?;
+        store.keep(index, &fetched?)?;
         store.flush()?;
         counter.done.fetch_add(1, Ordering::Relaxed);
     }
-    store.finish()
+    Ok(())
 }
 
 /// Fetch one piece, retrying what may pass (a dropped connection, a busy or

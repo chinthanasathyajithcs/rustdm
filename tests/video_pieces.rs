@@ -369,6 +369,31 @@ async fn pause_and_resume_ask_only_unfinished_pieces_again() {
 }
 
 #[tokio::test]
+async fn a_resumed_row_keeps_its_kept_bytes_while_the_playlist_is_read() {
+    let s = setup(true).await;
+    s.answer(s.hls_formats());
+    let added = s.add("1080p");
+    wait_until(&s.core, &added.id, |r| {
+        pieces_done(r).is_some_and(|n| n >= 3)
+    })
+    .await;
+    s.core.pause_download(&added.id).unwrap();
+    let paused = wait_for(&s.core, &added.id, DownloadStatus::Paused).await;
+    assert!(paused.downloaded_bytes > 0);
+    // The playlist is slow now, so the resumed run waits on it a while.
+    let slow_playlist = playlist_route(media_playlist("v", VIDEO_PIECES, true, None)).throttled(20);
+    s.server.set_route("/hls/v.m3u8", slow_playlist);
+
+    s.core.resume_download(&added.id).unwrap();
+    wait_for(&s.core, &added.id, DownloadStatus::Active).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    s.core.tick_telemetry();
+    let reading = s.core.get_status(&added.id).unwrap();
+
+    assert_eq!(reading.downloaded_bytes, paused.downloaded_bytes);
+}
+
+#[tokio::test]
 async fn a_crash_keeps_finished_pieces() {
     let s = setup(true).await;
     s.answer(s.hls_formats());

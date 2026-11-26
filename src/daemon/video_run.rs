@@ -277,14 +277,21 @@ fn finished_bytes(plan: &VideoPlan) -> u64 {
     plan.streams[..finished].iter().map(stream_bytes).sum()
 }
 
-/// Bytes the current stream's state file already covers; 0 without one.
+/// Bytes the current stream already has on disk from earlier runs: what its
+/// state file covers, or a pieces stream's written and waiting pieces; 0 without one.
 fn covered_in_current_stream(plan: &VideoPlan) -> u64 {
     let VideoStep::Stream(index) = plan.step else {
         return 0;
     };
-    let Some(file) = plan.streams.get(index).and_then(|s| s.file.as_deref()) else {
+    let Some(stream) = plan.streams.get(index) else {
         return 0;
     };
+    let Some(file) = stream.file.as_deref() else {
+        return 0;
+    };
+    if stream.source.is_pieces() {
+        return crate::pieces::kept_bytes(file);
+    }
     let Ok(state) = crate::state::load(&state_path(file)) else {
         return 0;
     };
@@ -465,5 +472,35 @@ mod tests {
         rec.status = DownloadStatus::Active;
         rec.apply_outcome(Err(Error::Protocol("status 500".into())));
         assert_eq!(rec.status, DownloadStatus::Failed);
+    }
+    #[test]
+    fn pieces_a_resumed_stream_already_kept_are_not_progress_of_this_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rec = half_done_record(dir.path(), 500_000);
+        let file = dir.path().join("Clip.fhls-1.mp4");
+        let pieces: Vec<crate::pieces::Piece> = (0..3)
+            .map(|i| crate::pieces::Piece {
+                url: url::Url::parse(&format!("https://video.test/p/{i}")).unwrap(),
+                range: None,
+                duration_ms: 4000,
+                key: None,
+            })
+            .collect();
+        let mut store = crate::pieces::PieceStore::open(&file, &pieces).unwrap();
+        store.keep(0, &[0; 300]).unwrap();
+        store.flush().unwrap();
+        store.keep(2, &[2; 200]).unwrap();
+        drop(store);
+        let stream = &mut rec.video.as_mut().unwrap().streams[0];
+        stream.file = Some(file);
+        stream.source = crate::video::StreamSource::Hls {
+            playlist: "https://video.test/clip.m3u8".to_string(),
+        };
+        let record = Arc::new(Mutex::new(rec));
+
+        begin_video_run(&record).unwrap();
+
+        // The written piece and the one waiting for it.
+        assert_eq!(record.lock().unwrap().bytes_at_start, 500);
     }
 }

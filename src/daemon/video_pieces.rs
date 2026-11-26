@@ -9,12 +9,15 @@ use super::video_run::{no_video, stream_job, StreamJob};
 use crate::cancel::or_cancel;
 use crate::engine::{Outcome, Timeouts};
 use crate::error::{is_link_status, Error};
-use crate::pieces::{download, leftovers, Piece, PieceCounter, PiecesRequest, UNREADABLE_PLAYLIST};
+use crate::pieces::{
+    download, kept_bytes, leftovers, Piece, PieceCounter, PiecesRequest, UNREADABLE_PLAYLIST,
+};
 use crate::request_context::{stream_client, RequestContext};
 use crate::video::errors::{DRM, LIVE};
 use crate::video::hls::{parse_playlist, HlsError, Playlist, MAX_PLAYLIST_BYTES};
 use crate::video::StreamSource;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use url::Url;
@@ -47,6 +50,11 @@ impl DaemonCore {
                 steals: 0,
             });
         }
+        // The row keeps what earlier runs kept while the playlist is read
+        // again, so neither the size nor the speed jumps.
+        job.progress
+            .downloaded
+            .store(kept_bytes(&file), Ordering::Relaxed);
         let pieces = pieces_of(&client, &job.stream.source, &cancel).await?;
         let counter = Arc::new(PieceCounter::default());
         record.lock().unwrap().pieces_counter = Some(Arc::clone(&counter));
