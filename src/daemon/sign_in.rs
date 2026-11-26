@@ -171,6 +171,7 @@ pub fn restore(secrets: Option<&SecretStore>, task: &mut TaskRecord) -> bool {
         cookies,
         referer: task.referer.clone(),
         user_agent: task.user_agent.clone(),
+        title: task.page_title.clone(),
     };
     // Cookies that ran out while the daemon was off are dropped here.
     let Ok(CheckedContext { context, client }) = check(&sent) else {

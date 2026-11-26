@@ -118,6 +118,7 @@ impl DaemonCore {
             cookies: self.cookies_for(&job.id),
             referer: job.referer,
             user_agent: job.user_agent,
+            title: None,
         };
         let ctx = Some(&ctx).filter(|ctx| !ctx.is_empty());
         let client = stream_client(ctx, &job.stream.headers, Timeouts::default())?;

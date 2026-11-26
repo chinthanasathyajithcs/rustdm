@@ -172,6 +172,7 @@ fn cookie_context() -> RequestContext {
         }],
         referer: None,
         user_agent: None,
+        title: None,
     }
 }
 

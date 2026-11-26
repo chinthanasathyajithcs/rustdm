@@ -79,6 +79,8 @@ pub struct TaskRecord {
     pub has_cookies: bool,
     /// Who added the download, when it was the browser.
     pub added_by: Option<AddedBy>,
+    /// The title of the page the link came from, when the browser sent one.
+    pub page_title: Option<String>,
     /// Page the download came from, sent as the Referer.
     pub referer: Option<String>,
     /// The browser's User-Agent, sent with every request.
@@ -172,6 +174,7 @@ impl TaskRecord {
             pieces_counter: None,
             progress_base: 0,
             added_by: None,
+            page_title: None,
         }
     }
 
@@ -193,6 +196,7 @@ impl TaskRecord {
         rec.referer = saved.referer;
         rec.user_agent = saved.user_agent;
         rec.added_by = saved.added_by;
+        rec.page_title = saved.page_title;
         rec.video = saved.video;
         (rec.quality, rec.quality_text) = read_saved_quality(&rec.id, saved.quality);
         // Nothing runs right after a restart; anything that was running waits in the queue.
@@ -225,6 +229,7 @@ impl TaskRecord {
             video: self.video.clone(),
             quality: self.quality_text.clone(),
             added_by: self.added_by,
+            page_title: self.page_title.clone(),
         }
     }
 
@@ -234,6 +239,7 @@ impl TaskRecord {
         self.has_cookies = !ctx.cookies.is_empty();
         self.referer = ctx.referer.clone();
         self.user_agent = ctx.user_agent.clone();
+        self.page_title = ctx.title.clone();
         self.client = client;
         self.client_pending = false;
     }
@@ -265,6 +271,7 @@ impl TaskRecord {
             cookies: Vec::new(),
             referer: self.referer.clone(),
             user_agent: self.user_agent.clone(),
+            title: None,
         })
     }
 
@@ -1063,5 +1070,38 @@ mod tests {
         assert_eq!(back.added_by, Some(AddedBy::Browser));
         assert_eq!(back.to_summary().added_by, Some(AddedBy::Browser));
         assert_eq!(record(DownloadStatus::Queued).to_summary().added_by, None);
+    }
+
+    #[test]
+    fn set_context_keeps_the_page_title() {
+        let mut rec = record(DownloadStatus::Queued);
+        let ctx = RequestContext {
+            title: Some("Angel One".to_string()),
+            ..RequestContext::default()
+        };
+
+        rec.set_context(&ctx, None);
+
+        assert_eq!(rec.page_title.as_deref(), Some("Angel One"));
+    }
+
+    #[test]
+    fn the_page_title_survives_save_and_restore() {
+        let mut rec = record(DownloadStatus::Queued);
+        rec.page_title = Some("Angel One".to_string());
+
+        let back = TaskRecord::from_saved(rec.to_saved());
+
+        assert_eq!(back.page_title.as_deref(), Some("Angel One"));
+    }
+
+    #[test]
+    fn a_restart_keeps_the_page_title() {
+        let mut rec = record(DownloadStatus::Queued);
+        rec.page_title = Some("Angel One".to_string());
+
+        crate::daemon::sign_in::restore(None, &mut rec);
+
+        assert_eq!(rec.page_title.as_deref(), Some("Angel One"));
     }
 }

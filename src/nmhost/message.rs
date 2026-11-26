@@ -189,7 +189,7 @@ fn typed_context(context: Map<String, Value>) -> Result<RequestContext, String> 
     for (key, value) in &context {
         let fits = match key.as_str() {
             "cookies" => value.is_array(),
-            "referer" | "user_agent" => value.is_string(),
+            "referer" | "user_agent" | "title" => value.is_string(),
             _ => true,
         };
         if !fits {
@@ -412,5 +412,28 @@ mod tests {
         assert_eq!(value["id"], Value::Null);
         assert_eq!(value["error"]["kind"], "too_large");
         assert!(value["error"].get("code").is_none());
+    }
+
+    #[test]
+    fn a_title_that_is_not_a_string_is_refused() {
+        let (_, message) = parse(json!({
+            "type": "add", "id": 9, "url": "https://example.com/x",
+            "context": {"title": 5}
+        }))
+        .unwrap_err();
+        assert!(message.contains("context.title"), "{message}");
+    }
+
+    #[test]
+    fn a_title_reaches_the_daemon_context() {
+        let request = parse(json!({
+            "type": "add", "id": 9, "url": "https://example.com/x",
+            "context": {"title": "Angel One"}
+        }))
+        .unwrap();
+        let HostRequest::Add { context, .. } = request else {
+            panic!("an add")
+        };
+        assert_eq!(context.unwrap().title.as_deref(), Some("Angel One"));
     }
 }

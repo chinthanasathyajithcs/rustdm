@@ -791,6 +791,7 @@ fn saved_download(
         }),
         quality: None,
         added_by: None,
+        page_title: None,
     }
 }
 

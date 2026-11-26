@@ -60,6 +60,9 @@ pub struct SavedDownload {
     /// Who added the download, when it was the browser. Missing from older queue files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<AddedBy>,
+    /// The title of the page the link came from. Missing from older queue files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_title: Option<String>,
 }
 
 /// Reads and writes the queue file. Saves are serialized and atomic.
@@ -180,6 +183,7 @@ mod tests {
                 video: None,
                 quality: None,
                 added_by: None,
+                page_title: None,
             }],
         }
     }

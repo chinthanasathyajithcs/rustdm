@@ -6,6 +6,7 @@ use rustdm::daemon::DaemonCore;
 use rustdm::ipc::protocol::{
     AddDownloadParams, ChooseQualityParams, DownloadStatus, DownloadSummary,
 };
+use rustdm::request_context::RequestContext;
 use rustdm::testing::video::{recorded_args, VideoWorld};
 use rustdm::testing::{Route, TestServer};
 use std::path::Path;
@@ -118,6 +119,31 @@ impl Setup {
                 added_by: None,
             })
             .unwrap()
+    }
+
+    fn add_titled(&self, path: &str, title: &str) -> DownloadSummary {
+        self.core
+            .add_download(AddDownloadParams {
+                context: Some(RequestContext {
+                    title: Some(title.to_string()),
+                    ..RequestContext::default()
+                }),
+                ..self.params(path)
+            })
+            .unwrap()
+    }
+
+    fn params(&self, path: &str) -> AddDownloadParams {
+        AddDownloadParams {
+            url: self.server.url().join(path).unwrap().to_string(),
+            destination: Some(self.folder.path().to_path_buf()),
+            filename: None,
+            connections: Some(2),
+            max_bytes_per_sec: None,
+            context: None,
+            quality: None,
+            added_by: None,
+        }
     }
 
     fn file(&self, name: &str) -> Vec<u8> {
@@ -311,4 +337,26 @@ async fn a_still_refused_direct_link_pauses_and_r_tries_again() {
     s.core.resume_download(&added.id).unwrap();
     wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
     assert_eq!(s.file("single.mp4"), stream_bytes("single"));
+}
+
+#[tokio::test]
+async fn a_direct_playlist_with_a_page_title_is_named_after_it() {
+    let s = setup().await;
+
+    let added = s.add_titled("/m/single.m3u8", "Angel One");
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+
+    assert_eq!(names_in(s.folder.path()), ["Angel One.mp4"]);
+}
+
+#[tokio::test]
+async fn a_long_page_title_reaches_the_file_name_whole() {
+    let s = setup().await;
+    let title = "Long title ".repeat(15).trim_end().to_string();
+    assert!(title.chars().count() > 150);
+
+    let added = s.add_titled("/m/single.m3u8", &title);
+    wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+
+    assert_eq!(names_in(s.folder.path()), [format!("{title}.mp4")]);
 }

@@ -37,6 +37,7 @@ fn context(value: &str) -> RequestContext {
         cookies: vec![cookie(value)],
         referer: Some(REFERER.to_string()),
         user_agent: Some(USER_AGENT.to_string()),
+        title: None,
     }
 }
 

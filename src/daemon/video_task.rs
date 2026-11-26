@@ -386,6 +386,11 @@ impl DaemonCore {
                 None
             } else {
                 rec.error_message = None;
+                let titled = VideoChoices {
+                    title: title_for(origin, &choices.title, rec.page_title.as_deref()),
+                    ..choices.clone()
+                };
+                let choices = &titled;
                 tracing::info!(
                     "{}: {} qualities found on {}",
                     rec.id,
@@ -588,6 +593,18 @@ fn settle_run(rec: &mut TaskRecord) {
     rec.eta_secs = None;
     rec.cancel_tx = None;
     rec.running = false;
+}
+
+/// The title a video is named by. A direct playlist link has only its link's
+/// name, so the page's title goes first; a page yt-dlp read keeps yt-dlp's
+/// title and falls back to the page's only when yt-dlp has none.
+fn title_for(origin: PlanOrigin, found: &str, page_title: Option<&str>) -> String {
+    let chosen = match origin {
+        PlanOrigin::Playlist => page_title,
+        PlanOrigin::Page if found.trim().is_empty() => page_title,
+        PlanOrigin::Page => None,
+    };
+    chosen.unwrap_or(found).to_string()
 }
 
 /// The file a video is saved as: the name the user asked for, else its title,
@@ -896,5 +913,35 @@ mod tests {
         left.sort();
         assert_eq!(left, ["lookup-3.json", "lookup-dir.txt", "queue.json"]);
         sweep_lookup_files(&dir.path().join("missing"));
+    }
+
+    #[test]
+    fn a_playlist_takes_the_page_title_first() {
+        assert_eq!(
+            title_for(PlanOrigin::Playlist, "hls", Some("Angel One")),
+            "Angel One"
+        );
+    }
+
+    #[test]
+    fn a_playlist_without_a_page_title_keeps_the_link_name() {
+        assert_eq!(title_for(PlanOrigin::Playlist, "hls", None), "hls");
+    }
+
+    #[test]
+    fn a_page_keeps_the_yt_dlp_title() {
+        assert_eq!(
+            title_for(PlanOrigin::Page, "Real Title", Some("Tab Title")),
+            "Real Title"
+        );
+    }
+
+    #[test]
+    fn a_page_with_no_yt_dlp_title_uses_the_page_title() {
+        assert_eq!(
+            title_for(PlanOrigin::Page, "  ", Some("Tab Title")),
+            "Tab Title"
+        );
+        assert_eq!(title_for(PlanOrigin::Page, "", None), "");
     }
 }
