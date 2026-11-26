@@ -571,6 +571,7 @@ pub(crate) mod test_support {
             ],
             stall: None,
             step: None,
+            pieces: None,
         });
         app
     }
@@ -800,6 +801,7 @@ mod tests {
                 lanes: Vec::new(),
                 stall: None,
                 step: None,
+                pieces: None,
             });
         }
         let history = &app.speed_history["dl_1"];

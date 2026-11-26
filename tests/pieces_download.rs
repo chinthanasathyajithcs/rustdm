@@ -467,3 +467,26 @@ async fn a_resume_counts_the_waiting_pieces() {
         (3 * PIECE_BYTES) as u64
     );
 }
+
+#[tokio::test]
+async fn running_pieces_show_how_far_they_are() {
+    let server = server_with(4, |i| Route::ok(body(i, PIECE_BYTES)).throttled(2_000)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("A.f1.mp4");
+    let r = run(pieces_of(&server, 4), &file, 2, Progress::new());
+    let counter = Arc::clone(&r.counter);
+
+    let running = tokio::spawn(download(r.request));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let midway = counter.activity();
+    running.await.unwrap().unwrap();
+
+    assert_eq!(midway.running.keys().copied().collect::<Vec<_>>(), [0, 1]);
+    for piece in midway.running.values() {
+        assert!(piece.got > 0 && piece.got < PIECE_BYTES as u64, "{piece:?}");
+        assert_eq!(piece.len, Some(PIECE_BYTES as u64));
+    }
+    let done = counter.activity();
+    assert!(done.running.is_empty());
+    assert_eq!(done.written, 4);
+}

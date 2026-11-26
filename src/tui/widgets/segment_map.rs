@@ -1,6 +1,6 @@
 //! The segment map: which parts of the file are on disk, drawn as cells.
 
-use crate::ipc::protocol::{DownloadStatus, DownloadSummary, TelemetryTick};
+use crate::ipc::protocol::{DownloadStatus, DownloadSummary, PieceMap, TelemetryTick};
 use crate::tui::theme;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -57,22 +57,66 @@ pub fn segment_cells(
     map
 }
 
-/// "Segments  █ done  ▒ partial  ▌ connection  ░ missing", each mark in its map colour.
-fn legend() -> Line<'static> {
-    let mut spans = vec![Span::styled("Segments", theme::MUTED)];
-    for (mark, style, name) in [
-        ("█", theme::SEGMENT_DONE, "done"),
-        ("▒", theme::SEGMENT_PARTIAL, "partial"),
-        ("▌", theme::SEGMENT_CURSOR, "connection"),
-        // The missing mark is drawn faint on the map; the legend needs it visible.
-        ("░", theme::DIM, "missing"),
-    ] {
+/// Split a video's `map.total` pieces over `cells` cells: a cell is done when
+/// all its pieces are on disk, a cursor when one of them is being fetched.
+pub fn piece_cells(map: &PieceMap, cells: usize) -> Vec<MapCell> {
+    let total = map.total as usize;
+    if total == 0 || cells == 0 {
+        return vec![MapCell::Empty; cells];
+    }
+    let running: Vec<u64> = map.running.iter().map(|lane| lane.index).collect();
+    let kept = |i: u64| i < map.written || map.waiting.contains(&i);
+    (0..cells)
+        .map(|cell| {
+            let first = cell * total / cells;
+            let end = ((cell + 1) * total / cells).max(first + 1);
+            let pieces = first as u64..end as u64;
+            let done = pieces.clone().filter(|&i| kept(i)).count();
+            if pieces.clone().any(|i| running.contains(&i)) {
+                MapCell::Cursor
+            } else if done == pieces.count() {
+                MapCell::Done
+            } else if done > 0 {
+                MapCell::Partial
+            } else {
+                MapCell::Empty
+            }
+        })
+        .collect()
+}
+
+/// "Segments  █ done  ▒ partial  ▌ connection  ░ missing", each mark in its
+/// map colour; for a video in pieces, "Pieces  █ done  ▌ downloading  ░ missing".
+fn legend(pieces: bool) -> Line<'static> {
+    let (title, marks) = if pieces {
+        ("Pieces", PIECE_MARKS.as_slice())
+    } else {
+        ("Segments", SEGMENT_MARKS.as_slice())
+    };
+    let mut spans = vec![Span::styled(title, theme::MUTED)];
+    for &(mark, style, name) in marks {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(mark, style));
         spans.push(Span::styled(format!(" {name}"), theme::MUTED));
     }
     Line::from(spans)
 }
+
+type Mark = (&'static str, ratatui::style::Style, &'static str);
+
+const SEGMENT_MARKS: [Mark; 4] = [
+    ("█", theme::SEGMENT_DONE, "done"),
+    ("▒", theme::SEGMENT_PARTIAL, "partial"),
+    ("▌", theme::SEGMENT_CURSOR, "connection"),
+    // The missing mark is drawn faint on the map; the legend needs it visible.
+    ("░", theme::DIM, "missing"),
+];
+
+const PIECE_MARKS: [Mark; 3] = [
+    ("█", theme::SEGMENT_DONE, "done"),
+    ("▌", theme::SEGMENT_CURSOR, "downloading"),
+    ("░", theme::DIM, "missing"),
+];
 
 pub fn render_segment_map(
     frame: &mut Frame,
@@ -85,7 +129,8 @@ pub fn render_segment_map(
     }
     let rows = (area.height - 1) as usize;
     let width = area.width as usize;
-    let title = legend();
+    let pieces = tick.and_then(|t| t.pieces.as_ref());
+    let title = legend(pieces.is_some());
 
     let total = d
         .total_bytes
@@ -93,6 +138,8 @@ pub fn render_segment_map(
         .unwrap_or(0);
     let cells = if d.status == DownloadStatus::Completed {
         vec![MapCell::Done; width * rows]
+    } else if let Some(map) = pieces {
+        piece_cells(map, width * rows)
     } else if let (Some(t), true) = (tick, total > 0) {
         let completed: Vec<(u64, u64)> = t.segments.iter().map(|s| (s.start, s.end)).collect();
         let cursors: Vec<u64> = t
@@ -148,5 +195,60 @@ mod tests {
             ]
         );
         assert_eq!(segment_cells(0, &[], &[], 3), vec![MapCell::Empty; 3]);
+    }
+
+    use crate::ipc::protocol::PieceLane;
+
+    fn lane(index: u64) -> PieceLane {
+        PieceLane {
+            index,
+            downloaded_bytes: 1,
+            total_bytes: None,
+        }
+    }
+
+    #[test]
+    fn piece_cells_show_each_piece_when_there_is_room() {
+        let map = PieceMap {
+            total: 4,
+            written: 1,
+            waiting: vec![3],
+            running: vec![lane(1)],
+        };
+
+        // Two cells a piece.
+        assert_eq!(
+            piece_cells(&map, 8),
+            vec![
+                MapCell::Done,
+                MapCell::Done,
+                MapCell::Cursor,
+                MapCell::Cursor,
+                MapCell::Empty,
+                MapCell::Empty,
+                MapCell::Done,
+                MapCell::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn piece_cells_share_a_cell_when_pieces_are_many() {
+        // Ten pieces in three cells: 0-2, 3-5, 6-9.
+        let map = PieceMap {
+            total: 10,
+            written: 3,
+            waiting: vec![4],
+            running: vec![lane(8)],
+        };
+
+        assert_eq!(
+            piece_cells(&map, 3),
+            vec![MapCell::Done, MapCell::Partial, MapCell::Cursor]
+        );
+        assert_eq!(
+            piece_cells(&PieceMap::default(), 2),
+            vec![MapCell::Empty; 2]
+        );
     }
 }

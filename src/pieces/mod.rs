@@ -41,8 +41,11 @@ pub use store::{
     fingerprint, kept_bytes, leftovers, may_start, state_path, waiting_dir, PieceStore,
 };
 
+mod counter;
+pub use counter::{PieceActivity, PieceCounter, RunningPiece};
+
 mod download;
-pub use download::{download, PieceCounter, PiecesRequest};
+pub use download::{download, PiecesRequest};
 
 mod aes;
 pub use self::aes::decrypt;

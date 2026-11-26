@@ -932,10 +932,14 @@ impl DaemonCore {
                         .to_string(),
                     })
                     .collect();
-                let active_connections = if lanes.is_empty() {
-                    task.connections as usize
-                } else {
-                    lanes.iter().filter(|l| l.state == "active").count()
+                let pieces = task
+                    .pieces_counter
+                    .as_deref()
+                    .map(super::video_pieces::piece_map);
+                let active_connections = match &pieces {
+                    Some(map) => map.running.len(),
+                    None if lanes.is_empty() => task.connections as usize,
+                    None => lanes.iter().filter(|l| l.state == "active").count(),
                 };
 
                 let tick = TelemetryTick {
@@ -952,6 +956,7 @@ impl DaemonCore {
                         task.stall(now)
                     },
                     step: task.step.clone(),
+                    pieces,
                 };
                 let _ = self.telemetry_tx.send(tick);
             }

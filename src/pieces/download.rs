@@ -1,7 +1,7 @@
 //! Fetching a stream's pieces several at a time, through the download's speed
 //! caps and stop signal, and writing them in order (spec 1c, sections 7.3, 7.4).
 
-use super::{decrypt, may_start, Piece, PieceStore, UNREADABLE_PLAYLIST};
+use super::{decrypt, may_start, Piece, PieceCounter, PieceStore, UNREADABLE_PLAYLIST};
 use crate::cancel::{or_cancel, sleep_or_cancel};
 use crate::engine::Progress;
 use crate::error::{is_link_status, Error};
@@ -9,7 +9,7 @@ use crate::retry::{backoff_delay, retry_after_secs, RetryCause, MAX_SEGMENT_ATTE
 use reqwest::header::{CONTENT_RANGE, RANGE, RETRY_AFTER};
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -18,13 +18,6 @@ use url::Url;
 
 /// An AES-128 key's bytes and the IV of the piece it opens.
 type Sealed = Option<([u8; 16], [u8; 16])>;
-
-/// How many pieces are finished, of how many; the row's `piece 140 of 312`.
-#[derive(Debug, Default)]
-pub struct PieceCounter {
-    pub done: AtomicU64,
-    pub total: AtomicU64,
-}
 
 /// One stream to fetch as pieces.
 pub struct PiecesRequest {
@@ -54,14 +47,12 @@ pub async fn download(req: PiecesRequest) -> Result<PathBuf, Error> {
     req.counter
         .total
         .store(req.pieces.len() as u64, Ordering::Relaxed);
-    req.counter.done.store(
-        (store.written() + store.waiting().len()) as u64,
-        Ordering::Relaxed,
-    );
+    req.counter.kept(store.written(), store.waiting());
     let mut running = JoinSet::new();
     if let Err(e) = fetch_all(&req, &mut store, &mut running).await {
         // The stopped pieces must not add bytes after the count below.
         running.shutdown().await;
+        req.counter.stop_all();
         req.progress
             .downloaded
             .store(store.kept_bytes(), Ordering::Relaxed);
@@ -115,7 +106,11 @@ async fn fetch_all(
                 client.clone(),
                 pieces[index].clone(),
                 sealed,
-                Arc::clone(progress),
+                Tally {
+                    progress: Arc::clone(progress),
+                    counter: Arc::clone(counter),
+                    index,
+                },
                 cancel.clone(),
             );
             running.spawn(async move { (index, fetch.await) });
@@ -125,9 +120,10 @@ async fn fetch_all(
         };
         let (index, fetched) = joined.map_err(|e| Error::State(e.to_string()))?;
         in_flight.remove(&index);
+        counter.stop(index);
         store.keep(index, &fetched?)?;
         store.flush()?;
-        counter.done.fetch_add(1, Ordering::Relaxed);
+        counter.kept(store.written(), store.waiting());
     }
     Ok(())
 }
@@ -138,13 +134,14 @@ async fn fetch_piece(
     client: reqwest::Client,
     piece: Piece,
     sealed: Sealed,
-    progress: Arc<Progress>,
+    tally: Tally,
     cancel: watch::Receiver<bool>,
 ) -> Result<Vec<u8>, Error> {
     let cancel = Some(&cancel);
     let mut attempt = 0u32;
     loop {
-        let retry = match attempt_piece(&client, &piece, &progress, cancel).await? {
+        tally.counter.start(tally.index);
+        let retry = match attempt_piece(&client, &piece, &tally, cancel).await? {
             Attempt::Done(bytes) => {
                 return match sealed {
                     Some((key, iv)) => decrypt(&key, &iv, &bytes),
@@ -161,7 +158,7 @@ async fn fetch_piece(
         }
         let (cause, wait) = retry;
         let wait = wait.unwrap_or_else(|| backoff_delay(attempt, fastrand::f64()));
-        progress.note_retry(cause, wait);
+        tally.progress.note_retry(cause, wait);
         sleep_or_cancel(wait, cancel).await?;
     }
 }
@@ -195,6 +192,21 @@ async fn key_bytes(
     Ok(key)
 }
 
+/// Where one piece's bytes are counted: the download's progress, and the
+/// piece's own line in the details pane.
+struct Tally {
+    progress: Arc<Progress>,
+    counter: Arc<PieceCounter>,
+    index: usize,
+}
+
+impl Tally {
+    fn grow(&self, bytes: u64, len: Option<u64>) {
+        self.progress.downloaded.fetch_add(bytes, Ordering::Relaxed);
+        self.counter.grow(self.index, bytes, len);
+    }
+}
+
 /// How one request for a piece ended.
 enum Attempt {
     Done(Vec<u8>),
@@ -205,9 +217,10 @@ enum Attempt {
 async fn attempt_piece(
     client: &reqwest::Client,
     piece: &Piece,
-    progress: &Progress,
+    tally: &Tally,
     cancel: Option<&watch::Receiver<bool>>,
 ) -> Result<Attempt, Error> {
+    let progress = &tally.progress;
     let mut request = client.get(piece.url.clone());
     if let Some(slice) = piece.range {
         let last = slice.offset + slice.len.saturating_sub(1);
@@ -251,14 +264,16 @@ async fn attempt_piece(
             "the server answered a piece with status {status}"
         )));
     }
+    let len = piece
+        .range
+        .map(|slice| slice.len)
+        .or(response.content_length());
     let mut bytes = Vec::new();
     loop {
         match or_cancel(response.chunk(), cancel).await? {
             Ok(Some(chunk)) => {
                 progress.throttle(chunk.len() as u64, cancel).await?;
-                progress
-                    .downloaded
-                    .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                tally.grow(chunk.len() as u64, len);
                 bytes.extend_from_slice(&chunk);
             }
             Ok(None) => break,

@@ -9,6 +9,7 @@ use super::video_run::{no_video, stream_job, StreamJob};
 use crate::cancel::or_cancel;
 use crate::engine::{Outcome, Timeouts};
 use crate::error::{is_link_status, Error};
+use crate::ipc::protocol::{PieceLane, PieceMap};
 use crate::pieces::{
     download, kept_bytes, leftovers, Piece, PieceCounter, PiecesRequest, UNREADABLE_PLAYLIST,
 };
@@ -198,4 +199,63 @@ fn video_error(message: &str) -> Error {
 
 pub(super) fn unreadable() -> Error {
     video_error(UNREADABLE_PLAYLIST)
+}
+
+/// The details pane's view of a pieces stream.
+pub(super) fn piece_map(counter: &PieceCounter) -> PieceMap {
+    let activity = counter.activity();
+    PieceMap {
+        total: counter.total.load(Ordering::Relaxed),
+        written: activity.written as u64,
+        waiting: activity.waiting.iter().map(|&i| i as u64).collect(),
+        running: activity
+            .running
+            .iter()
+            .map(|(&index, piece)| PieceLane {
+                index: index as u64,
+                downloaded_bytes: piece.got,
+                total_bytes: piece.len,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pieces::{PieceActivity, RunningPiece};
+
+    #[test]
+    fn the_piece_map_copies_where_the_pieces_are() {
+        let counter = PieceCounter::default();
+        counter.total.store(10, Ordering::Relaxed);
+        counter.set_activity_for_tests(PieceActivity {
+            written: 2,
+            waiting: [4].into(),
+            running: [(
+                2,
+                RunningPiece {
+                    got: 5,
+                    len: Some(9),
+                },
+            )]
+            .into(),
+        });
+
+        let map = piece_map(&counter);
+
+        assert_eq!(
+            map,
+            PieceMap {
+                total: 10,
+                written: 2,
+                waiting: vec![4],
+                running: vec![PieceLane {
+                    index: 2,
+                    downloaded_bytes: 5,
+                    total_bytes: Some(9),
+                }],
+            }
+        );
+    }
 }

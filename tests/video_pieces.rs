@@ -394,6 +394,35 @@ async fn a_resumed_row_keeps_its_kept_bytes_while_the_playlist_is_read() {
 }
 
 #[tokio::test]
+async fn the_details_pane_sees_each_running_piece() {
+    let s = setup(true).await;
+    s.answer(s.hls_formats());
+    let mut ticks = s.core.telemetry_tx.subscribe();
+    let added = s.add("1080p");
+    wait_until(&s.core, &added.id, |r| {
+        pieces_done(r).is_some_and(|n| n >= 1)
+    })
+    .await;
+    s.core.tick_telemetry();
+
+    let mut map = None;
+    while let Ok(tick) = ticks.try_recv() {
+        if tick.id == added.id && tick.pieces.as_ref().is_some_and(|m| !m.running.is_empty()) {
+            map = Some((tick.active_connections, tick.pieces.unwrap()));
+        }
+    }
+    let (connections, map) = map.expect("a tick with running pieces");
+
+    assert_eq!(map.total, VIDEO_PIECES as u64);
+    assert_eq!(connections, map.running.len());
+    assert!(map.written + map.waiting.len() as u64 >= 1);
+    for lane in &map.running {
+        assert!(lane.index >= map.written, "{lane:?}");
+        assert!(!map.waiting.contains(&lane.index), "{lane:?}");
+    }
+}
+
+#[tokio::test]
 async fn a_crash_keeps_finished_pieces() {
     let s = setup(true).await;
     s.answer(s.hls_formats());
