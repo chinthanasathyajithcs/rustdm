@@ -13,7 +13,7 @@ use crate::template::collision_name;
 use crate::tools::{FetchCtx, Freshness, Installed, Tool, ToolError};
 use crate::video::errors::join_failed_message;
 use crate::video::join::{join, joining_path, JoinFailure, JoinRequest, UNKNOWN_PERCENT};
-use crate::video::{Container, StreamKind, VideoStep};
+use crate::video::{Container, StreamKind, StreamSource, VideoStep};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -34,10 +34,17 @@ impl Drop for FfmpegFetch {
     }
 }
 
-/// A final name held by a running download until its file is placed.
-struct NameClaim {
-    path: PathBuf,
+/// A name held by a running download until its file is placed.
+pub(super) struct NameClaim {
+    pub(super) path: PathBuf,
     claimed: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+impl NameClaim {
+    /// Hold `path`, already inserted into `claimed`, until dropped.
+    pub(super) fn new(path: PathBuf, claimed: Arc<Mutex<HashSet<PathBuf>>>) -> Self {
+        Self { path, claimed }
+    }
 }
 
 impl Drop for NameClaim {
@@ -49,7 +56,8 @@ impl Drop for NameClaim {
 /// What the join needs, copied out of the record.
 struct JoinJob {
     video: PathBuf,
-    audio: PathBuf,
+    /// None when one stream is remuxed.
+    audio: Option<PathBuf>,
     container: Container,
     duration_secs: Option<u64>,
     folder: PathBuf,
@@ -68,7 +76,9 @@ impl DaemonCore {
         cancel: watch::Receiver<bool>,
     ) {
         let files = stream_files(record);
+        let remux = needs_ffmpeg(record);
         let outcome = match files.as_slice() {
+            [_] if remux => self.join_two_streams(record, ffmpeg, cancel).await,
             [_] => {
                 // The free name and `Done` are saved before the rename, so a
                 // restart in between finds the rename to finish, or finished.
@@ -103,7 +113,7 @@ impl DaemonCore {
         let temp = joining_path(&job.final_path);
         let request = JoinRequest {
             video: &job.video,
-            audio: &job.audio,
+            audio: job.audio.as_deref(),
             container: job.container,
             temp: &temp,
             duration_secs: job.duration_secs,
@@ -192,11 +202,17 @@ impl DaemonCore {
     }
 }
 
-pub(super) fn has_two_streams(record: &Arc<Mutex<TaskRecord>>) -> bool {
+/// Whether the video's final file is made by ffmpeg: two streams are joined,
+/// and one HLS stream is remuxed (its pieces may be MPEG-TS, whatever yt-dlp
+/// names them).
+pub(super) fn needs_ffmpeg(record: &Arc<Mutex<TaskRecord>>) -> bool {
     let rec = record.lock().unwrap();
     rec.video
         .as_ref()
-        .is_some_and(|plan| plan.streams.len() > 1)
+        .is_some_and(|plan| match plan.streams.as_slice() {
+            [one] => matches!(one.source, StreamSource::Hls { .. }),
+            streams => streams.len() > 1,
+        })
 }
 
 /// Copy out what the join needs, and keep the free final name in the record
@@ -209,9 +225,17 @@ fn join_job(record: &Arc<Mutex<TaskRecord>>, final_path: &Path) -> Result<JoinJo
         let stream = plan.streams.iter().find(|s| s.kind == kind);
         stream.and_then(|s| s.file.clone())
     };
-    let (Some(video), Some(audio)) = (file_of(StreamKind::Video), file_of(StreamKind::Audio))
-    else {
+    let (video, audio) = match plan.streams.as_slice() {
+        [one] => (one.file.clone(), None),
+        _ => (file_of(StreamKind::Video), Some(file_of(StreamKind::Audio))),
+    };
+    let (Some(video), audio) = (video, audio) else {
         return Err(no_video());
+    };
+    let audio = match audio {
+        Some(None) => return Err(no_video()),
+        Some(Some(audio)) => Some(audio),
+        None => None,
     };
     let container = plan.choice.as_ref().map_or(Container::Mp4, |c| c.container);
     let duration_secs = plan.duration_secs;

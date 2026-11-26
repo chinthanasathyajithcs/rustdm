@@ -31,10 +31,8 @@ pub fn join_failed_message(last_line: &str, folder: &std::path::Path) -> String 
 }
 const SIGN_IN_NEEDED: &str =
     "This video needs you to be signed in. Add it from your browser so rustdm gets your sign-in.";
-const LIVE: &str = "This is a live stream; rustdm downloads finished videos only.";
-const DRM: &str = "This video is copy-protected; rustdm can't download it.";
-const PIECES_ONLY: &str =
-    "This site sends its video in small pieces; rustdm can't download that yet.";
+pub const LIVE: &str = "This is a live stream; rustdm downloads finished videos only.";
+pub const DRM: &str = "This video is copy-protected; rustdm can't download it.";
 const TIMED_OUT: &str = "yt-dlp took more than a minute to read this page; press r to try again.";
 const TOO_MUCH_OUTPUT: &str = "yt-dlp gave more output than expected";
 /// The longest yt-dlp error line shown as it is.
@@ -193,7 +191,6 @@ pub fn page_message(info: &PageInfo, err: Option<ChoicesError>, _site: &str) -> 
     }
     let text = match err? {
         ChoicesError::Drm => DRM,
-        ChoicesError::PiecesOnly => PIECES_ONLY,
         ChoicesError::NoFormats => NO_VIDEO,
     };
     Some(text.to_string())
@@ -519,10 +516,6 @@ mod tests {
         assert_eq!(
             text(ChoicesError::Drm).as_deref(),
             Some("This video is copy-protected; rustdm can't download it.")
-        );
-        assert_eq!(
-            text(ChoicesError::PiecesOnly).as_deref(),
-            Some("This site sends its video in small pieces; rustdm can't download that yet.")
         );
         assert_eq!(
             text(ChoicesError::NoFormats).as_deref(),

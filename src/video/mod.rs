@@ -2,8 +2,10 @@
 //! stored plan of a video download.
 
 pub mod choices;
+pub mod dash;
 pub mod errors;
 pub mod headers;
+pub mod hls;
 pub mod info;
 pub mod join;
 pub mod refresh;
@@ -152,6 +154,36 @@ pub struct StreamPlan {
     pub request_bytes: Option<u64>,
     /// The stream's file, once the engine has named it.
     pub file: Option<PathBuf>,
+    /// How the stream is fetched; streams saved before pieces mode are direct.
+    #[serde(default)]
+    pub source: StreamSource,
+}
+
+/// How a stream is fetched.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum StreamSource {
+    /// One link, through the range engine.
+    #[default]
+    Direct,
+    /// An HLS media playlist, read again on each run.
+    Hls { playlist: String },
+    /// DASH pieces in order, the init piece first.
+    Dash { pieces: Vec<DashPiece> },
+}
+
+/// One DASH piece: its link, and how long it plays (its fingerprint part).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashPiece {
+    pub link: String,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+impl StreamSource {
+    pub fn is_pieces(&self) -> bool {
+        !matches!(self, StreamSource::Direct)
+    }
 }
 
 /// Everything stored with a video download.
@@ -181,6 +213,20 @@ pub struct VideoPlan {
     /// The site's name for messages (`site_name`); empty in plans saved by 1a.
     #[serde(default)]
     pub site: String,
+    /// Where the plan came from; plans saved before 1c are pages.
+    #[serde(default)]
+    pub origin: PlanOrigin,
+}
+
+/// Where a video plan came from, which says how its links are refreshed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlanOrigin {
+    /// A page looked up by yt-dlp.
+    #[default]
+    Page,
+    /// A direct `.m3u8` link, read by rustdm.
+    Playlist,
 }
 
 /// The site's name for messages: yt-dlp's extractor name (any `Youtube...`
@@ -276,10 +322,14 @@ mod tests {
                 headers: vec![("User-Agent".to_string(), "x".to_string())],
                 request_bytes: Some(10_485_760),
                 file: Some(std::path::PathBuf::from("a.part")),
+                source: StreamSource::Hls {
+                    playlist: "https://video.test/v.m3u8".to_string(),
+                },
             }],
             step: VideoStep::Stream(0),
             refreshes: vec![1_700_000_000],
             site: "YouTube".to_string(),
+            origin: crate::video::PlanOrigin::Page,
         };
 
         let json = serde_json::to_string(&plan).unwrap();
@@ -288,6 +338,16 @@ mod tests {
         assert_eq!(back, plan);
         assert!(json.contains(r#""container":"mp4""#));
         assert!(json.contains(r#""kind":"video""#));
+    }
+
+    #[test]
+    fn a_stream_saved_before_pieces_mode_is_direct() {
+        let json = r#"{"format_id":"137","kind":"video","ext":"mp4","url":"u","size":1,
+            "headers":[],"request_bytes":null,"file":null}"#;
+
+        let stream: StreamPlan = serde_json::from_str(json).unwrap();
+
+        assert_eq!(stream.source, StreamSource::Direct);
     }
 
     #[test]

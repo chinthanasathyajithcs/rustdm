@@ -25,6 +25,14 @@ pub struct Probe {
     pub content_type: Option<String>,
 }
 
+/// Content types of an HLS playlist.
+const HLS_TYPES: [&str; 4] = [
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+    "audio/x-mpegurl",
+];
+
 /// File name endings that show the user asked for a web page on purpose.
 const PAGE_EXTENSIONS: [&str; 4] = [".html", ".htm", ".xhtml", ".mhtml"];
 
@@ -32,20 +40,43 @@ impl Probe {
     /// True when the server answered with a web page and the link doesn't name
     /// one: a sign-in screen or a video's watch page, not the file wanted.
     pub fn is_unwanted_web_page(&self) -> bool {
-        let Some(content_type) = &self.content_type else {
-            return false;
-        };
-        let media_type = content_type
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if media_type != "text/html" && media_type != "application/xhtml+xml" {
+        if !self.is_web_page_type() {
             return false;
         }
         let path = self.final_url.path().to_ascii_lowercase();
         !PAGE_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
+    }
+
+    /// True for an HLS playlist: an HLS content type, or a link ending in
+    /// `.m3u8` that did not open a web page (spec 1c, section 6.1).
+    pub fn is_hls_playlist(&self) -> bool {
+        if HLS_TYPES.contains(&self.media_type().as_str()) {
+            return true;
+        }
+        !self.is_web_page_type()
+            && self
+                .final_url
+                .path()
+                .to_ascii_lowercase()
+                .ends_with(".m3u8")
+    }
+
+    fn is_web_page_type(&self) -> bool {
+        matches!(
+            self.media_type().as_str(),
+            "text/html" | "application/xhtml+xml"
+        )
+    }
+
+    /// The content type without its parameters, in lower case; empty when none.
+    fn media_type(&self) -> String {
+        let content_type = self.content_type.as_deref().unwrap_or_default();
+        content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
     }
 }
 
@@ -250,5 +281,28 @@ mod tests {
         assert!(!probe_of(url, Some("application/octet-stream")).is_unwanted_web_page());
         assert!(!probe_of(url, Some("text/plain")).is_unwanted_web_page());
         assert!(!probe_of(url, None).is_unwanted_web_page());
+    }
+
+    #[test]
+    fn hls_types_and_m3u8_links_are_playlists() {
+        let any = "http://example.com/v/live";
+        for content_type in [
+            "application/vnd.apple.mpegurl",
+            "application/x-mpegURL; charset=utf-8",
+            "audio/mpegurl",
+            "audio/x-mpegurl",
+        ] {
+            assert!(
+                probe_of(any, Some(content_type)).is_hls_playlist(),
+                "{content_type}"
+            );
+        }
+        let link = "http://example.com/v/master.M3U8?tok=1";
+        assert!(probe_of(link, Some("application/octet-stream")).is_hls_playlist());
+        assert!(probe_of(link, None).is_hls_playlist());
+        // A web page wins over the name.
+        assert!(!probe_of(link, Some("text/html")).is_hls_playlist());
+        assert!(!probe_of("http://example.com/a.mp4", Some("video/mp4")).is_hls_playlist());
+        assert!(!probe_of(any, None).is_hls_playlist());
     }
 }

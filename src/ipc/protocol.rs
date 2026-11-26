@@ -584,6 +584,9 @@ pub struct VideoSummary {
     /// The quality that was chosen, once it has been.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen: Option<ChosenQuality>,
+    /// The size is an estimate: some stream comes in pieces of unknown size.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub size_is_estimate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,6 +642,31 @@ pub struct TelemetryTick {
     /// What the download is doing right now, such as "video 1 of 2".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// For a video sent in pieces: where its pieces are. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pieces: Option<PieceMap>,
+}
+
+/// Where a pieces stream's pieces are: `0..written` are in the stream file,
+/// `waiting` finished early, and `running` are being fetched.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PieceMap {
+    pub total: u64,
+    pub written: u64,
+    #[serde(default)]
+    pub waiting: Vec<u64>,
+    #[serde(default)]
+    pub running: Vec<PieceLane>,
+}
+
+/// One piece being fetched: its index, and its bytes so far of `total_bytes`
+/// when the server said how many.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PieceLane {
+    pub index: u64,
+    pub downloaded_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -927,9 +955,11 @@ mod tests {
             lanes: Vec::new(),
             stall: None,
             step: None,
+            pieces: None,
         };
         let notif =
             RpcNotification::new("telemetry.tick", Some(serde_json::to_value(&tick).unwrap()));
+        assert!(!serde_json::to_string(&tick).unwrap().contains("pieces"));
 
         let encoded = encode_message(&notif).unwrap();
         let parsed = parse_rpc_message(&encoded).unwrap();
@@ -943,6 +973,24 @@ mod tests {
             }
             _ => panic!("Expected RpcMessage::Notification"),
         }
+    }
+
+    #[test]
+    fn a_piece_map_survives_the_wire() {
+        let json = serde_json::json!({
+            "id": "dl_1", "downloaded_bytes": 10, "total_bytes": null, "speed_bps": 0,
+            "active_connections": 2, "segments": [],
+            "pieces": {"total": 9, "written": 3, "waiting": [5],
+                       "running": [{"index": 3, "downloaded_bytes": 4, "total_bytes": 8},
+                                   {"index": 4, "downloaded_bytes": 1}]}
+        });
+
+        let tick: TelemetryTick = serde_json::from_value(json).unwrap();
+
+        let map = tick.pieces.unwrap();
+        assert_eq!((map.total, map.written, map.waiting), (9, 3, vec![5]));
+        assert_eq!(map.running[0].total_bytes, Some(8));
+        assert_eq!(map.running[1].total_bytes, None);
     }
 
     #[test]

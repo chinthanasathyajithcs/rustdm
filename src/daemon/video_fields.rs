@@ -32,11 +32,20 @@ pub fn stream_file_name(final_name: &str, container: Container, stream: &StreamP
 }
 
 /// Every file a video download may have left beside `final_path`: each
-/// stream's `.part`, `.part.rdm` and finished file, and the join's temporary file.
+/// stream's `.part`, `.part.rdm`, finished file, pieces state and waiting
+/// folder, and the join's temporary file.
 pub fn video_leftovers(plan: &VideoPlan, final_path: &Path) -> Vec<PathBuf> {
     let streams = plan.streams.iter().filter_map(|s| s.file.as_deref());
     let mut files: Vec<PathBuf> = streams
-        .flat_map(|file| [part_path(file), state_path(file), file.to_path_buf()])
+        .flat_map(|file| {
+            [
+                part_path(file),
+                state_path(file),
+                file.to_path_buf(),
+                crate::pieces::state_path(file),
+                crate::pieces::waiting_dir(file),
+            ]
+        })
         .collect();
     files.push(joining_path(final_path));
     files
@@ -52,6 +61,16 @@ pub fn step_text(plan: &VideoPlan, index: usize, percent: u8) -> String {
         "{kind} {} of {} · {percent}%",
         index + 1,
         plan.streams.len()
+    )
+}
+
+/// What the row says while a pieces stream downloads:
+/// `video 1 of 2 · 45% · piece 140 of 312`. The percent counts pieces.
+pub fn pieces_step_text(plan: &VideoPlan, index: usize, done: u64, total: u64) -> String {
+    let percent = (done.saturating_mul(100) / total.max(1)).min(100) as u8;
+    format!(
+        "{} · piece {done} of {total}",
+        step_text(plan, index, percent)
     )
 }
 
@@ -120,6 +139,7 @@ pub fn summarize(plan: &VideoPlan, choosing: bool) -> VideoSummary {
         // Always one of the rows, whatever the queue file says.
         default: choosing.then_some(plan.default.min(plan.choices.len().saturating_sub(1))),
         chosen: plan.choice.clone(),
+        size_is_estimate: plan.streams.iter().any(|s| s.source.is_pieces()),
     }
 }
 
@@ -141,7 +161,7 @@ pub fn read_saved_quality(id: &str, text: Option<String>) -> (Option<Quality>, O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::VideoChoice;
+    use crate::video::{StreamSource, VideoChoice};
 
     #[test]
     fn the_joining_step_shows_a_percent_once_it_is_known() {
@@ -171,6 +191,7 @@ mod tests {
             step: VideoStep::Choosing,
             refreshes: Vec::new(),
             site: String::new(),
+            origin: crate::video::PlanOrigin::Page,
         }
     }
 
@@ -192,6 +213,7 @@ mod tests {
             headers: Vec::new(),
             request_bytes: None,
             file: None,
+            source: StreamSource::Direct,
         }
     }
 
@@ -227,6 +249,32 @@ mod tests {
     }
 
     #[test]
+    fn the_pieces_step_counts_pieces() {
+        let two = chosen_plan();
+
+        assert_eq!(
+            pieces_step_text(&two, 0, 140, 312),
+            "video 1 of 2 · 44% · piece 140 of 312"
+        );
+        assert_eq!(
+            pieces_step_text(&two, 1, 0, 0),
+            "audio 2 of 2 · 0% · piece 0 of 0"
+        );
+    }
+
+    #[test]
+    fn a_pieces_stream_makes_the_size_an_estimate() {
+        let mut plan = chosen_plan();
+        assert!(!summarize(&plan, false).size_is_estimate);
+
+        plan.streams[0].source = StreamSource::Hls {
+            playlist: "https://video.test/v.m3u8".to_string(),
+        };
+
+        assert!(summarize(&plan, false).size_is_estimate);
+    }
+
+    #[test]
     fn the_step_names_the_kind_and_the_place_of_the_stream() {
         let two = chosen_plan();
         assert_eq!(step_text(&two, 0, 37), "video 1 of 2 · 37%");
@@ -249,6 +297,8 @@ mod tests {
             "/d/A.f137.mp4.part",
             "/d/A.f137.mp4.part.rdm",
             "/d/A.f137.mp4",
+            "/d/A.f137.mp4.part.pieces",
+            "/d/A.f137.mp4.pieces",
             "/d/A.mp4.joining",
         ]
         .map(PathBuf::from);

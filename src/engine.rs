@@ -250,6 +250,9 @@ pub async fn download(client: &reqwest::Client, req: DownloadRequest) -> Result<
     if probe_result.is_unwanted_web_page() {
         return Err(Error::WebPage);
     }
+    if probe_result.is_hls_playlist() {
+        return Err(Error::Playlist);
+    }
     let final_path = resolve_output(&req, &probe_result);
     *req.progress.output.lock().unwrap() = Some(final_path.clone());
     let part_p = part_path(&final_path);

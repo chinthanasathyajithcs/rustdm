@@ -4,10 +4,10 @@
 
 use super::core::DaemonCore;
 use super::task::TaskRecord;
-use super::video_fields::{step_text, stream_file_name, video_space_needed, video_total};
-use super::video_join::{
-    complete_at, has_two_streams, refresh_join_step, stream_files, FfmpegFetch,
+use super::video_fields::{
+    pieces_step_text, step_text, stream_file_name, video_space_needed, video_total,
 };
+use super::video_join::{complete_at, needs_ffmpeg, refresh_join_step, stream_files, FfmpegFetch};
 use super::video_refresh::{link_expired_while_running, video_changed, Refreshed};
 use crate::disk::{ensure_disk_space, volume_label, SAFETY_MARGIN_BYTES};
 use crate::engine::{self, DownloadRequest, Outcome, Progress, ResumeOptions, Timeouts};
@@ -42,16 +42,16 @@ enum Next {
     Stop,
 }
 
-/// What a stream's engine run needs, copied out so no lock is held while it runs.
-struct StreamJob {
-    id: String,
-    stream: StreamPlan,
-    file_name: String,
-    directory: PathBuf,
-    connections: u32,
-    referer: Option<String>,
-    user_agent: Option<String>,
-    progress: Arc<Progress>,
+/// What a stream's run needs, copied out so no lock is held while it runs.
+pub(super) struct StreamJob {
+    pub(super) id: String,
+    pub(super) stream: StreamPlan,
+    pub(super) file_name: String,
+    pub(super) directory: PathBuf,
+    pub(super) connections: u32,
+    pub(super) referer: Option<String>,
+    pub(super) user_agent: Option<String>,
+    pub(super) progress: Arc<Progress>,
 }
 
 impl DaemonCore {
@@ -70,10 +70,14 @@ impl DaemonCore {
             match next_step(record, &cancel) {
                 Next::Stop => return self.finish_task(record, Err(Error::Cancelled)),
                 Next::Stream(index) => {
-                    if index == 0 && ffmpeg.is_none() && has_two_streams(record) {
+                    if index == 0 && ffmpeg.is_none() && needs_ffmpeg(record) {
                         ffmpeg = self.start_ffmpeg_fetch(record, &cancel).ok();
                     }
-                    let outcome = self.run_stream(record, index, cancel.clone()).await;
+                    let outcome = if is_pieces_stream(record, index) {
+                        self.run_pieces_stream(record, index, cancel.clone()).await
+                    } else {
+                        self.run_stream(record, index, cancel.clone()).await
+                    };
                     if link_expired_while_running(&outcome, record, &cancel) {
                         match self.refresh_links(record, &cancel).await {
                             Refreshed::Again => continue,
@@ -175,6 +179,13 @@ impl DaemonCore {
     }
 }
 
+/// Whether stream `index` comes in pieces (HLS or DASH).
+fn is_pieces_stream(record: &Arc<Mutex<TaskRecord>>, index: usize) -> bool {
+    let rec = record.lock().unwrap();
+    let stream = rec.video.as_ref().and_then(|plan| plan.streams.get(index));
+    stream.is_some_and(|s| s.source.is_pieces())
+}
+
 /// Get the record ready for this run (ruling R2): the row shows the final name,
 /// and counts the streams finished before. A fresh plan's disk check runs first.
 fn begin_video_run(record: &Arc<Mutex<TaskRecord>>) -> Result<(), Error> {
@@ -224,7 +235,10 @@ fn next_step(record: &Arc<Mutex<TaskRecord>>, cancel: &watch::Receiver<bool>) ->
 
 /// Copy out what stream `index` needs, and give the record a fresh progress
 /// for it, so the row counts this stream on top of the finished ones.
-fn stream_job(record: &Arc<Mutex<TaskRecord>>, index: usize) -> Result<StreamJob, Error> {
+pub(super) fn stream_job(
+    record: &Arc<Mutex<TaskRecord>>,
+    index: usize,
+) -> Result<StreamJob, Error> {
     let mut guard = record.lock().unwrap();
     let rec = &mut *guard;
     let plan = rec.video.as_ref().ok_or_else(no_video)?;
@@ -263,14 +277,21 @@ fn finished_bytes(plan: &VideoPlan) -> u64 {
     plan.streams[..finished].iter().map(stream_bytes).sum()
 }
 
-/// Bytes the current stream's state file already covers; 0 without one.
+/// Bytes the current stream already has on disk from earlier runs: what its
+/// state file covers, or a pieces stream's written and waiting pieces; 0 without one.
 fn covered_in_current_stream(plan: &VideoPlan) -> u64 {
     let VideoStep::Stream(index) = plan.step else {
         return 0;
     };
-    let Some(file) = plan.streams.get(index).and_then(|s| s.file.as_deref()) else {
+    let Some(stream) = plan.streams.get(index) else {
         return 0;
     };
+    let Some(file) = stream.file.as_deref() else {
+        return 0;
+    };
+    if stream.source.is_pieces() {
+        return crate::pieces::kept_bytes(file);
+    }
     let Ok(state) = crate::state::load(&state_path(file)) else {
         return 0;
     };
@@ -281,12 +302,16 @@ fn covered_in_current_stream(plan: &VideoPlan) -> u64 {
     ranges.covered()
 }
 
-/// A finished stream's bytes: its size, else its file's length.
+/// A finished stream's bytes: its size, else its file's length. A pieces
+/// stream's size is an estimate, so its file's length comes first.
 fn stream_bytes(stream: &StreamPlan) -> u64 {
     let on_disk = || {
         let file = stream.file.as_deref()?;
         std::fs::metadata(file).ok().map(|m| m.len())
     };
+    if stream.source.is_pieces() {
+        return on_disk().or(stream.size).unwrap_or(0);
+    }
     stream.size.or_else(on_disk).unwrap_or(0)
 }
 
@@ -339,6 +364,12 @@ pub(super) fn refresh_stream_step(task: &mut TaskRecord) {
     let Some(stream) = plan.streams.get(index) else {
         return;
     };
+    if let Some(counter) = &task.pieces_counter {
+        let done = counter.done.load(Ordering::Relaxed);
+        let total = counter.total.load(Ordering::Relaxed);
+        task.step = Some(pieces_step_text(plan, index, done, total));
+        return;
+    }
     let downloaded = task.progress.downloaded.load(Ordering::Relaxed);
     let engine_total = task.progress.total.load(Ordering::Relaxed);
     let total = Some(engine_total).filter(|&t| t > 0).or(stream.size);
@@ -412,10 +443,12 @@ mod tests {
                 headers: Vec::new(),
                 request_bytes: None,
                 file: Some(file),
+                source: crate::video::StreamSource::Direct,
             }],
             step: VideoStep::Stream(0),
             refreshes: Vec::new(),
             site: String::new(),
+            origin: crate::video::PlanOrigin::Page,
         });
         rec
     }
@@ -439,5 +472,35 @@ mod tests {
         rec.status = DownloadStatus::Active;
         rec.apply_outcome(Err(Error::Protocol("status 500".into())));
         assert_eq!(rec.status, DownloadStatus::Failed);
+    }
+    #[test]
+    fn pieces_a_resumed_stream_already_kept_are_not_progress_of_this_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rec = half_done_record(dir.path(), 500_000);
+        let file = dir.path().join("Clip.fhls-1.mp4");
+        let pieces: Vec<crate::pieces::Piece> = (0..3)
+            .map(|i| crate::pieces::Piece {
+                url: url::Url::parse(&format!("https://video.test/p/{i}")).unwrap(),
+                range: None,
+                duration_ms: 4000,
+                key: None,
+            })
+            .collect();
+        let mut store = crate::pieces::PieceStore::open(&file, &pieces).unwrap();
+        store.keep(0, &[0; 300]).unwrap();
+        store.flush().unwrap();
+        store.keep(2, &[2; 200]).unwrap();
+        drop(store);
+        let stream = &mut rec.video.as_mut().unwrap().streams[0];
+        stream.file = Some(file);
+        stream.source = crate::video::StreamSource::Hls {
+            playlist: "https://video.test/clip.m3u8".to_string(),
+        };
+        let record = Arc::new(Mutex::new(rec));
+
+        begin_video_run(&record).unwrap();
+
+        // The written piece and the one waiting for it.
+        assert_eq!(record.lock().unwrap().bytes_at_start, 500);
     }
 }

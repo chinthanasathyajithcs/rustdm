@@ -782,6 +782,7 @@ fn saved_download(
             step: VideoStep::Choosing,
             refreshes: Vec::new(),
             site: String::new(),
+            origin: rustdm::video::PlanOrigin::Page,
         }),
         quality: None,
     }

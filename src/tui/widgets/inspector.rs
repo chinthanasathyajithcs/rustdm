@@ -4,7 +4,7 @@ use crate::ipc::protocol::{DownloadSummary, TelemetryTick};
 use crate::tui::format::{format_eta, format_speed, format_speed_cap, status_span, step_text};
 use crate::tui::state::App;
 use crate::tui::theme;
-use crate::tui::widgets::lanes::{render_lanes, MAX_LANE_LINES};
+use crate::tui::widgets::lanes::{lane_lines, render_lanes};
 use crate::tui::widgets::segment_map::render_segment_map;
 use crate::tui::widgets::speed_graph::render_speed;
 use crate::tui::widgets::table::size_text;
@@ -38,11 +38,10 @@ pub fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let tick = app.ticks.get(&d.id);
-    let lane_lines = tick.map_or(0, |t| t.lanes.len().min(MAX_LANE_LINES + 1)) as u16;
     let [info, map, lanes, speed] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(3),
-        Constraint::Max(lane_lines.max(1) + 1),
+        Constraint::Max(lane_lines(tick).max(2)),
         Constraint::Min(0),
     ])
     .areas(inner);
@@ -185,6 +184,53 @@ mod tests {
         assert!(
             !narrow.contains("Connec"),
             "nothing is cut halfway: {narrow}"
+        );
+    }
+
+    #[test]
+    fn a_video_in_pieces_shows_its_pieces() {
+        use crate::ipc::protocol::{PieceLane, PieceMap};
+        let mut app = sample_app();
+        let tick = app.ticks.get_mut("dl_1").unwrap();
+        tick.lanes.clear();
+        tick.active_connections = 2;
+        tick.pieces = Some(PieceMap {
+            total: 101,
+            written: 6,
+            waiting: vec![8],
+            running: vec![
+                PieceLane {
+                    index: 6,
+                    downloaded_bytes: 1024 * 1024,
+                    total_bytes: Some(2 * 1024 * 1024),
+                },
+                PieceLane {
+                    index: 7,
+                    downloaded_bytes: 512 * 1024,
+                    total_bytes: None,
+                },
+            ],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        terminal
+            .draw(|f| crate::tui::screens::render(f, &mut app))
+            .unwrap();
+        let text = screen_text(&terminal);
+
+        assert!(
+            text.contains("Pieces  █ done  ▌ downloading  ░ missing"),
+            "{text}"
+        );
+        assert!(text.contains("Downloading 2 pieces at once"), "{text}");
+        let six = text.lines().find(|l| l.contains("piece 7 ")).unwrap();
+        assert!(
+            six.contains("50%") && six.contains("1.0 MiB of 2.0 MiB"),
+            "{six}"
+        );
+        let seven = text.lines().find(|l| l.contains("piece 8 ")).unwrap();
+        assert!(
+            seven.contains("512.0 KiB") && !seven.contains(" of "),
+            "{seven}"
         );
     }
 }

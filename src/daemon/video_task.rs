@@ -4,6 +4,7 @@
 
 use super::core::{check_download_folder, check_file_name, DaemonCore};
 use super::task::TaskRecord;
+use super::video_playlist::is_playlist_download;
 use crate::engine::{Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::{ChooseQualityParams, DownloadStatus, DownloadSummary, RpcError};
@@ -19,7 +20,7 @@ use crate::video::refresh::REFRESH_STEP;
 use crate::video::streams::stream_plans;
 use crate::video::ytdlp::{look_up, LookupRequest};
 use crate::video::{
-    site_name, ChosenQuality, Container, StreamPlan, VideoChoices, VideoPlan, VideoStep,
+    site_name, ChosenQuality, Container, PlanOrigin, StreamPlan, VideoChoices, VideoPlan, VideoStep,
 };
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -163,6 +164,9 @@ impl DaemonCore {
                 }
                 self.persist();
                 self.schedule();
+            }
+            Next::LookUp(_) if is_playlist_download(&record.lock().unwrap()) => {
+                self.read_playlist_and_run(record, cancel).await;
             }
             Next::LookUp(id) => {
                 let cookies = self.cookies_for(&id);
@@ -309,6 +313,16 @@ impl DaemonCore {
         record: &Arc<Mutex<TaskRecord>>,
         outcome: LookupOutcome,
     ) -> bool {
+        self.finish_lookup_from(record, outcome, PlanOrigin::Page)
+    }
+
+    /// `finish_lookup` for a plan from `origin` (a page, or a direct playlist).
+    pub(super) fn finish_lookup_from(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+        outcome: LookupOutcome,
+        origin: PlanOrigin,
+    ) -> bool {
         // Only a failure that will be tried again sends the next run straight
         // to the lookup (R25). After any other ending the next run checks the
         // link first: the page may have become a file, or a Wi-Fi login page gone.
@@ -321,7 +335,7 @@ impl DaemonCore {
         };
         match outcome {
             LookupOutcome::Choices(info, choices) => {
-                return self.store_choices(record, &info, &choices)
+                return self.store_choices(record, &info, &choices, origin)
             }
             LookupOutcome::Message { text, transient } => {
                 let has_cookies = end_lookup(transient);
@@ -361,6 +375,7 @@ impl DaemonCore {
         record: &Arc<Mutex<TaskRecord>>,
         info: &PageInfo,
         choices: &VideoChoices,
+        origin: PlanOrigin,
     ) -> bool {
         let kept = {
             let mut rec = record.lock().unwrap();
@@ -377,10 +392,13 @@ impl DaemonCore {
                     choices.choices.len(),
                     info.extractor_key.as_deref().unwrap_or("a web page")
                 );
-                rec.video = Some(plan_of(&rec.url, choices, info));
+                rec.video = Some(plan_of(&rec.url, choices, info, origin));
                 rec.lookup_next = false;
+                // A playlist link with one quality has nothing to choose (spec 1c, 6.3).
+                let only_one = origin == PlanOrigin::Playlist && choices.choices.len() == 1;
                 let run_now = match rec.quality {
                     Some(quality) => apply_choice(&mut rec, pick(choices, quality)),
+                    None if only_one => apply_choice(&mut rec, 0),
                     None => {
                         rec.status = DownloadStatus::Choosing;
                         let default = choices.choices.get(choices.default);
@@ -542,7 +560,12 @@ fn outcome_of_page(info: PageInfo, page_url: &Url) -> LookupOutcome {
     }
 }
 
-fn plan_of(page_url: &str, choices: &VideoChoices, info: &PageInfo) -> VideoPlan {
+fn plan_of(
+    page_url: &str,
+    choices: &VideoChoices,
+    info: &PageInfo,
+    origin: PlanOrigin,
+) -> VideoPlan {
     VideoPlan {
         page_url: page_url.to_string(),
         title: choices.title.clone(),
@@ -555,6 +578,7 @@ fn plan_of(page_url: &str, choices: &VideoChoices, info: &PageInfo) -> VideoPlan
         step: VideoStep::Choosing,
         refreshes: Vec::new(),
         site: Url::parse(page_url).map_or_else(|_| String::new(), |url| site_name(info, &url)),
+        origin,
     }
 }
 
@@ -714,7 +738,12 @@ mod tests {
             ],
             default: 0,
         };
-        rec.video = Some(plan_of(&rec.url, &choices, &PageInfo::default()));
+        rec.video = Some(plan_of(
+            &rec.url,
+            &choices,
+            &PageInfo::default(),
+            PlanOrigin::Page,
+        ));
         rec
     }
 

@@ -225,7 +225,7 @@ async fn two_streams_end_as_one_file_and_the_parts_are_gone() {
     let folder = s.folder.path();
     let expected = join_args(
         &folder.join("A test video.f137.mp4"),
-        &folder.join("A test video.f140.m4a"),
+        Some(&folder.join("A test video.f140.m4a")),
         Container::Mp4,
         &folder.join("A test video.mp4.joining"),
     );
@@ -480,7 +480,7 @@ async fn join_clips(ffmpeg: &Installed, video: &Path, audio: &Path, c: Container
     let (_keep, cancel) = watch::channel(false);
     let request = JoinRequest {
         video,
-        audio,
+        audio: Some(audio),
         container: c,
         temp,
         duration_secs: Some(1),
@@ -535,7 +535,7 @@ async fn the_real_ffmpeg_failing_says_why_and_leaves_no_file() {
     let (_keep, cancel) = watch::channel(false);
     let request = JoinRequest {
         video: &not_media,
-        audio: &clip("clip.m4a"),
+        audio: Some(&clip("clip.m4a")),
         container: Container::Mp4,
         temp: &temp,
         duration_secs: None,

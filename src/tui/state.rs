@@ -506,6 +506,7 @@ pub(crate) mod test_support {
                 choices,
                 default: Some(2),
                 chosen: None,
+                size_is_estimate: false,
             }),
             ..summary(id, DownloadStatus::Choosing)
         }
@@ -570,6 +571,7 @@ pub(crate) mod test_support {
             ],
             stall: None,
             step: None,
+            pieces: None,
         });
         app
     }
@@ -799,6 +801,7 @@ mod tests {
                 lanes: Vec::new(),
                 stall: None,
                 step: None,
+                pieces: None,
             });
         }
         let history = &app.speed_history["dl_1"];

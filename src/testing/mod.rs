@@ -94,6 +94,10 @@ pub struct Route {
     pub body: Arc<[u8]>,
     /// Send the body at about this speed, so a test can stop it part-way.
     pub bytes_per_sec: Option<u64>,
+    /// Answer every request with the whole body, as a server without ranges does.
+    pub ignores_range: bool,
+    /// Answer this many requests with this status first (shared by clones).
+    pub fail_first: Option<(u16, Arc<AtomicUsize>)>,
 }
 
 impl Route {
@@ -103,6 +107,8 @@ impl Route {
             headers: Vec::new(),
             body: Arc::from(body.into()),
             bytes_per_sec: None,
+            ignores_range: false,
+            fail_first: None,
         }
     }
 
@@ -121,6 +127,32 @@ impl Route {
     pub fn throttled(mut self, bytes_per_sec: u64) -> Self {
         self.bytes_per_sec = Some(bytes_per_sec);
         self
+    }
+
+    pub fn ignoring_range(mut self) -> Self {
+        self.ignores_range = true;
+        self
+    }
+
+    /// Answer the first `times` requests with `status`, then as usual.
+    pub fn failing_first(mut self, times: usize, status: u16) -> Self {
+        self.fail_first = Some((status, Arc::new(AtomicUsize::new(times))));
+        self
+    }
+
+    /// The status to answer with instead, while failures are left.
+    fn take_failure(&self) -> Option<u16> {
+        let (status, left) = self.fail_first.as_ref()?;
+        let mut n = left.load(Ordering::SeqCst);
+        loop {
+            if n == 0 {
+                return None;
+            }
+            match left.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(*status),
+                Err(now) => n = now,
+            }
+        }
     }
 }
 
@@ -409,8 +441,15 @@ impl TestServer {
                                         let _ = socket.shutdown().await;
                                         return;
                                     };
+                                    if let Some(status) = route.take_failure() {
+                                        let _ = socket
+                                            .write_all(format!("HTTP/1.1 {status} Status\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").as_bytes())
+                                            .await;
+                                        let _ = socket.shutdown().await;
+                                        return;
+                                    }
                                     let total = route.body.len();
-                                    let range = if route.status == 200 {
+                                    let range = if route.status == 200 && !route.ignores_range {
                                         range_hdr.as_deref().and_then(|r| parse_range(r, total))
                                     } else {
                                         None

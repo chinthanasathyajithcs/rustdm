@@ -11,7 +11,6 @@ const DEFAULT_HEIGHT: u32 = 1080;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChoicesError {
     NoFormats,
-    PiecesOnly,
     Drm,
 }
 
@@ -61,8 +60,33 @@ fn is_direct(f: &FormatInfo) -> bool {
     matches!(f.protocol.as_deref(), Some("https" | "http"))
 }
 
+/// Sent as pieces that pieces mode downloads (HLS or DASH).
+pub fn is_pieces(f: &FormatInfo) -> bool {
+    matches!(
+        f.protocol.as_deref(),
+        Some("m3u8_native" | "m3u8" | "http_dash_segments")
+    )
+}
+
 fn usable(f: &FormatInfo) -> bool {
-    is_direct(f) && !is_storyboard(f) && !f.is_drm()
+    (is_direct(f) || is_pieces(f)) && !is_storyboard(f) && !f.is_drm()
+}
+
+/// HLS sound tracks often come without a codec (`vcodec: none`, no `acodec`,
+/// ext `mp4`); HLS sound is AAC, so such a format is read as AAC in M4A.
+fn with_known_audio(f: &FormatInfo) -> FormatInfo {
+    let unnamed_audio = is_pieces(f)
+        && is_none_codec(&f.vcodec)
+        && f.acodec.is_none()
+        && (has_ext(f, "mp4") || has_ext(f, "m4a"));
+    if !unnamed_audio {
+        return f.clone();
+    }
+    FormatInfo {
+        acodec: Some("mp4a".to_string()),
+        ext: Some("m4a".to_string()),
+        ..f.clone()
+    }
 }
 
 fn starts_with(value: &Option<String>, prefix: &[&str]) -> bool {
@@ -73,11 +97,13 @@ fn has_ext(f: &FormatInfo, ext: &str) -> bool {
     f.ext.as_deref() == Some(ext)
 }
 
-/// The best of some formats: highest `tbr`, then `filesize`.
+/// The best of some formats: a single file over pieces, then the highest
+/// `tbr`, then `filesize`.
 fn best<'a>(formats: impl Iterator<Item = &'a FormatInfo>) -> Option<&'a FormatInfo> {
     formats.max_by(|a, b| {
+        let by_kind = is_direct(a).cmp(&is_direct(b));
         let by_rate = a.tbr.unwrap_or(0.0).total_cmp(&b.tbr.unwrap_or(0.0));
-        by_rate.then(a.filesize.cmp(&b.filesize))
+        by_kind.then(by_rate).then(a.filesize.cmp(&b.filesize))
     })
 }
 
@@ -278,20 +304,6 @@ fn all_video_is_drm(formats: &[FormatInfo]) -> bool {
     !video.is_empty() && video.iter().all(|f| f.is_drm())
 }
 
-/// Why no row was left: small pieces when some non-direct format exists
-/// (whatever its codecs) and no direct video or audio stream does.
-fn no_rows_error(formats: &[FormatInfo]) -> ChoicesError {
-    let carries_media = |f: &&FormatInfo| has_codec(&f.vcodec) || has_codec(&f.acodec);
-    let real = real_formats(formats);
-    let direct = real.iter().filter(|f| is_direct(f)).any(carries_media);
-    let pieces = real.iter().any(|f| !is_direct(f));
-    if pieces && !direct {
-        ChoicesError::PiecesOnly
-    } else {
-        ChoicesError::NoFormats
-    }
-}
-
 fn default_index(rows: &[VideoChoice]) -> usize {
     let videos = || rows.iter().enumerate().filter(|(_, r)| r.height.is_some());
     videos()
@@ -306,11 +318,12 @@ pub fn build_choices(info: &PageInfo) -> Result<VideoChoices, ChoicesError> {
     if all_video_is_drm(&info.formats) {
         return Err(ChoicesError::Drm);
     }
-    let usable: Vec<&FormatInfo> = info.formats.iter().filter(|f| usable(f)).collect();
+    let formats: Vec<FormatInfo> = info.formats.iter().map(with_known_audio).collect();
+    let usable: Vec<&FormatInfo> = formats.iter().filter(|f| usable(f)).collect();
     let mut choices = video_rows(&usable);
     choices.extend(audio_row(&original_audio(&usable)));
     if choices.is_empty() {
-        return Err(no_rows_error(&info.formats));
+        return Err(ChoicesError::NoFormats);
     }
     let default = default_index(&choices);
     Ok(VideoChoices {
@@ -600,14 +613,58 @@ mod tests {
         assert!(!row(&exact, "720p").size_is_estimate);
     }
 
-    #[test]
-    fn only_piece_streams_is_pieces_only() {
-        let formats = vec![pieces("hls-1080", 1080), pieces("hls-720", 720)];
+    fn pieces_audio(id: &str) -> FormatInfo {
+        FormatInfo {
+            protocol: Some("m3u8_native".to_string()),
+            ..aac(id, 10)
+        }
+    }
 
+    #[test]
+    fn a_pieces_only_page_has_qualities() {
+        let formats = vec![
+            pieces("hls-1080", 1080),
+            pieces("hls-720", 720),
+            pieces_audio("hls-audio"),
+        ];
+
+        let choices = built(formats);
+
+        let labels: Vec<&str> = choices.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["1080p", "720p", "Audio only"]);
         assert_eq!(
-            build_choices(&page(formats)).unwrap_err(),
-            ChoicesError::PiecesOnly
+            stream_ids(row(&choices, "1080p")),
+            ["hls-1080", "hls-audio"]
         );
+    }
+
+    #[test]
+    fn a_single_file_beats_pieces_of_the_same_quality() {
+        let mut direct = avc("137", 1080);
+        direct.tbr = Some(3000.0);
+        let mut hls = pieces("hls-137", 1080);
+        hls.tbr = Some(3200.0);
+
+        let choices = built(vec![hls, direct, aac("140", 10)]);
+
+        assert_eq!(stream_ids(row(&choices, "1080p")), ["137", "140"]);
+    }
+
+    #[test]
+    fn hls_audio_without_a_codec_counts_as_aac() {
+        // As yt-dlp reports Apple's sample: no acodec, ext mp4.
+        let audio = FormatInfo {
+            protocol: Some("m3u8_native".to_string()),
+            acodec: None,
+            ..fmt("aud1-English", "mp4", "none", "none", None)
+        };
+
+        let choices = built(vec![pieces("hls-1080", 1080), audio]);
+
+        let row_1080 = row(&choices, "1080p");
+        assert_eq!(row_1080.container, Container::Mp4);
+        assert_eq!(stream_ids(row_1080), ["hls-1080", "aud1-English"]);
+        assert_eq!(row(&choices, "Audio only").container, Container::M4a);
     }
 
     #[test]
@@ -741,16 +798,16 @@ mod tests {
     }
 
     #[test]
-    fn a_codecless_pieces_page_is_pieces_only() {
+    fn a_codecless_pieces_page_has_a_video_row() {
         let hls = FormatInfo {
             protocol: Some("m3u8_native".to_string()),
             ..codecless("hls", "mp4", None)
         };
 
-        assert_eq!(
-            build_choices(&page(vec![hls])).unwrap_err(),
-            ChoicesError::PiecesOnly
-        );
+        let choices = built(vec![hls]);
+
+        assert_eq!(choices.choices.len(), 1);
+        assert_eq!(choices.choices[0].label, "Video");
     }
 
     #[test]
