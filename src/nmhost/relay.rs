@@ -4,7 +4,7 @@
 use crate::daemon::launch::{daemon_exe_path, spawn_detached};
 use crate::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use crate::ipc::protocol::{
-    AddedBy, ChooseQualityParams, DownloadSummary, CODE_DOWNLOAD_NOT_FOUND,
+    AddedBy, ChooseQualityParams, DownloadStatus, DownloadSummary, CODE_DOWNLOAD_NOT_FOUND,
     CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS,
 };
 use crate::ipc::transport::IpcEndpoint;
@@ -226,6 +226,10 @@ async fn add<S: Fn() -> io::Result<()>>(
 /// browser, so the browser cannot tell other downloads exist.
 const NOT_FOUND: &str = "rustdm has no such download from this browser";
 
+/// Shown instead of a failure message that names a link or a path on this
+/// computer: the browser must not learn either (spec 1d, 4.3).
+const HIDDEN_ERROR: &str = "The download failed. rustdm shows the details.";
+
 /// How a download the browser added is doing. Never starts the daemon.
 async fn status(id: u64, download_id: &str, endpoint: &IpcEndpoint) -> HostReply {
     let mut client = match DaemonClient::connect(endpoint).await {
@@ -332,10 +336,29 @@ fn trimmed_status(summary: &DownloadSummary) -> Value {
         }
         out.insert("video".into(), Value::Object(v));
     }
-    if let Some(error) = &summary.error_message {
-        out.insert("error".into(), json!(error));
+    if summary.status == DownloadStatus::Failed {
+        if let Some(error) = &summary.error_message {
+            out.insert("error".into(), json!(safe_error(error)));
+        }
     }
     Value::Object(out)
+}
+
+/// `message`, unless it names a link or a path on this computer.
+fn safe_error(message: &str) -> &str {
+    let names_a_place = message.contains("://")
+        || message.split_whitespace().any(|word| {
+            let word = word.trim_start_matches(['(', '"', '\'']);
+            word.starts_with('/')
+                || word.starts_with("~/")
+                || word.starts_with("\\\\")
+                || word.as_bytes().get(1..3) == Some(b":\\")
+        });
+    if names_a_place {
+        HIDDEN_ERROR
+    } else {
+        message
+    }
 }
 
 /// Log a refused hand-off: the host name, the error kind and the daemon's code
@@ -387,7 +410,7 @@ fn failure_for(id: u64, error: ClientError) -> HostReply {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::{AddedBy, DownloadStatus, RpcError, VideoSummary};
+    use crate::ipc::protocol::{AddedBy, RpcError, VideoSummary};
     use crate::video::{ChosenQuality, Container, StreamKind, StreamPick, VideoChoice};
     use serde_json::Value;
 
@@ -695,5 +718,47 @@ mod tests {
         let value: Value =
             serde_json::from_slice(&failure_for(3, ClientError::NotRunning).to_bytes()).unwrap();
         assert!(value["error"].get("existing_id").is_none());
+    }
+
+    #[test]
+    fn an_error_never_carries_a_link_or_a_path() {
+        for message in [
+            "error sending request for url (https://cdn.example/seg1.ts?sig=abc)",
+            "Not enough disk space: C:\\Users\\amal\\Downloads\\x.mp4 needs 2 GiB",
+            "could not write /home/amal/Downloads/x.mp4",
+            "cannot reach \\\\nas\\share\\x.mp4",
+        ] {
+            let row = DownloadSummary {
+                error_message: Some(message.to_string()),
+                ..summary(DownloadStatus::Failed)
+            };
+            let reply = trimmed_status(&row);
+            let text = reply["error"].as_str().unwrap();
+            for leak in ["://", "Users", "/home/", "nas", "sig="] {
+                assert!(!text.contains(leak), "{leak} in {text:?}");
+            }
+            assert_eq!(text, HIDDEN_ERROR);
+        }
+    }
+
+    #[test]
+    fn a_plain_failure_message_is_kept() {
+        let row = DownloadSummary {
+            error_message: Some("The site says you need to sign in to watch it.".to_string()),
+            ..summary(DownloadStatus::Failed)
+        };
+        assert_eq!(
+            trimmed_status(&row)["error"],
+            "The site says you need to sign in to watch it."
+        );
+    }
+
+    #[test]
+    fn only_a_failed_download_reports_its_error() {
+        let row = DownloadSummary {
+            error_message: Some("Connection reset; trying again".to_string()),
+            ..summary(DownloadStatus::Retrying)
+        };
+        assert!(trimmed_status(&row).get("error").is_none());
     }
 }
