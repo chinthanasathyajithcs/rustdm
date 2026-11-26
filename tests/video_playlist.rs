@@ -115,6 +115,7 @@ impl Setup {
                 max_bytes_per_sec: None,
                 context: None,
                 quality: quality.map(String::from),
+                added_by: None,
             })
             .unwrap()
     }

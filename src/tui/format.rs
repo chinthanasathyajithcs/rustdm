@@ -172,6 +172,7 @@ mod tests {
             max_bytes_per_sec: 0,
             video: None,
             step: None,
+            added_by: None,
         };
         let row = format_row(&summary);
         assert!(row.contains("25.0 MiB / 100.0 MiB (25%)"), "{row}");

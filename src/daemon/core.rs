@@ -106,6 +106,7 @@ struct NewDownload {
     max_bytes_per_sec: u64,
     /// The quality asked for, with the text it was asked in.
     quality: Option<(Quality, String)>,
+    added_by: Option<AddedBy>,
 }
 
 /// An add of `url` is turned away while the daemon shuts down, or while that
@@ -390,6 +391,7 @@ impl DaemonCore {
                             connections,
                             max_bytes_per_sec,
                             quality,
+                            added_by: params.added_by,
                         },
                         context.as_ref(),
                     )
@@ -446,6 +448,7 @@ impl DaemonCore {
             new.connections,
         );
         task.speed_limiter.set_bytes_per_sec(new.max_bytes_per_sec);
+        task.added_by = new.added_by;
         (task.quality, task.quality_text) = match new.quality {
             Some((quality, text)) => (Some(quality), Some(text)),
             None => (None, None),

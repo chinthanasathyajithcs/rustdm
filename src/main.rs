@@ -314,6 +314,7 @@ async fn run(cli: Cli) -> CliResult {
                 max_bytes_per_sec: max_speed,
                 context,
                 quality,
+                added_by: None,
             };
             add(&endpoint, params).await
         }

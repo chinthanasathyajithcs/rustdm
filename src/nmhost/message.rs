@@ -215,6 +215,7 @@ pub fn add_params(
         max_bytes_per_sec: None,
         context: context.cloned(),
         quality: None,
+        added_by: None,
     }
 }
 

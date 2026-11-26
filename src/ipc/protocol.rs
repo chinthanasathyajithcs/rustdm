@@ -438,6 +438,18 @@ pub struct AddDownloadParams {
     /// the user is asked to choose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
+    /// Who added the download. Only the browser host sets it; it limits what
+    /// the browser can see and change through the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<AddedBy>,
+}
+
+/// Who added a download, when that matters for who may reach it later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddedBy {
+    /// The browser extension, through the native host.
+    Browser,
 }
 
 /// `download.choose_quality`: pick the quality of a download that is `choosing`.
@@ -612,6 +624,9 @@ pub struct DownloadSummary {
     /// What the download is doing right now, such as "video 1 of 2".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
+    /// Who added the download, when it was the browser.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<AddedBy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -872,6 +887,7 @@ mod tests {
             max_bytes_per_sec: None,
             context: None,
             quality: None,
+            added_by: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),
@@ -1178,5 +1194,53 @@ mod tests {
         let back: ToolInfo = serde_json::from_str(&serde_json::to_string(&info).unwrap()).unwrap();
         assert_eq!(back, info);
         assert_eq!(RpcError::tool_failed("x").code, CODE_TOOL_FAILED);
+    }
+
+    #[test]
+    fn added_by_is_browser_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(AddedBy::Browser).unwrap(),
+            serde_json::json!("browser")
+        );
+    }
+
+    #[test]
+    fn add_params_without_added_by_still_parse() {
+        let params: AddDownloadParams =
+            serde_json::from_str(r#"{"url":"https://e.com/x"}"#).unwrap();
+        assert_eq!(params.added_by, None);
+        let marked: AddDownloadParams =
+            serde_json::from_str(r#"{"url":"https://e.com/x","added_by":"browser"}"#).unwrap();
+        assert_eq!(marked.added_by, Some(AddedBy::Browser));
+    }
+
+    #[test]
+    fn a_summary_not_added_by_the_browser_says_nothing_about_it() {
+        let summary = DownloadSummary {
+            id: "dl_1".to_string(),
+            url: "https://e.com/x".to_string(),
+            destination: PathBuf::from("/d"),
+            filename: "x".to_string(),
+            status: DownloadStatus::Queued,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bps: 0,
+            eta_secs: None,
+            error_message: None,
+            max_bytes_per_sec: 0,
+            video: None,
+            step: None,
+            added_by: None,
+        };
+        let value = serde_json::to_value(&summary).unwrap();
+        assert!(value.get("added_by").is_none());
+        let marked = DownloadSummary {
+            added_by: Some(AddedBy::Browser),
+            ..summary
+        };
+        assert_eq!(
+            serde_json::to_value(&marked).unwrap()["added_by"],
+            "browser"
+        );
     }
 }

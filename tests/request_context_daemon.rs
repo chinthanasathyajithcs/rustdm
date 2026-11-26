@@ -5,7 +5,8 @@ use rustdm::daemon::queue_store::QueueStore;
 use rustdm::daemon::secrets::{SecretError, SecretStore};
 use rustdm::daemon::DaemonCore;
 use rustdm::ipc::protocol::{
-    AddDownloadParams, CancelDownloadParams, DownloadStatus, DownloadSummary, CODE_INVALID_PARAMS,
+    AddDownloadParams, AddedBy, CancelDownloadParams, DownloadStatus, DownloadSummary,
+    CODE_INVALID_PARAMS,
 };
 use rustdm::request_context::{ContextCookie, RequestContext};
 use rustdm::testing::video::{write_script, ToolResponse, ToolScript, VideoWorld};
@@ -62,6 +63,7 @@ fn add_params(
         max_bytes_per_sec: None,
         context,
         quality: None,
+        added_by: None,
     }
 }
 
@@ -964,4 +966,57 @@ async fn a_cookie_the_server_sets_stays_with_the_download_through_a_pause() {
     let last = server.requests().pop().unwrap();
     assert_eq!(last.path, "/moved/file.bin");
     assert_eq!(last.cookie.as_deref(), Some("sid=redirect-cookie"));
+}
+
+#[tokio::test]
+async fn an_add_marked_browser_is_listed_as_browser() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let core = open_core(data.path());
+    let marked = AddDownloadParams {
+        added_by: Some(AddedBy::Browser),
+        ..add_params(&server, folder.path(), None)
+    };
+
+    let added = core.add_download(marked).unwrap();
+
+    assert_eq!(added.added_by, Some(AddedBy::Browser));
+    assert_eq!(
+        core.get_status(&added.id).unwrap().added_by,
+        Some(AddedBy::Browser)
+    );
+    let plain = AddDownloadParams {
+        url: server.url().join("other.bin").unwrap().to_string(),
+        filename: Some("other.bin".to_string()),
+        ..add_params(&server, folder.path(), None)
+    };
+    assert_eq!(core.add_download(plain).unwrap().added_by, None);
+    stop(&core).await;
+}
+
+#[tokio::test]
+async fn continuing_a_stopped_download_keeps_its_added_by() {
+    let data = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let server = slow_server().await;
+    let (core, paused) = paused_with_cookies(data.path(), folder.path(), &server).await;
+    assert_eq!(paused.added_by, None);
+    let from_browser = AddDownloadParams {
+        added_by: Some(AddedBy::Browser),
+        ..add_params(&server, folder.path(), Some(context("fresh")))
+    };
+
+    let again = core.add_download(from_browser).unwrap();
+
+    assert_eq!(again.id, paused.id);
+    assert_eq!(
+        again.added_by, None,
+        "a dashboard download stays out of the browser's reach"
+    );
+    core.cancel_download(CancelDownloadParams {
+        id: again.id,
+        delete_partial: true,
+    })
+    .unwrap();
 }
