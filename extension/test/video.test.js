@@ -11,13 +11,21 @@ function install(options = {}) {
   const clock = { now: 1_000_000 };
   const timers = new Map();
   let nextTimer = 1;
+  // Like the browser's timers: called as a method of another object they throw
+  // "Illegal invocation" (Node's do not, which once hid a real bug).
+  function browserTimer(action) {
+    return function timer(...args) {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+      return action(...args);
+    };
+  }
   const video = installVideo({
     chrome,
-    setInterval: (fn) => {
+    setInterval: browserTimer((fn) => {
       timers.set(nextTimer, fn);
       return nextTimer++;
-    },
-    clearInterval: (id) => timers.delete(id),
+    }),
+    clearInterval: browserTimer((id) => timers.delete(id)),
     now: () => clock.now,
     collectCookies: async (urls) => {
       chrome.state.log.push(['cookies', urls]);
@@ -438,4 +446,25 @@ test('a card is refused while either switch is off', async () => {
     assert.equal(chrome.state.nativePorts.length, 0, key);
     assert.equal(card.disconnected, true, key);
   }
+});
+
+test('an unexpected error in the card shows a failure instead of looking forever', async () => {
+  const chrome = makeChrome();
+  installVideo({
+    chrome,
+    setInterval: () => {
+      throw new Error('timer broke');
+    },
+    clearInterval: () => {},
+    now: () => 0,
+    collectCookies: async () => [],
+    flashOk: async () => {},
+    showFailure: async () => {},
+  });
+  const card = await openCard(chrome);
+  await settle();
+  const [view] = views(card);
+  assert.equal(view?.phase, 'failed');
+  assert.match(view.message, /rustdm could not use this video|went wrong/i);
+  assert.equal(chrome.state.nativePorts.every((p) => p.disconnected), true, 'no native port left open');
 });

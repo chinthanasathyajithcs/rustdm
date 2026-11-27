@@ -23,6 +23,7 @@ const HOVER_SCRIPT = {
   runAt: 'document_idle',
 };
 const UNUSABLE = { kind: 'unusable', message: 'rustdm could not use this video.' };
+const BROKE = 'Something went wrong. Close the card and try again.';
 
 const caughtKey = (tabId) => `${CAUGHT_PREFIX}${tabId}`;
 const newId = () => crypto.randomUUID().replaceAll('-', '').slice(0, 8);
@@ -33,6 +34,10 @@ const newId = () => crypto.randomUUID().replaceAll('-', '').slice(0, 8);
  */
 export function installVideo(deps) {
   const { chrome, now, collectCookies, flashOk, showFailure } = deps;
+  // Taken out of `deps` so they run as plain functions: a browser's timers
+  // throw "Illegal invocation" when called as a method of another object.
+  const startTimer = deps.setInterval;
+  const stopTimer = deps.clearInterval;
   const tabWrites = new Map();
   let enabled = readEnabled(chrome);
   let menuMessageId = 1;
@@ -211,7 +216,7 @@ export function installVideo(deps) {
 
     const end = (run) => {
       if (!run) return;
-      deps.clearInterval(run.timer);
+      stopTimer(run.timer);
       run.session.close();
     };
 
@@ -274,15 +279,28 @@ export function installVideo(deps) {
       const run = { session, state, resolved, others: otherSources(picked, caught), timer: null };
       current = run;
       session.onLost(() => dispatch(run, { type: 'native_lost' }));
-      run.timer = deps.setInterval(() => dispatch(run, { type: 'tick', now: now() }), POLL_MS);
+      run.timer = startTimer(() => dispatch(run, { type: 'tick', now: now() }), POLL_MS);
       for (const effect of effects) perform(run, effect);
+    }
+
+    // Anything unexpected ends the card with a message, never a card that
+    // says "Looking up" forever.
+    function broke() {
+      try {
+        end(current);
+      } catch {
+        // Already ending.
+      }
+      current = null;
+      generation++;
+      post({ phase: 'failed', message: BROKE }, hostOf(sender.url), []);
     }
 
     port.onMessage.addListener((message) => {
       if (message?.type === 'open') {
-        void begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught }));
+        begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught })).catch(broke);
       } else if (message?.type === 'use') {
-        void begin(() => message.source);
+        begin(() => message.source).catch(broke);
       } else if (message?.type === 'choose' && current && typeof message.choiceId === 'string') {
         dispatch(current, { type: 'choose', choiceId: message.choiceId });
       }
