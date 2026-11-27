@@ -20,9 +20,13 @@
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
-  /** `candidates` come topmost first: `[{video, rect, visible}]`. */
+  /**
+   * `candidates` come topmost first: `[{video, rect, visible}]`. `visible` may
+   * be a function, asked only of a video big enough and under the pointer.
+   */
   function pickHovered(candidates, x, y) {
-    return candidates.find((c) => c.visible && atLeast(c.rect, MIN_HOVER) && containsPoint(c.rect, x, y)) ?? null;
+    const shown = (c) => (typeof c.visible === 'function' ? c.visible() : c.visible);
+    return candidates.find((c) => atLeast(c.rect, MIN_HOVER) && containsPoint(c.rect, x, y) && shown(c)) ?? null;
   }
 
   /** Above the video's top-right corner, or inside it when there is no room above. */

@@ -401,3 +401,41 @@ test('the bar switch alone is off: nothing registered at start', async () => {
   await settle();
   assert.deepEqual(registrations(chrome), []);
 });
+
+test('only media, script and other responses reach the worker', async () => {
+  const { chrome } = install();
+  const [[filter, extra]] = chrome.webRequest.onHeadersReceived.options;
+  assert.deepEqual(filter, { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other'] });
+  assert.deepEqual(extra, ['responseHeaders']);
+});
+
+test('a list caught before any navigation is cleared when the tab moves on', async () => {
+  const { chrome, video } = install();
+  chrome.state.tabUrls = { 7: 'https://e.com/a#top', 8: 'https://e.com/b' };
+  await settle();
+  headers(chrome, streamResponse());
+  headers(chrome, streamResponse({ tabId: 8 }));
+  assert.equal((await video.caughtFor(7)).length, 1);
+  chrome.tabs.onUpdated.fire(7, { url: 'https://www.youtube.com/watch?v=x' }, {});
+  assert.deepEqual(await video.caughtFor(7), []);
+  chrome.tabs.onUpdated.fire(8, { url: 'https://e.com/b#comments' }, {});
+  assert.equal((await video.caughtFor(8)).length, 1, 'same document');
+});
+
+test('a catch for a tab the browser cannot name still counts', async () => {
+  const { chrome, video } = install();
+  await settle();
+  headers(chrome, streamResponse({ tabId: 12 }));
+  assert.equal((await video.caughtFor(12)).length, 1);
+});
+
+test('a card is refused while either switch is off', async () => {
+  for (const key of ['enabled', 'videoBar']) {
+    const { chrome } = install({ local: { [key]: false } });
+    await settle();
+    const card = await openCard(chrome);
+    await settle();
+    assert.equal(chrome.state.nativePorts.length, 0, key);
+    assert.equal(card.disconnected, true, key);
+  }
+});

@@ -2,7 +2,7 @@
 // lib/catch.js, lib/source.js and lib/flow.js; this file only connects them to
 // Chrome. `chrome` and the timers are passed in so tests can use fakes.
 
-import { addCaught, classify, tabRecordAfterNavigation } from './lib/catch.js';
+import { addCaught, classify, documentKey, tabRecordAfterNavigation } from './lib/catch.js';
 import { buildChooseMessage, buildStatusMessage, buildVideoMessage } from './lib/contract.js';
 import { POLL_MS, flowStep, startFlow } from './lib/flow.js';
 import { openSession, request } from './lib/native.js';
@@ -12,6 +12,9 @@ const ALL_URLS = { origins: ['<all_urls>'] };
 const CAUGHT_PREFIX = 'caught:';
 export const PAGE_MENU_ID = 'rustdm-download-page';
 export const CARD_PORT = 'rdm-card';
+// Players load streams as media, by script (fetch / XHR) or as "other";
+// images, fonts, styles and pages never reach the worker.
+const STREAM_TYPES = ['media', 'xmlhttprequest', 'other'];
 const HOVER_SCRIPT = {
   id: 'rdm-hover',
   js: ['content/ember.css.js', 'content/hover-logic.js', 'content/hover.js'],
@@ -55,6 +58,15 @@ export function installVideo(deps) {
     return next;
   }
 
+  async function pageOf(tabId) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      return tab?.url ? documentKey(tab.url) : undefined;
+    } catch {
+      return undefined; // the tab is gone or not ours to see
+    }
+  }
+
   async function caughtFor(tabId) {
     await tabWrites.get(tabId);
     const stored = await chrome.storage.session.get(caughtKey(tabId)).catch(() => ({}));
@@ -72,14 +84,19 @@ export function installVideo(deps) {
     if (!caught) return;
     void updateTab(details.tabId, async (record) => {
       if (!(await enabled)) return record;
-      return { ...record, list: addCaught(record?.list ?? [], caught, { id: newId(), now: now() }) };
+      // A list started without a navigation (just installed, reloaded, or
+      // switched back on) learns its page now, so the next page clears it.
+      const doc = record?.doc ?? (await pageOf(details.tabId));
+      return { ...record, doc, list: addCaught(record?.list ?? [], caught, { id: newId(), now: now() }) };
     });
   }
 
   function watchStreams() {
     try {
       if (!chrome.webRequest.onHeadersReceived.hasListener(onHeaders)) {
-        chrome.webRequest.onHeadersReceived.addListener(onHeaders, { urls: ['<all_urls>'] }, ['responseHeaders']);
+        chrome.webRequest.onHeadersReceived.addListener(onHeaders, { urls: ['<all_urls>'], types: STREAM_TYPES }, [
+          'responseHeaders',
+        ]);
       }
     } catch {
       // No host permission yet; tried again when it is granted.
@@ -175,6 +192,11 @@ export function installVideo(deps) {
   function onCardConnect(port) {
     if (port.name !== CARD_PORT || port.sender?.id !== chrome.runtime.id) return;
     const sender = port.sender;
+    // A page opened before a switch went off still has the bar; refuse it here.
+    const allowed = Promise.all([
+      enabled,
+      chrome.storage.local.get({ videoBar: true }).catch(() => ({ videoBar: true })),
+    ]).then(([on, stored]) => on && stored.videoBar !== false);
     let current = null; // {session, timer, state, resolved, others}
     let generation = 0;
     let closed = false;
@@ -231,8 +253,13 @@ export function installVideo(deps) {
       const mine = ++generation;
       end(current);
       current = null;
-      const caught = await caughtFor(sender.tab?.id);
+      const [caught, ok] = await Promise.all([caughtFor(sender.tab?.id), allowed]);
       if (mine !== generation || closed) return;
+      if (!ok) {
+        closed = true;
+        port.disconnect();
+        return;
+      }
       const picked = choose(caught);
       const resolved = resolveSource(picked, sender, caught);
       if (!resolved.ok) {

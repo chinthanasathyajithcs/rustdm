@@ -82,6 +82,16 @@ function nameOf(url) {
   }
 }
 
+const folderOf = (pathname) => pathname.slice(0, pathname.lastIndexOf('/') + 1);
+
+// A later playlist from the same host and frame, in the kept playlist's folder
+// or below it: one of its qualities. Another video on a feed sits elsewhere.
+function isVariantOf(url, frameId, entry) {
+  if (entry.kind !== 'hls' || entry.frameId !== frameId) return false;
+  const kept = new URL(entry.url);
+  return kept.host === url.host && url.pathname.startsWith(folderOf(kept.pathname));
+}
+
 /**
  * A new list with `caught` added (spec 7.3). `id` names a new entry; a repeat
  * keeps its old id.
@@ -92,7 +102,7 @@ export function addCaught(list, caught, { id, now }) {
   const host = url.host;
   const old = list.find((e) => documentKey(e.url) === key);
   const rest = list.filter((e) => e !== old);
-  if (!old && caught.kind === 'hls' && rest.some((e) => e.kind === 'hls' && e.host === host && e.frameId === caught.frameId)) {
+  if (!old && caught.kind === 'hls' && rest.some((e) => isVariantOf(url, caught.frameId, e))) {
     return list; // a single-quality playlist of one we already have
   }
   const sizes = [old?.bytes, caught.bytes].filter((b) => typeof b === 'number');

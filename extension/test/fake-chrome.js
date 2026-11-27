@@ -2,9 +2,14 @@
 
 export function event() {
   const listeners = [];
+  const options = [];
   return {
     listeners,
-    addListener: (fn) => listeners.push(fn),
+    options,
+    addListener: (fn, ...rest) => {
+      listeners.push(fn);
+      options.push(rest);
+    },
     removeListener: (fn) => listeners.splice(listeners.indexOf(fn), 1),
     hasListener: (fn) => listeners.includes(fn),
     fire: (...args) => listeners.map((fn) => fn(...args)),
@@ -97,7 +102,14 @@ export function makeChrome({ granted = true, local = {}, session = {} } = {}) {
       onRemoved: event(),
     },
     webRequest: { onHeadersReceived: event(), onBeforeRequest: event() },
-    tabs: { onUpdated: event(), onRemoved: event() },
+    tabs: {
+      onUpdated: event(),
+      onRemoved: event(),
+      get: async (tabId) => {
+        if (!state.tabUrls?.[tabId]) throw new Error(`No tab with id: ${tabId}.`);
+        return { id: tabId, url: state.tabUrls[tabId] };
+      },
+    },
     contextMenus: {
       onClicked: event(),
       create: (options) => state.log.push(['menu.create', options]),

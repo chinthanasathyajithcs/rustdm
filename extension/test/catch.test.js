@@ -174,3 +174,13 @@ test('addCaught does not change its input', () => {
   assert.equal(list[0].seenAt, 1);
   assert.equal(next[0].seenAt, 5);
 });
+
+test('a second video on a feed keeps its own playlist', () => {
+  let list = add([], hls('https://video.twimg.com/ext/111/pl/a.m3u8'));
+  list = add(list, hls('https://video.twimg.com/ext/111/pl/avc1/720x1280/b.m3u8'), 2000);
+  assert.equal(list.length, 1, 'a variant under the master folder is dropped');
+  list = add(list, hls('https://video.twimg.com/ext/222/pl/c.m3u8'), 3000);
+  assert.deepEqual(list.map((e) => e.name), ['c.m3u8', 'a.m3u8']);
+  list = add(list, hls('https://video.twimg.com/ext/222/pl/avc1/480x852/d.m3u8'), 4000);
+  assert.equal(list.length, 2);
+});

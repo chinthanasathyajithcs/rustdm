@@ -199,3 +199,15 @@ test('a duration reads like the dashboard', () => {
   assert.equal(h.formatDuration(5), '0:05');
   assert.equal(h.formatDuration(3723), '1:02:03');
 });
+
+test('visibility is asked only of a video under the pointer', () => {
+  const asked = [];
+  const candidate = (name, r) => ({ video: name, rect: r, visible: () => (asked.push(name), true) });
+  const found = h.pickHovered(
+    [candidate('elsewhere', rect(500, 500, 400, 300)), candidate('small', rect(0, 0, 100, 50)), candidate('here', rect(0, 0, 400, 300))],
+    20,
+    20,
+  );
+  assert.equal(found.video, 'here');
+  assert.deepEqual(asked, ['here']);
+});

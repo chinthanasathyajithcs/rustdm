@@ -25,6 +25,10 @@
   let pointer = null;
   let frameQueued = false;
   let crabTemplate = null;
+  // The page script is registered only while both switches are on; a switch
+  // turned off later stops it in pages that are already open.
+  const switches = { enabled: true, videoBar: true };
+  let off = false;
 
   const now = () => Date.now();
   const viewport = () => ({ width: document.documentElement.clientWidth || innerWidth, height: document.documentElement.clientHeight || innerHeight });
@@ -71,6 +75,7 @@
   }
 
   function onPlaying(event) {
+    if (off) return;
     const video = event.currentTarget;
     const seen = { muted: video.muted, volume: video.volume, rect: video.getBoundingClientRect(), visible: isVisible(video) };
     if (H.shouldShowOnPlay(seen)) dispatch({ type: 'played', video, now: now() });
@@ -80,6 +85,7 @@
   // other tracked video there (a player layer with pointer-events: none).
   function candidatesAt(x, y) {
     for (const video of tracked) if (!video.isConnected) tracked.delete(video);
+    if (tracked.size === 0) return [];
     const seen = new Set();
     const ordered = [];
     for (const node of document.elementsFromPoint(x, y)) {
@@ -89,7 +95,7 @@
       }
     }
     for (const video of [...tracked].reverse()) if (!seen.has(video)) ordered.push(video);
-    return ordered.map((video) => ({ video, rect: video.getBoundingClientRect(), visible: isVisible(video) }));
+    return ordered.map((video) => ({ video, rect: video.getBoundingClientRect(), visible: () => isVisible(video) }));
   }
 
   function insideOwnUi(x, y) {
@@ -99,7 +105,7 @@
 
   function onPointer() {
     frameQueued = false;
-    if (!pointer) return;
+    if (!pointer || off || (tracked.size === 0 && !bar.video)) return;
     const { x, y } = pointer;
     if (bar.video && insideOwnUi(x, y)) {
       dispatch({ type: 'hover', video: bar.video, now: now() });
@@ -132,6 +138,13 @@
       shadow.append(el('style', '', E.css));
     }
     const layer = el('div', 'layer');
+    // Keys pressed in the card stay in it (a video page's shortcuts would
+    // seek or change the volume); Escape still reaches the page.
+    for (const type of ['keydown', 'keyup', 'keypress']) {
+      layer.addEventListener(type, (event) => {
+        if (event.key !== 'Escape') event.stopPropagation();
+      });
+    }
     shadow.append(layer);
     ui = { host, layer, barEl: null, cardEl: null };
     placeHost();
@@ -385,7 +398,22 @@
     ui.cardEl.style.top = `${spot.top}px`;
   }
 
+  function setSwitches(changes) {
+    for (const key of Object.keys(switches)) {
+      if (key in changes) switches[key] = changes[key].newValue !== false;
+    }
+    off = !(switches.enabled && switches.videoBar);
+    if (!off) return;
+    closeCard();
+    bar = H.createBar();
+    removeUi();
+  }
+
   // --- Page events --------------------------------------------------------
+
+  chrome.storage?.onChanged?.addListener((changes, area) => {
+    if (area === 'local') setSwitches(changes);
+  });
 
   addEventListener(
     'pointermove',
