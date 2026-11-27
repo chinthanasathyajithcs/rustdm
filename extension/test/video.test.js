@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { installVideo } from '../video.js';
-import { makeChrome, settle } from './fake-chrome.js';
+import { fakePort, makeChrome, settle } from './fake-chrome.js';
 
 const MiB = 1024 * 1024;
 
@@ -176,4 +176,157 @@ test('the blob menu without a catch looks up the page', async () => {
   const [add] = nativeAdds(chrome);
   assert.equal(add.url, 'https://e.com/watch');
   assert.equal('referer' in add.context, false);
+});
+
+const cardSender = (over = {}) => ({
+  id: 'rustdm-extension-id',
+  url: 'https://e.com/watch?v=1',
+  frameId: 0,
+  tab: { id: 7, url: 'https://e.com/watch?v=1', title: 'Angel One', incognito: false },
+  ...over,
+});
+
+async function openCard(chrome, { sender = cardSender(), message = { type: 'open', currentSrc: '' } } = {}) {
+  const card = fakePort({ name: 'rdm-card', sender });
+  chrome.runtime.onConnect.fire(card);
+  card.deliver(message);
+  await settle();
+  return card;
+}
+
+const lastNative = (chrome) => chrome.state.nativePorts.at(-1);
+const answer = async (native, index, reply) => {
+  native.deliver({ id: native.posted[index].id, ...reply });
+  await settle();
+};
+const views = (card) => card.posted.filter((m) => m.type === 'view').map((m) => m.view);
+
+test('a card runs add then status on one native port', async () => {
+  const { chrome, tick } = install();
+  const card = await openCard(chrome);
+  const native = lastNative(chrome);
+  assert.equal(native.name, 'rustdm.nmhost');
+  assert.equal(native.posted[0].type, 'add');
+  assert.equal(native.posted[0].url, 'https://e.com/watch?v=1');
+  await answer(native, 0, { ok: true, result: { download_id: 'dl_1' } });
+  assert.deepEqual(native.posted[1], { type: 'status', download_id: 'dl_1', id: 2 });
+  await answer(native, 1, { ok: true, result: { status: 'active', filename: 'watch' } });
+  await tick();
+  assert.equal(native.posted[2].type, 'status');
+  await answer(native, 2, {
+    ok: true,
+    result: { status: 'choosing', filename: 'w', video: { title: 'A', choices: [{ id: '720-mp4', label: '720p', container: 'MP4', size_is_estimate: false }], default: 0 } },
+  });
+  assert.equal(views(card).at(-1).phase, 'choosing');
+  card.deliver({ type: 'choose', choiceId: '720-mp4' });
+  await settle();
+  assert.deepEqual(native.posted.at(-1), { type: 'choose_quality', download_id: 'dl_1', choice_id: '720-mp4', id: 4 });
+  await answer(native, 3, { ok: true, result: { status: 'queued', filename: 'A.mp4', video: { title: 'A', choices: [] } } });
+  assert.deepEqual(views(card).at(-1), { phase: 'started', filename: 'A.mp4', title: 'Angel One', others: [] });
+  assert.equal(chrome.state.nativePorts.length, 1);
+  assert.equal(native.disconnected, true, 'stopped after starting');
+});
+
+test('the add carries the title, referer and cookies', async () => {
+  const { chrome } = install();
+  chrome.state.cookies = [{ name: 'SID', value: 'v', domain: '.cdn.e.com', path: '/', secure: true, hostOnly: false }];
+  await openCard(chrome, {
+    sender: cardSender({ url: 'https://player.e.com/embed/1', frameId: 3 }),
+    message: { type: 'open', currentSrc: 'https://cdn.e.com/v.mp4' },
+  });
+  const add = lastNative(chrome).posted[0];
+  assert.equal(add.url, 'https://cdn.e.com/v.mp4');
+  assert.equal(add.context.referer, 'https://player.e.com/embed/1');
+  assert.equal(add.context.title, 'Angel One');
+  assert.equal(add.context.cookies[0].name, 'SID');
+  assert.deepEqual(chrome.state.log.find((e) => e[0] === 'cookies')[1], ['https://cdn.e.com/v.mp4', 'https://e.com/watch?v=1']);
+});
+
+test('a blob video in the card uses the stream caught in its frame', async () => {
+  const { chrome, video } = install();
+  await settle();
+  headers(chrome, streamResponse({ url: 'https://cdn.e.com/master.m3u8', type: 'xmlhttprequest', responseHeaders: [{ name: 'content-type', value: 'application/x-mpegurl' }] }));
+  await video.caughtFor(7);
+  const card = await openCard(chrome, { message: { type: 'open', currentSrc: 'blob:https://e.com/1' } });
+  assert.equal(lastNative(chrome).posted[0].url, 'https://cdn.e.com/master.m3u8');
+  assert.deepEqual(views(card)[0].others, [{ key: 'page', label: 'This page' }]);
+});
+
+test('an incognito sender is refused', async () => {
+  const { chrome } = install();
+  const sender = cardSender();
+  sender.tab.incognito = true;
+  const card = await openCard(chrome, { sender });
+  assert.equal(chrome.state.nativePorts.length, 0);
+  assert.deepEqual(views(card), [{ phase: 'failed', message: 'rustdm could not use this video.', title: 'e.com', others: [] }]);
+});
+
+test('a caught id from another tab is refused', async () => {
+  const { chrome } = install();
+  const card = await openCard(chrome, { message: { type: 'use', source: { type: 'caught', id: 'abcd1234' } } });
+  assert.equal(chrome.state.nativePorts.length, 0);
+  assert.equal(views(card)[0].message, 'rustdm could not use this video.');
+});
+
+test('closing the card stops polling and the native port', async () => {
+  const { chrome, timers } = install();
+  const card = await openCard(chrome);
+  const native = lastNative(chrome);
+  await answer(native, 0, { ok: true, result: { download_id: 'dl_1' } });
+  assert.equal(timers.size, 1);
+  card.drop();
+  assert.equal(timers.size, 0);
+  assert.equal(native.disconnected, true);
+});
+
+test('a lost native port tells the card the download is still there', async () => {
+  const { chrome } = install();
+  const card = await openCard(chrome);
+  const native = lastNative(chrome);
+  await answer(native, 0, { ok: true, result: { download_id: 'dl_1' } });
+  native.drop();
+  await settle();
+  assert.equal(views(card).at(-1).message, "Lost the connection to rustdm. The download is still in rustdm's list.");
+});
+
+test('a new source drops the old session', async () => {
+  const { chrome, timers } = install();
+  const card = await openCard(chrome);
+  const first = lastNative(chrome);
+  card.deliver({ type: 'use', source: { type: 'page' } });
+  await settle();
+  assert.equal(first.disconnected, true);
+  assert.equal(chrome.state.nativePorts.length, 2);
+  const before = card.posted.length;
+  first.deliver({ id: 1, ok: true, result: { download_id: 'dl_old' } });
+  await settle();
+  assert.equal(card.posted.length, before, 'a late reply from the old session changes nothing');
+  assert.equal(timers.size, 1);
+  const second = lastNative(chrome);
+  await answer(second, 0, { ok: true, result: { download_id: 'dl_new' } });
+  assert.equal(second.posted[1].download_id, 'dl_new');
+});
+
+test('views carry the card title and other sources', async () => {
+  const { chrome, video } = install();
+  await settle();
+  headers(chrome, streamResponse());
+  await video.caughtFor(7);
+  const card = await openCard(chrome, { message: { type: 'open', currentSrc: 'https://cdn.e.com/own.mp4' } });
+  const [first] = views(card);
+  assert.equal(first.phase, 'looking');
+  assert.equal(first.title, 'Angel One');
+  assert.deepEqual(first.others.map((o) => o.label), ['movie.mp4 · cdn.example.com', 'This page']);
+});
+
+test('a port from another extension is ignored', async () => {
+  const { chrome } = install();
+  const card = await openCard(chrome, { sender: cardSender({ id: 'someone-else' }) });
+  assert.equal(chrome.state.nativePorts.length, 0);
+  assert.deepEqual(card.posted, []);
+  const other = fakePort({ name: 'other', sender: cardSender() });
+  chrome.runtime.onConnect.fire(other);
+  other.deliver({ type: 'open', currentSrc: '' });
+  await settle();
+  assert.equal(chrome.state.nativePorts.length, 0);
 });

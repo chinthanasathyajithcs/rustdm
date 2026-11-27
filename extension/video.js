@@ -3,13 +3,15 @@
 // Chrome. `chrome` and the timers are passed in so tests can use fakes.
 
 import { addCaught, classify, tabRecordAfterNavigation } from './lib/catch.js';
-import { buildVideoMessage } from './lib/contract.js';
-import { request } from './lib/native.js';
-import { pickSource, resolveSource } from './lib/source.js';
+import { buildChooseMessage, buildStatusMessage, buildVideoMessage } from './lib/contract.js';
+import { POLL_MS, flowStep, startFlow } from './lib/flow.js';
+import { openSession, request } from './lib/native.js';
+import { otherSources, pickSource, resolveSource } from './lib/source.js';
 
 const ALL_URLS = { origins: ['<all_urls>'] };
 const CAUGHT_PREFIX = 'caught:';
 export const PAGE_MENU_ID = 'rustdm-download-page';
+export const CARD_PORT = 'rdm-card';
 const UNUSABLE = { kind: 'unusable', message: 'rustdm could not use this video.' };
 
 const caughtKey = (tabId) => `${CAUGHT_PREFIX}${tabId}`;
@@ -132,8 +134,115 @@ export function installVideo(deps) {
   chrome.permissions.onAdded.addListener(watchStreams);
   watchStreams();
 
+  // The card: one port from the page, one native session per chosen source.
+  function onCardConnect(port) {
+    if (port.name !== CARD_PORT || port.sender?.id !== chrome.runtime.id) return;
+    const sender = port.sender;
+    let current = null; // {session, timer, state, resolved, others}
+    let generation = 0;
+    let closed = false;
+
+    const post = (view, title, others) => {
+      try {
+        port.postMessage({ type: 'view', view: { ...view, title, others } });
+      } catch {
+        // The card is gone.
+      }
+    };
+
+    const end = (run) => {
+      if (!run) return;
+      deps.clearInterval(run.timer);
+      run.session.close();
+    };
+
+    function dispatch(run, event) {
+      if (run !== current) return; // a reply from an older source
+      const { state, effects } = flowStep(run.state, event);
+      run.state = state;
+      for (const effect of effects) perform(run, effect);
+    }
+
+    function perform(run, effect) {
+      const { resolved } = run;
+      const reply = (type) => (answer) => dispatch(run, { type, reply: answer, now: now() });
+      switch (effect.type) {
+        case 'add':
+          void collectCookies([resolved.url, sender.tab.url])
+            .then((cookies) =>
+              run.session.request(buildVideoMessage({ ...resolved, cookies, userAgent: globalThis.navigator?.userAgent })),
+            )
+            .then(reply('add_reply'));
+          break;
+        case 'status':
+          void run.session.request(buildStatusMessage(effect.downloadId)).then(reply('status_reply'));
+          break;
+        case 'choose':
+          void run.session.request(buildChooseMessage(effect.downloadId, effect.choiceId)).then(reply('choose_reply'));
+          break;
+        case 'view':
+          post(effect.view, resolved.cardTitle, run.others);
+          break;
+        case 'stop':
+          end(run);
+          break;
+      }
+    }
+
+    // `choose(caught)` gives the source; a newer begin or a closed card wins.
+    async function begin(choose) {
+      const mine = ++generation;
+      end(current);
+      current = null;
+      const caught = await caughtFor(sender.tab?.id);
+      if (mine !== generation || closed) return;
+      const picked = choose(caught);
+      const resolved = resolveSource(picked, sender, caught);
+      if (!resolved.ok) {
+        post({ phase: 'failed', message: UNUSABLE.message }, hostOf(sender.url), []);
+        return;
+      }
+      const session = openSession({
+        connect: (host) => chrome.runtime.connectNative(host),
+        lastError: () => chrome.runtime.lastError,
+      });
+      const { state, effects } = startFlow(resolved.kind, now());
+      const run = { session, state, resolved, others: otherSources(picked, caught), timer: null };
+      current = run;
+      session.onLost(() => dispatch(run, { type: 'native_lost' }));
+      run.timer = deps.setInterval(() => dispatch(run, { type: 'tick', now: now() }), POLL_MS);
+      for (const effect of effects) perform(run, effect);
+    }
+
+    port.onMessage.addListener((message) => {
+      if (message?.type === 'open') {
+        void begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught }));
+      } else if (message?.type === 'use') {
+        void begin(() => message.source);
+      } else if (message?.type === 'choose' && current && typeof message.choiceId === 'string') {
+        dispatch(current, { type: 'choose', choiceId: message.choiceId });
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      closed = true;
+      generation++;
+      end(current);
+      current = null;
+    });
+  }
+
+  chrome.runtime.onConnect.addListener(onCardConnect);
+
   const syncPageMenu = () => enabled.then(showPageMenu);
   return { caughtFor, menuPage, menuBlob, syncPageMenu };
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
+  }
 }
 
 async function readEnabled(chrome) {

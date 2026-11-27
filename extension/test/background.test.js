@@ -38,6 +38,7 @@ globalThis.chrome = {
   contextMenus: { onClicked: event('menu'), create: (o) => log.push(['menu', o.id]), update: async () => {} },
   runtime: {
     onInstalled: event('installed'),
+    onConnect: event('connect'),
     openOptionsPage: () => log.push(['options']),
     sendNativeMessage: async (host, message) => {
       log.push(['native', message.type, message.url, JSON.stringify(message.context)]);
