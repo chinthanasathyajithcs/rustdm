@@ -369,6 +369,8 @@ export function installVideo(deps) {
         begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught }), true).catch(broke);
       } else if (message?.type === 'use') {
         begin(() => message.source).catch(broke);
+      } else if (message?.type === 'visible' && current) {
+        dispatch(current, { type: 'hidden', hidden: message.visible === false });
       } else if (message?.type === 'choose' && current && typeof message.choiceId === 'string') {
         dispatch(current, { type: 'choose', choiceId: message.choiceId });
       }

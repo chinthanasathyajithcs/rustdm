@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { LOOKUP_LIMIT_MS, POLL_MS, flowStep, startFlow } from '../lib/flow.js';
+import { CHOOSING_LIMIT_MS, LOOKUP_LIMIT_MS, POLL_MS, flowStep, startFlow } from '../lib/flow.js';
 
 const T0 = 1_000_000;
 const ok = (result) => ({ ok: true, result });
@@ -134,11 +134,11 @@ test('sixty seconds of looking gives up politely', () => {
   assert.equal(after.effects.at(-1).type, 'stop');
 });
 
-test('the list has no time limit', () => {
+test('the list is not bound by the lookup limit', () => {
   const { state } = run('page', [
     { type: 'add_reply', reply: ok({ download_id: 'dl_8' }), now: T0 },
     { type: 'status_reply', reply: ok(choosing), now: T0 },
-    { type: 'tick', now: T0 + 10 * LOOKUP_LIMIT_MS },
+    { type: 'tick', now: T0 + 5 * LOOKUP_LIMIT_MS },
   ]);
   assert.equal(state.phase, 'choosing');
 });
@@ -271,4 +271,29 @@ test('a choosing reply without rows keeps looking', () => {
     { type: 'status_reply', reply: ok({ status: 'choosing', filename: 'a', video: { title: 't', choices: [] } }), now: T0 },
   ]);
   assert.equal(state.phase, 'looking');
+});
+
+test('no checking while the tab is hidden, and it picks up again when shown', () => {
+  const base = [
+    { type: 'add_reply', reply: ok({ download_id: 'dl_20' }), now: T0 },
+    { type: 'status_reply', reply: ok({ status: 'active', filename: 'w' }), now: T0 },
+    { type: 'hidden', hidden: true },
+  ];
+  const hidden = run('page', [...base, { type: 'tick', now: T0 + POLL_MS }, { type: 'tick', now: T0 + 2 * POLL_MS }]);
+  assert.equal(hidden.effects.filter((e) => e.type === 'status').length, 1, 'only the first, before hiding');
+  const shown = run('page', [...base, { type: 'hidden', hidden: false }, { type: 'tick', now: T0 + POLL_MS }]);
+  assert.equal(shown.effects.at(-1).type, 'status');
+});
+
+test('a list left open gives up after ten minutes', () => {
+  assert.equal(CHOOSING_LIMIT_MS, 10 * 60_000);
+  const opened = [
+    { type: 'add_reply', reply: ok({ download_id: 'dl_21' }), now: T0 },
+    { type: 'status_reply', reply: ok(choosing), now: T0 + 1000 },
+  ];
+  const before = run('page', [...opened, { type: 'tick', now: T0 + 1000 + CHOOSING_LIMIT_MS - 1 }]);
+  assert.equal(before.state.phase, 'choosing');
+  const after = run('page', [...opened, { type: 'tick', now: T0 + 1000 + CHOOSING_LIMIT_MS }]);
+  assert.deepEqual(after.views.at(-1), { phase: 'note', message: 'Still waiting for a quality; pick it in rustdm.' });
+  assert.equal(after.effects.at(-1).type, 'stop');
 });

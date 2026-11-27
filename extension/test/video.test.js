@@ -533,3 +533,18 @@ test('a refused card still offers the streams caught in the tab', async () => {
   const card = await openCard(chrome, { sender: youtubeSender(), message: openOn() });
   assert.deepEqual(views(card)[0].others, [{ key: views(card)[0].others[0].key, label: 'other.mp4 · cdn.example.com' }]);
 });
+
+test('a card in a hidden tab stops asking rustdm until shown again', async () => {
+  const { chrome, tick } = install();
+  const card = await openCard(chrome);
+  const native = lastNative(chrome);
+  await answer(native, 0, { ok: true, result: { download_id: 'dl_1' } });
+  await answer(native, 1, { ok: true, result: { status: 'active', filename: 'watch' } });
+  card.deliver({ type: 'visible', visible: false });
+  await tick();
+  await tick();
+  assert.equal(native.posted.length, 2, 'add and the first status only');
+  card.deliver({ type: 'visible', visible: true });
+  await tick();
+  assert.equal(native.posted.at(-1).type, 'status');
+});

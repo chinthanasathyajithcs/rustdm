@@ -5,11 +5,14 @@ import { describeError } from './native.js';
 
 export const POLL_MS = 500;
 export const LOOKUP_LIMIT_MS = 60_000;
+// A quality list left open this long stops asking rustdm.
+export const CHOOSING_LIMIT_MS = 10 * 60_000;
 
 export const LOST = "Lost the connection to rustdm. The download is still in rustdm's list.";
 export const ALREADY = "Already in rustdm's list.";
 export const STILL_LOOKING = 'Still looking it up; pick the quality in rustdm.';
 export const CANCELLED = 'Cancelled in rustdm.';
+export const STILL_CHOOSING = 'Still waiting for a quality; pick it in rustdm.';
 
 const ALWAYS_STARTED = new Set(['completed', 'paused', 'pausing', 'retrying']);
 const RUNNING = new Set(['queued', 'active']);
@@ -23,7 +26,16 @@ const shownPhase = (phase) => (phase === 'sending' ? 'looking' : phase);
  * @param now ms
  */
 export function startFlow(kind, now) {
-  const state = { kind, phase: 'sending', downloadId: null, lookingSince: now, waiting: false, choosing: false };
+  const state = {
+    kind,
+    phase: 'sending',
+    downloadId: null,
+    lookingSince: now,
+    choosingSince: null,
+    waiting: false,
+    choosing: false,
+    hidden: false,
+  };
   return { state, effects: [{ type: 'add' }, { type: 'view', view: { phase: 'looking' } }] };
 }
 
@@ -58,7 +70,7 @@ function onAddReply(state, { reply, now }) {
   return poll({ ...state, phase: 'looking', downloadId, lookingSince: now });
 }
 
-function onStatusReply(state, { reply }) {
+function onStatusReply(state, { reply, now }) {
   const ready = { ...state, waiting: false };
   if (!reply.ok) {
     return reply.error?.kind === 'not_found' ? note(ready, ALREADY) : failed(ready, describeError(reply.error));
@@ -70,7 +82,7 @@ function onStatusReply(state, { reply }) {
   const rows = result.video?.choices ?? [];
   if (result.status === 'choosing' && rows.length > 0 && state.phase !== 'choosing') {
     const duration = result.video.duration_secs;
-    return moveTo(ready, 'choosing', {
+    return moveTo({ ...ready, choosingSince: now }, 'choosing', {
       phase: 'choosing',
       choices: rows,
       defaultIndex: result.video.default ?? 0,
@@ -81,7 +93,9 @@ function onStatusReply(state, { reply }) {
 }
 
 function onTick(state, { now }) {
+  if (state.hidden) return { state, effects: [] };
   if (state.phase === 'looking' && now - state.lookingSince >= LOOKUP_LIMIT_MS) return note(state, STILL_LOOKING);
+  if (state.phase === 'choosing' && now - state.choosingSince >= CHOOSING_LIMIT_MS) return note(state, STILL_CHOOSING);
   if ((state.phase === 'looking' || state.phase === 'choosing') && !state.waiting) return poll(state);
   return { state, effects: [] };
 }
@@ -105,6 +119,7 @@ const HANDLERS = {
   tick: onTick,
   choose: onChoose,
   choose_reply: onChooseReply,
+  hidden: (state, { hidden }) => ({ state: { ...state, hidden: Boolean(hidden) }, effects: [] }),
   native_lost: (state) => (state.downloadId ? failed(state, LOST) : { state, effects: [] }),
 };
 

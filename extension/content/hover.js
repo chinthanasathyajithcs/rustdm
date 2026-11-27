@@ -511,6 +511,10 @@
     },
     true,
   );
+  // A card in a hidden tab stops asking rustdm until the tab is shown again.
+  document.addEventListener('visibilitychange', () => {
+    if (card?.port) send({ type: 'visible', visible: !document.hidden });
+  });
   document.addEventListener('fullscreenchange', () => {
     placeHost();
     if (ui) draw();
