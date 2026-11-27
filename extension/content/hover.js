@@ -13,7 +13,7 @@
 
   const CARD_PORT = 'rdm-card';
   const TICK_MS = 250;
-  const BAR_TEXT = 'Download';
+  const BAR_TEXT = 'Download this video';
   const BAR_HINT = 'Download this video with rustdm';
   const LOOKING = 'Looking up the video…';
 
@@ -26,8 +26,6 @@
   let pointer = null;
   let frameQueued = false;
   let crabTemplate = null;
-  let arrowTemplate = null;
-  let spot = null; // {video, inside}: where the bar was put when it appeared
   let followFrame = 0;
   let recheck = 0;
   // The page script is registered only while both switches are on; a switch
@@ -70,11 +68,6 @@
     return svg;
   }
 
-  function arrow() {
-    const { svg, template } = icon(E.arrow, arrowTemplate);
-    arrowTemplate = template;
-    return svg;
-  }
 
   // --- Videos on the page ---------------------------------------------------
 
@@ -184,7 +177,7 @@
     go.type = 'button';
     go.title = BAR_HINT;
     go.setAttribute('aria-label', BAR_HINT);
-    go.append(arrow(), el('span', '', BAR_TEXT));
+    go.append(crab(), el('span', '', BAR_TEXT));
     onTrusted(go, 'click', () => toggleCard(bar.video));
     const close = el('button', 'x', '✕');
     close.type = 'button';
@@ -238,10 +231,7 @@
     if (!ui?.barEl || !bar.video) return;
     const box = ui.barEl.getBoundingClientRect();
     const size = { width: box.width, height: box.height };
-    const rect = bar.video.getBoundingClientRect();
-    // Above or inside is chosen once, when the bar appears for this video.
-    if (spot?.video !== bar.video) spot = { video: bar.video, inside: H.barInside(rect, size) };
-    const place = H.barPlacement(rect, viewport(), size, spot.inside);
+    const place = H.barPlacement(bar.video.getBoundingClientRect(), viewport(), size);
     moveTo(ui.barEl, place.left, place.top);
   }
 
@@ -262,7 +252,6 @@
     ticker = null;
     cancelAnimationFrame(followFrame);
     followFrame = 0;
-    spot = null;
     ui?.host.remove();
     ui = null;
   }

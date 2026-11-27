@@ -66,11 +66,8 @@ test('an invisible video is skipped', () => {
   assert.equal(h.pickHovered(candidates, 100, 100).video, 'shown');
 });
 
-test('the bar sits above the video', () => {
-  assert.deepEqual({ ...h.barPlacement(rect(100, 200, 640, 360), viewport, BAR) }, { left: 560, top: 166 });
-});
-
-test('the bar goes inside the corner at the top of the screen', () => {
+test('the bar sits inside the video, in its top-right corner', () => {
+  assert.deepEqual({ ...h.barPlacement(rect(100, 200, 640, 360), viewport, BAR) }, { left: 552, top: 208 });
   assert.deepEqual({ ...h.barPlacement(rect(100, 10, 640, 360), viewport, BAR) }, { left: 552, top: 18 });
   assert.deepEqual({ ...h.barPlacement(rect(0, 0, 1280, 720), viewport, BAR) }, { left: 1092, top: 8 });
 });
@@ -80,6 +77,8 @@ test('the bar stays on the screen', () => {
   assert.equal(placed.left, viewport.width - BAR.width);
   const left = h.barPlacement(rect(-900, 300, 1000, 400), viewport, BAR);
   assert.equal(left.left, 0);
+  const scrolledUp = h.barPlacement(rect(100, -100, 640, 360), viewport, BAR);
+  assert.equal(scrolledUp.top, 0, 'the top of the video is off screen: the bar waits at the top of the screen, still over the video');
 });
 
 test('the card goes below the bar, or above it when there is no room', () => {
@@ -236,13 +235,12 @@ test('moving to another video waits before the bar moves there', () => {
   assert.equal(steps([...moving, { type: 'hover', video: b, now: 650 }]).video, b);
 });
 
-test('the bar keeps the spot it was given', () => {
-  const nearTop = rect(100, 10, 640, 360);
-  assert.equal(h.barInside(nearTop, BAR), true);
-  assert.equal(h.barInside(rect(100, 200, 640, 360), BAR), false);
-  // Shown above, then the page scrolls the video up: it stays above (clamped), it does not jump inside.
-  assert.deepEqual({ ...h.barPlacement(nearTop, viewport, BAR, false) }, { left: 560, top: 0 });
-  assert.deepEqual({ ...h.barPlacement(rect(100, 200, 640, 360), viewport, BAR, true) }, { left: 552, top: 208 });
+test('while the card is open the bar stays on its video', () => {
+  const a = {};
+  const b = {};
+  const bar = steps([...hoverAt(a, 0), { type: 'card', open: true, now: 200 }, ...hoverAt(b, 300)]);
+  assert.equal(bar.video, a);
+  assert.equal(bar.pending, null);
 });
 
 test('the gap between the bar and the video counts as the bar', () => {

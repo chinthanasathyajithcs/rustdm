@@ -32,21 +32,11 @@
     return candidates.find((c) => atLeast(c.rect, MIN_HOVER) && containsPoint(c.rect, x, y) && shown(c)) ?? null;
   }
 
-  /** True when there is no room above the video, so the bar goes inside its corner. */
-  function barInside(videoRect, barSize) {
-    return videoRect.top - barSize.height - GAP_PX < 0;
-  }
-
-  /**
-   * Above the video's top-right corner, or inside it. `inside` keeps the spot
-   * chosen when the bar appeared (see barInside); left out, it is chosen now.
-   */
-  function barPlacement(videoRect, viewport, barSize, inside = barInside(videoRect, barSize)) {
-    const top = inside ? videoRect.top + INSET_PX : videoRect.top - barSize.height - GAP_PX;
-    const left = videoRect.right - barSize.width - (inside ? INSET_PX : 0);
+  /** Inside the video's top-right corner, INSET_PX in; kept on the screen. */
+  function barPlacement(videoRect, viewport, barSize) {
     return {
-      left: clamp(left, 0, viewport.width - barSize.width),
-      top: clamp(top, 0, viewport.height - barSize.height),
+      left: clamp(videoRect.right - barSize.width - INSET_PX, 0, viewport.width - barSize.width),
+      top: clamp(videoRect.top + INSET_PX, 0, viewport.height - barSize.height),
     };
   }
 
@@ -87,6 +77,8 @@
     switch (event.type) {
       case 'hover': {
         if (memory.dismissed.has(event.video)) return bar.video === event.video ? hidden(bar) : bar;
+        // An open card keeps the bar on its own video.
+        if (bar.cardOpen && bar.video !== event.video) return bar.pending ? { ...bar, pending: null } : bar;
         if (bar.video === event.video) return { ...bar, mode: 'hover', hideAt: null, pending: null };
         const since = bar.pending?.video === event.video ? bar.pending.since : event.now;
         if (event.now - since < HOVER_DELAY_MS) return { ...bar, pending: { video: event.video, since } };
@@ -160,7 +152,6 @@
     HOVER_DELAY_MS,
     containsPoint,
     pickHovered,
-    barInside,
     barPlacement,
     inflate,
     cardPlacement,
