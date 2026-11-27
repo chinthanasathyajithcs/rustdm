@@ -13,7 +13,8 @@
 
   const CARD_PORT = 'rdm-card';
   const TICK_MS = 250;
-  const BAR_TEXT = 'Download this video';
+  const BAR_TEXT = 'Download';
+  const BAR_HINT = 'Download this video with rustdm';
   const LOOKING = 'Looking up the video…';
 
   const memory = { dismissed: new WeakSet(), played: new WeakSet() };
@@ -25,6 +26,10 @@
   let pointer = null;
   let frameQueued = false;
   let crabTemplate = null;
+  let arrowTemplate = null;
+  let spot = null; // {video, inside}: where the bar was put when it appeared
+  let followFrame = 0;
+  let recheck = 0;
   // The page script is registered only while both switches are on; a switch
   // turned off later stops it in pages that are already open.
   const switches = { enabled: true, videoBar: true };
@@ -51,12 +56,23 @@
     });
   }
 
-  function crab() {
-    if (!crabTemplate) {
-      crabTemplate = new DOMParser().parseFromString(E.crab, 'image/svg+xml').documentElement;
-    }
-    const svg = document.importNode(crabTemplate, true);
+  function icon(text, kept) {
+    const template = kept ?? new DOMParser().parseFromString(text, 'image/svg+xml').documentElement;
+    const svg = document.importNode(template, true);
     svg.setAttribute('aria-hidden', 'true');
+    return { svg, template };
+  }
+
+  function crab() {
+    const { svg, template } = icon(E.crab, crabTemplate);
+    crabTemplate = template;
+    svg.setAttribute('class', 'crab');
+    return svg;
+  }
+
+  function arrow() {
+    const { svg, template } = icon(E.arrow, arrowTemplate);
+    arrowTemplate = template;
     return svg;
   }
 
@@ -98,9 +114,11 @@
     return ordered.map((video) => ({ video, rect: video.getBoundingClientRect(), visible: () => isVisible(video) }));
   }
 
+  // The bar counts a few pixels around it, so the gap to the video is part of it.
   function insideOwnUi(x, y) {
-    const parts = [ui?.barEl, ui?.cardEl].filter((node) => node?.isConnected);
-    return parts.some((node) => H.containsPoint(node.getBoundingClientRect(), x, y));
+    const bar = ui?.barEl?.isConnected && H.inflate(ui.barEl.getBoundingClientRect(), H.GAP_PX + 2);
+    const cardBox = ui?.cardEl?.isConnected && ui.cardEl.getBoundingClientRect();
+    return [bar, cardBox].some((box) => box && H.containsPoint(box, x, y));
   }
 
   function onPointer() {
@@ -113,7 +131,10 @@
     }
     const found = H.pickHovered(candidatesAt(x, y), x, y);
     if (found) dispatch({ type: 'hover', video: found.video, now: now() });
-    else if (bar.video) dispatch({ type: 'away', now: now() });
+    else if (bar.video || bar.pending) dispatch({ type: 'away', now: now() });
+    // A pointer resting on a video sends no more moves: look again once the wait is over.
+    clearTimeout(recheck);
+    if (bar.pending) recheck = setTimeout(onPointer, H.HOVER_DELAY_MS + 10);
   }
 
   // --- The bar ------------------------------------------------------------
@@ -161,7 +182,9 @@
     const root = el('div', 'bar');
     const go = el('button', 'go');
     go.type = 'button';
-    go.append(crab(), el('span', '', BAR_TEXT));
+    go.title = BAR_HINT;
+    go.setAttribute('aria-label', BAR_HINT);
+    go.append(arrow(), el('span', '', BAR_TEXT));
     onTrusted(go, 'click', () => toggleCard(bar.video));
     const close = el('button', 'x', '✕');
     close.type = 'button';
@@ -191,14 +214,35 @@
     }
     if (card) placeCard();
     ticker ??= setInterval(onTick, TICK_MS);
+    followFrame ||= requestAnimationFrame(follow);
+  }
+
+  // While shown, the bar and card move with the video in the same frame the
+  // page scrolls or the player resizes, instead of catching up later.
+  function follow() {
+    followFrame = 0;
+    if (!ui) return;
+    placeBar();
+    if (card) placeCard();
+    followFrame = requestAnimationFrame(follow);
+  }
+
+  function moveTo(node, left, top) {
+    const x = `${left}px`;
+    const y = `${top}px`;
+    if (node.style.left !== x) node.style.left = x;
+    if (node.style.top !== y) node.style.top = y;
   }
 
   function placeBar() {
     if (!ui?.barEl || !bar.video) return;
-    const size = ui.barEl.getBoundingClientRect();
-    const spot = H.barPlacement(bar.video.getBoundingClientRect(), viewport(), { width: size.width, height: size.height });
-    ui.barEl.style.left = `${spot.left}px`;
-    ui.barEl.style.top = `${spot.top}px`;
+    const box = ui.barEl.getBoundingClientRect();
+    const size = { width: box.width, height: box.height };
+    const rect = bar.video.getBoundingClientRect();
+    // Above or inside is chosen once, when the bar appears for this video.
+    if (spot?.video !== bar.video) spot = { video: bar.video, inside: H.barInside(rect, size) };
+    const place = H.barPlacement(rect, viewport(), size, spot.inside);
+    moveTo(ui.barEl, place.left, place.top);
   }
 
   function onTick() {
@@ -216,6 +260,9 @@
   function removeUi() {
     clearInterval(ticker);
     ticker = null;
+    cancelAnimationFrame(followFrame);
+    followFrame = 0;
+    spot = null;
     ui?.host.remove();
     ui = null;
   }
@@ -376,7 +423,7 @@
     close.type = 'button';
     close.setAttribute('aria-label', 'Close');
     onTrusted(close, 'click', closeCard);
-    head.append(el('span', 'badge', 'rustdm'), el('span', 'title', String(view.title ?? '')), close);
+    head.append(crab(), el('span', 'badge', 'rustdm'), el('span', 'title', String(view.title ?? '')), close);
     root.append(head, bodyFor(view));
     const foot = footFor(view);
     if (foot) root.append(foot);
@@ -393,9 +440,8 @@
     if (!ui?.cardEl) return;
     const size = ui.cardEl.getBoundingClientRect();
     const anchor = ui.barEl?.getBoundingClientRect() ?? ui.cardEl.getBoundingClientRect();
-    const spot = H.cardPlacement(anchor, viewport(), { width: size.width, height: size.height });
-    ui.cardEl.style.left = `${spot.left}px`;
-    ui.cardEl.style.top = `${spot.top}px`;
+    const place = H.cardPlacement(anchor, viewport(), { width: size.width, height: size.height });
+    moveTo(ui.cardEl, place.left, place.top);
   }
 
   function setSwitches(changes) {
@@ -428,7 +474,7 @@
   );
   document.documentElement.addEventListener('pointerleave', () => {
     pointer = null;
-    if (bar.video) dispatch({ type: 'away', now: now() });
+    if (bar.video || bar.pending) dispatch({ type: 'away', now: now() });
   });
   addEventListener(
     'pointerdown',
@@ -444,8 +490,6 @@
     },
     true,
   );
-  addEventListener('scroll', () => ui && draw(), { capture: true, passive: true });
-  addEventListener('resize', () => ui && draw(), { passive: true });
   document.addEventListener('fullscreenchange', () => {
     placeHost();
     if (ui) draw();

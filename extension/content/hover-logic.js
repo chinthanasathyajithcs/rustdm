@@ -8,6 +8,9 @@
   const MIN_PLAY = Object.freeze({ width: 320, height: 180 });
   const HIDE_AFTER_MS = 1500;
   const PLAY_SHOW_MS = 4000;
+  // The pointer stays this long on a video before its bar shows: a pass over a
+  // page's previews shows nothing.
+  const HOVER_DELAY_MS = 150;
   const INSET_PX = 8;
   const GAP_PX = 4;
   const FOUR_K_HEIGHT = 2160;
@@ -29,11 +32,17 @@
     return candidates.find((c) => atLeast(c.rect, MIN_HOVER) && containsPoint(c.rect, x, y) && shown(c)) ?? null;
   }
 
-  /** Above the video's top-right corner, or inside it when there is no room above. */
-  function barPlacement(videoRect, viewport, barSize) {
-    const above = videoRect.top - barSize.height - GAP_PX;
-    const inside = above < 0;
-    const top = inside ? videoRect.top + INSET_PX : above;
+  /** True when there is no room above the video, so the bar goes inside its corner. */
+  function barInside(videoRect, barSize) {
+    return videoRect.top - barSize.height - GAP_PX < 0;
+  }
+
+  /**
+   * Above the video's top-right corner, or inside it. `inside` keeps the spot
+   * chosen when the bar appeared (see barInside); left out, it is chosen now.
+   */
+  function barPlacement(videoRect, viewport, barSize, inside = barInside(videoRect, barSize)) {
+    const top = inside ? videoRect.top + INSET_PX : videoRect.top - barSize.height - GAP_PX;
     const left = videoRect.right - barSize.width - (inside ? INSET_PX : 0);
     return {
       left: clamp(left, 0, viewport.width - barSize.width),
@@ -55,11 +64,20 @@
     return !muted && volume > 0 && Boolean(visible) && atLeast(rect, MIN_PLAY);
   }
 
-  function createBar() {
-    return { video: null, mode: null, hideAt: null, cardOpen: false };
+  /** `rect` grown by `px` on every side. */
+  function inflate(rect, px) {
+    const left = rect.left - px;
+    const top = rect.top - px;
+    const right = rect.right + px;
+    const bottom = rect.bottom + px;
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
   }
 
-  const hidden = (bar) => ({ ...bar, video: null, mode: null, hideAt: null });
+  function createBar() {
+    return { video: null, mode: null, hideAt: null, cardOpen: false, pending: null };
+  }
+
+  const hidden = (bar) => ({ ...bar, video: null, mode: null, hideAt: null, pending: null });
 
   /**
    * One event in, the next bar out. `memory` holds two WeakSets kept for the
@@ -67,12 +85,18 @@
    */
   function barStep(bar, event, memory) {
     switch (event.type) {
-      case 'hover':
+      case 'hover': {
         if (memory.dismissed.has(event.video)) return bar.video === event.video ? hidden(bar) : bar;
-        return { ...bar, video: event.video, mode: 'hover', hideAt: null };
-      case 'away':
-        if (!bar.video || bar.mode !== 'hover' || bar.hideAt !== null) return bar;
-        return { ...bar, hideAt: event.now + HIDE_AFTER_MS };
+        if (bar.video === event.video) return { ...bar, mode: 'hover', hideAt: null, pending: null };
+        const since = bar.pending?.video === event.video ? bar.pending.since : event.now;
+        if (event.now - since < HOVER_DELAY_MS) return { ...bar, pending: { video: event.video, since } };
+        return { ...bar, video: event.video, mode: 'hover', hideAt: null, pending: null };
+      }
+      case 'away': {
+        const calm = { ...bar, pending: null };
+        if (!bar.video || bar.mode !== 'hover' || bar.hideAt !== null) return bar.pending ? calm : bar;
+        return { ...calm, hideAt: event.now + HIDE_AFTER_MS };
+      }
       case 'played':
         if (memory.dismissed.has(event.video) || memory.played.has(event.video)) return bar;
         memory.played.add(event.video);
@@ -133,9 +157,12 @@
     PLAY_SHOW_MS,
     INSET_PX,
     GAP_PX,
+    HOVER_DELAY_MS,
     containsPoint,
     pickHovered,
+    barInside,
     barPlacement,
+    inflate,
     cardPlacement,
     shouldShowOnPlay,
     createBar,

@@ -15,6 +15,12 @@ const viewport = { width: 1280, height: 720 };
 const BAR = { width: 180, height: 30 };
 const memory = () => ({ dismissed: new WeakSet(), played: new WeakSet() });
 
+// A hover that shows the bar: the pointer is on the video, then still there HOVER_DELAY_MS later.
+const hoverAt = (video, now) => [
+  { type: 'hover', video, now },
+  { type: 'hover', video, now: now + 150 },
+];
+
 function steps(events, mem = memory()) {
   let bar = h.createBar();
   for (const event of events) bar = h.barStep(bar, event, mem);
@@ -87,16 +93,16 @@ test('the card goes below the bar, or above it when there is no room', () => {
 
 test('the bar hides 1500 ms after the pointer leaves', () => {
   const v = {};
-  const away = [{ type: 'hover', video: v, now: 0 }, { type: 'away', now: 100 }];
+  const away = [...hoverAt(v, 0), { type: 'away', now: 100 }];
   assert.equal(steps([...away, { type: 'tick', now: 1599 }]).video, v);
   assert.equal(steps([...away, { type: 'tick', now: 1600 }]).video, null);
   assert.equal(steps([...away, { type: 'away', now: 1000 }, { type: 'tick', now: 1600 }]).video, null, 'a later away does not push it back');
-  assert.equal(steps([...away, { type: 'hover', video: v, now: 1000 }, { type: 'tick', now: 5000 }]).video, v, 'coming back cancels it');
+  assert.equal(steps([...away, ...hoverAt(v, 1000), { type: 'tick', now: 5000 }]).video, v, 'coming back cancels it');
 });
 
 test('the bar stays while the card is open', () => {
   const v = {};
-  const open = [{ type: 'hover', video: v, now: 0 }, { type: 'card', open: true, now: 10 }, { type: 'away', now: 20 }, { type: 'tick', now: 9000 }];
+  const open = [...hoverAt(v, 0), { type: 'card', open: true, now: 10 }, { type: 'away', now: 20 }, { type: 'tick', now: 9000 }];
   assert.equal(steps(open).video, v);
   const closed = [...open, { type: 'card', open: false, now: 9000 }];
   assert.equal(steps([...closed, { type: 'tick', now: 10_499 }]).video, v);
@@ -112,7 +118,8 @@ test('the first play with sound shows it for 4 s, once', () => {
   assert.equal(bar.video, null);
   bar = h.barStep(bar, { type: 'played', video: v, now: 5000 }, mem);
   assert.equal(bar.video, null, 'only once per video');
-  assert.equal(h.barStep(bar, { type: 'hover', video: v, now: 6000 }, mem).video, v, 'hover still works');
+  for (const event of hoverAt(v, 6000)) bar = h.barStep(bar, event, mem);
+  assert.equal(bar.video, v, 'hover still works');
 });
 
 test('muted, silent or small play never shows', () => {
@@ -127,7 +134,7 @@ test('muted, silent or small play never shows', () => {
 
 test('hovering during the 4 s keeps it', () => {
   const v = {};
-  const bar = steps([{ type: 'played', video: v, now: 0 }, { type: 'hover', video: v, now: 1000 }, { type: 'tick', now: 4500 }]);
+  const bar = steps([{ type: 'played', video: v, now: 0 }, ...hoverAt(v, 1000), { type: 'tick', now: 4500 }]);
   assert.equal(bar.video, v);
   assert.equal(bar.mode, 'hover');
 });
@@ -136,20 +143,20 @@ test('the close button hides that video only', () => {
   const a = {};
   const b = {};
   const mem = memory();
-  let bar = steps([{ type: 'hover', video: a, now: 0 }, { type: 'dismiss', video: a }], mem);
+  let bar = steps([...hoverAt(a, 0), { type: 'dismiss', video: a }], mem);
   assert.equal(bar.video, null);
-  bar = h.barStep(bar, { type: 'hover', video: a, now: 10 }, mem);
+  for (const event of hoverAt(a, 10)) bar = h.barStep(bar, event, mem);
   assert.equal(bar.video, null);
   bar = h.barStep(bar, { type: 'played', video: a, now: 10 }, mem);
   assert.equal(bar.video, null);
-  bar = h.barStep(bar, { type: 'hover', video: b, now: 20 }, mem);
+  for (const event of hoverAt(b, 20)) bar = h.barStep(bar, event, mem);
   assert.equal(bar.video, b);
 });
 
 test('one bar at a time, the most recent video wins', () => {
   const a = {};
   const b = {};
-  const bar = steps([{ type: 'hover', video: a, now: 0 }, { type: 'played', video: b, now: 10 }]);
+  const bar = steps([...hoverAt(a, 0), { type: 'played', video: b, now: 10 }]);
   assert.equal(bar.video, b);
   assert.equal(bar.mode, 'play');
 });
@@ -157,8 +164,8 @@ test('one bar at a time, the most recent video wins', () => {
 test('a removed or scrolled away video hides the bar', () => {
   const a = {};
   const b = {};
-  assert.equal(steps([{ type: 'hover', video: a, now: 0 }, { type: 'gone', video: b }]).video, a);
-  assert.equal(steps([{ type: 'hover', video: a, now: 0 }, { type: 'gone', video: a }]).video, null);
+  assert.equal(steps([...hoverAt(a, 0), { type: 'gone', video: b }]).video, a);
+  assert.equal(steps([...hoverAt(a, 0), { type: 'gone', video: a }]).video, null);
 });
 
 test('barStep does not change the bar it is given', () => {
@@ -210,4 +217,36 @@ test('visibility is asked only of a video under the pointer', () => {
   );
   assert.equal(found.video, 'here');
   assert.deepEqual(asked, ['here']);
+});
+
+test('a pointer only passing over a video shows nothing', () => {
+  const v = {};
+  assert.equal(h.HOVER_DELAY_MS, 150);
+  assert.equal(steps([{ type: 'hover', video: v, now: 0 }]).video, null);
+  assert.equal(steps([{ type: 'hover', video: v, now: 0 }, { type: 'hover', video: v, now: 149 }]).video, null);
+  assert.equal(steps([{ type: 'hover', video: v, now: 0 }, { type: 'away', now: 100 }, { type: 'hover', video: v, now: 200 }]).video, null, 'leaving starts the wait again');
+  assert.equal(steps([{ type: 'hover', video: v, now: 0 }, { type: 'hover', video: v, now: 150 }]).video, v);
+});
+
+test('moving to another video waits before the bar moves there', () => {
+  const a = {};
+  const b = {};
+  const moving = [...hoverAt(a, 0), { type: 'hover', video: b, now: 500 }];
+  assert.equal(steps(moving).video, a);
+  assert.equal(steps([...moving, { type: 'hover', video: b, now: 650 }]).video, b);
+});
+
+test('the bar keeps the spot it was given', () => {
+  const nearTop = rect(100, 10, 640, 360);
+  assert.equal(h.barInside(nearTop, BAR), true);
+  assert.equal(h.barInside(rect(100, 200, 640, 360), BAR), false);
+  // Shown above, then the page scrolls the video up: it stays above (clamped), it does not jump inside.
+  assert.deepEqual({ ...h.barPlacement(nearTop, viewport, BAR, false) }, { left: 560, top: 0 });
+  assert.deepEqual({ ...h.barPlacement(rect(100, 200, 640, 360), viewport, BAR, true) }, { left: 552, top: 208 });
+});
+
+test('the gap between the bar and the video counts as the bar', () => {
+  const grown = h.inflate(rect(560, 166, 180, 30), 6);
+  assert.deepEqual({ ...grown }, { left: 554, top: 160, right: 746, bottom: 202, width: 192, height: 42 });
+  assert.equal(h.containsPoint(grown, 600, 199), true);
 });
