@@ -193,3 +193,9 @@ test('a null size is blank', () => {
   assert.equal(h.choiceRow({ label: 'Audio only', container: 'M4A', height: null, size_bytes: null, size_is_estimate: false }).size, '');
   assert.equal(h.choiceRow({ label: '4K', container: 'MP4', height: 2160, size_bytes: null }).size, '(4K)');
 });
+
+test('a duration reads like the dashboard', () => {
+  assert.equal(h.formatDuration(60), '1:00');
+  assert.equal(h.formatDuration(5), '0:05');
+  assert.equal(h.formatDuration(3723), '1:02:03');
+});

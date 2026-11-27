@@ -11,6 +11,7 @@
     "cookies",
     "nativeMessaging",
     "contextMenus",
+    "scripting",
     "storage",
     "webRequest"
   ],

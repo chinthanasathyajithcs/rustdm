@@ -45,7 +45,8 @@ globalThis.chrome = {
       return state.reply;
     },
   },
-  permissions: { contains: async () => state.granted, onAdded: event('added') },
+  permissions: { contains: async () => state.granted, onAdded: event('added'), onRemoved: event('removed') },
+  scripting: { getRegisteredContentScripts: async () => [], registerContentScripts: async () => {}, unregisterContentScripts: async () => {} },
   storage: {
     local: {
       get: async (defaults) => ({ ...(typeof defaults === 'object' ? defaults : {}), ...store }),

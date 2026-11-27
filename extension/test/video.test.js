@@ -330,3 +330,74 @@ test('a port from another extension is ignored', async () => {
   await settle();
   assert.equal(chrome.state.nativePorts.length, 0);
 });
+
+const registrations = (chrome) => chrome.state.log.filter((e) => e[0] === 'register' || e[0] === 'unregister');
+
+test('the page script is registered with the grant and both switches', async () => {
+  const { chrome } = install();
+  await settle();
+  await settle();
+  assert.deepEqual(registrations(chrome), [['register', ['rdm-hover']]]);
+  const [script] = chrome.state.registered;
+  assert.deepEqual(script, {
+    id: 'rdm-hover',
+    js: ['content/ember.css.js', 'content/hover-logic.js', 'content/hover.js'],
+    matches: ['<all_urls>'],
+    allFrames: true,
+    runAt: 'document_idle',
+  });
+});
+
+test('it is not registered without the grant, and is once the grant arrives', async () => {
+  const { chrome } = install({ granted: false });
+  await settle();
+  assert.deepEqual(registrations(chrome), []);
+  chrome.state.granted = true;
+  chrome.permissions.onAdded.fire({ origins: ['<all_urls>'] });
+  await settle();
+  await settle();
+  assert.deepEqual(registrations(chrome), [['register', ['rdm-hover']]]);
+});
+
+test('it is removed when either switch goes off', async () => {
+  for (const key of ['enabled', 'videoBar']) {
+    const { chrome } = install();
+    await settle();
+    await settle();
+    await chrome.storage.local.set({ [key]: false });
+    await settle();
+    await settle();
+    assert.deepEqual(registrations(chrome).at(-1), ['unregister', ['rdm-hover']], key);
+    assert.deepEqual(chrome.state.registered, []);
+  }
+});
+
+test('it is removed when the grant is removed', async () => {
+  const { chrome } = install();
+  await settle();
+  await settle();
+  chrome.state.granted = false;
+  chrome.permissions.onRemoved.fire({ origins: ['<all_urls>'] });
+  await settle();
+  await settle();
+  assert.deepEqual(chrome.state.registered, []);
+});
+
+test('registering twice is avoided', async () => {
+  const { chrome } = install();
+  await settle();
+  await settle();
+  chrome.permissions.onAdded.fire({ origins: ['<all_urls>'] });
+  await chrome.storage.local.set({ videoBar: true });
+  await settle();
+  await settle();
+  assert.equal(registrations(chrome).length, 1);
+  assert.equal(chrome.state.registered.length, 1);
+});
+
+test('the bar switch alone is off: nothing registered at start', async () => {
+  const { chrome } = install({ local: { videoBar: false } });
+  await settle();
+  await settle();
+  assert.deepEqual(registrations(chrome), []);
+});

@@ -6,6 +6,22 @@ import { describeError, request } from './lib/native.js';
 const ALL_URLS = { origins: ['<all_urls>'] };
 const $ = (id) => document.getElementById(id);
 
+// The Ember colours (content/ember.css.js, loaded first) as CSS custom properties.
+function applyEmber() {
+  for (const [name, value] of Object.entries(globalThis.rdmEmber?.palette ?? {})) {
+    document.documentElement.style.setProperty(`--rdm-${name.toLowerCase().replaceAll('_', '-')}`, value);
+  }
+}
+
+function bindSwitch(id, key) {
+  return chrome.storage.local.get({ [key]: true }).then((stored) => {
+    $(id).checked = stored[key] !== false;
+    $(id).addEventListener('change', (event) => {
+      void chrome.storage.local.set({ [key]: event.target.checked });
+    });
+  });
+}
+
 function describeHost(reply) {
   if (!reply.ok) return describeError(reply.error);
   const { daemon, host_version: hostVersion } = reply.result;
@@ -33,11 +49,8 @@ async function showHost() {
 }
 
 async function init() {
-  const { enabled } = await chrome.storage.local.get({ enabled: true });
-  $('enabled').checked = enabled !== false;
-  $('enabled').addEventListener('change', (event) => {
-    void chrome.storage.local.set({ enabled: event.target.checked });
-  });
+  applyEmber();
+  await Promise.all([bindSwitch('enabled', 'enabled'), bindSwitch('videoBar', 'videoBar')]);
   $('grant').addEventListener('click', async () => {
     await chrome.permissions.request(ALL_URLS); // needs this click as its user gesture
     await showPermission();

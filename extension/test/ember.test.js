@@ -41,7 +41,7 @@ test('the crab is the small icon', () => {
   assert.equal(ember.crab, read('../../assets/icon/rustdm-small.svg'));
 });
 
-test('the panel uses no other colours', { todo: 'Task 6 moves the panel to Ember' }, () => {
+test('the panel uses no other colours', () => {
   const allowed = new Set(Object.values(ember.palette));
   for (const hex of hexes(read('../panel.html'))) assert.ok(allowed.has(hex), `${hex} in panel.html`);
 });

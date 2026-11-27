@@ -12,6 +12,13 @@ const ALL_URLS = { origins: ['<all_urls>'] };
 const CAUGHT_PREFIX = 'caught:';
 export const PAGE_MENU_ID = 'rustdm-download-page';
 export const CARD_PORT = 'rdm-card';
+const HOVER_SCRIPT = {
+  id: 'rdm-hover',
+  js: ['content/ember.css.js', 'content/hover-logic.js', 'content/hover.js'],
+  matches: ['<all_urls>'],
+  allFrames: true,
+  runAt: 'document_idle',
+};
 const UNUSABLE = { kind: 'unusable', message: 'rustdm could not use this video.' };
 
 const caughtKey = (tabId) => `${CAUGHT_PREFIX}${tabId}`;
@@ -119,20 +126,50 @@ export function installVideo(deps) {
       });
   }
 
+  // The page script runs only with the grant and both switches on. One sync
+  // at a time, so two quick changes cannot register it twice.
+  let hoverSync = Promise.resolve();
+  function syncHoverScripts() {
+    hoverSync = hoverSync
+      .then(async () => {
+        const [granted, on, stored] = await Promise.all([
+          chrome.permissions.contains(ALL_URLS).catch(() => false),
+          enabled,
+          chrome.storage.local.get({ videoBar: true }).catch(() => ({ videoBar: true })),
+        ]);
+        const wanted = granted && on && stored.videoBar !== false;
+        const present = (await chrome.scripting.getRegisteredContentScripts({ ids: [HOVER_SCRIPT.id] })).length > 0;
+        if (wanted && !present) await chrome.scripting.registerContentScripts([HOVER_SCRIPT]);
+        if (!wanted && present) await chrome.scripting.unregisterContentScripts({ ids: [HOVER_SCRIPT.id] });
+      })
+      .catch(() => {
+        // Tried again on the next grant or switch change.
+      });
+    return hoverSync;
+  }
+
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !('enabled' in changes)) return;
-    const on = changes.enabled.newValue !== false;
-    enabled = Promise.resolve(on);
-    showPageMenu(on);
-    if (!on) void clearAll();
+    if (area !== 'local') return;
+    if ('enabled' in changes) {
+      const on = changes.enabled.newValue !== false;
+      enabled = Promise.resolve(on);
+      showPageMenu(on);
+      if (!on) void clearAll();
+    }
+    if ('enabled' in changes || 'videoBar' in changes) void syncHoverScripts();
   });
   void enabled.then(showPageMenu);
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (changeInfo.url) void updateTab(tabId, (record) => tabRecordAfterNavigation(record, changeInfo.url));
   });
   chrome.tabs.onRemoved.addListener((tabId) => void updateTab(tabId, () => undefined));
-  chrome.permissions.onAdded.addListener(watchStreams);
+  chrome.permissions.onAdded.addListener(() => {
+    watchStreams();
+    void syncHoverScripts();
+  });
+  chrome.permissions.onRemoved.addListener(() => void syncHoverScripts());
   watchStreams();
+  void syncHoverScripts();
 
   // The card: one port from the page, one native session per chosen source.
   function onCardConnect(port) {

@@ -26,7 +26,7 @@ test('the manifest key produces an ID that the host allows', () => {
 test('permissions are exactly the documented set', () => {
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ['contextMenus', 'cookies', 'downloads', 'nativeMessaging', 'storage', 'webRequest'],
+    ['contextMenus', 'cookies', 'downloads', 'nativeMessaging', 'scripting', 'storage', 'webRequest'],
   );
   assert.deepEqual(manifest.optional_host_permissions, ['<all_urls>']);
   assert.equal(manifest.host_permissions, undefined);
@@ -70,4 +70,20 @@ test('the panel puts text in with textContent only', () => {
   assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(/.test(panel));
   assert.match(panel, /textContent/);
   assert.ok(!/<script(?![^>]*\bsrc=)[^>]*>/.test(read('../panel.html')), 'no inline script');
+});
+
+test('the page script puts text in with textContent only and stays closed', () => {
+  const script = read('../content/hover.js');
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/.test(script));
+  assert.match(script, /textContent/);
+  assert.match(script, /attachShadow\(\{ mode: 'closed' \}\)/);
+  assert.match(script, /isTrusted/);
+  assert.ok(!/window\.postMessage|dispatchEvent/.test(script), 'nothing is posted to the page');
+});
+
+test('the files the page script registration names exist', () => {
+  for (const path of ['content/ember.css.js', 'content/hover-logic.js', 'content/hover.js']) {
+    assert.doesNotThrow(() => readFileSync(root + path), path);
+    assert.match(read(`../video.js`), new RegExp(path.replace('.', '\\.')));
+  }
 });

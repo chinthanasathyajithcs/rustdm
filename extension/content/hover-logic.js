@@ -105,6 +105,15 @@
     return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${UNITS[unit]}`;
   }
 
+  /** The dashboard's format_duration: "m:ss", or "h:mm:ss" from an hour. */
+  function formatDuration(secs) {
+    const two = (n) => String(n).padStart(2, '0');
+    const hours = Math.floor(secs / 3600);
+    const minutes = Math.floor((secs % 3600) / 60);
+    const seconds = Math.floor(secs % 60);
+    return hours > 0 ? `${hours}:${two(minutes)}:${two(seconds)}` : `${minutes}:${two(seconds)}`;
+  }
+
   /** A quality row's three columns, as the dashboard's quality dialog shows them. */
   function choiceRow(choice) {
     const bytes = typeof choice.size_bytes === 'number' ? choice.size_bytes : null;
@@ -129,6 +138,7 @@
     barStep,
     fullscreenParent,
     formatBytes,
+    formatDuration,
     choiceRow,
   });
 })();
