@@ -482,3 +482,54 @@ test('a card in the main frame looks up the tab address', async () => {
   await openCard(chrome, { sender: moved });
   assert.equal(lastNative(chrome).posted[0].url, 'https://www.youtube.com/shorts/abc123');
 });
+
+const youtubeSender = (url = 'https://www.youtube.com/') => {
+  const s = cardSender({ url });
+  s.tab.url = url;
+  s.tab.title = 'YouTube';
+  return s;
+};
+const openOn = (extra = {}) => ({ type: 'open', currentSrc: 'blob:https://www.youtube.com/1', at: { x: 300, y: 200 }, videos: 8, ...extra });
+
+test('on YouTube the card asks the player which video it plays', async () => {
+  const { chrome } = install();
+  chrome.state.playerId = 'abcdefghijk';
+  await openCard(chrome, { sender: youtubeSender(), message: openOn() });
+  const call = chrome.state.log.find((e) => e[0] === 'executeScript')[1];
+  assert.deepEqual(call, { target: { tabId: 7, frameIds: [0] }, world: 'MAIN', args: [300, 200] });
+  assert.equal(lastNative(chrome).posted[0].url, 'https://www.youtube.com/watch?v=abcdefghijk');
+});
+
+test('a YouTube home preview with no answer and no link is refused, never sent as a list', async () => {
+  const { chrome } = install();
+  chrome.state.playerFails = true;
+  const card = await openCard(chrome, { sender: youtubeSender(), message: openOn() });
+  assert.equal(chrome.state.nativePorts.length, 0);
+  assert.equal(views(card)[0].phase, 'failed');
+  assert.equal(views(card)[0].message, 'Open the video you want, then try again.');
+});
+
+test('a YouTube preview without a player answer uses the link of its card', async () => {
+  const { chrome } = install();
+  await openCard(chrome, { sender: youtubeSender(), message: openOn({ link: 'https://www.youtube.com/watch?v=zzzzzzzzzzz' }) });
+  assert.equal(lastNative(chrome).posted[0].url, 'https://www.youtube.com/watch?v=zzzzzzzzzzz');
+});
+
+test('a preview inside a link on another site uses that link', async () => {
+  const { chrome } = install();
+  const s = cardSender({ url: 'https://news.example.com/' });
+  s.tab.url = 'https://news.example.com/';
+  await openCard(chrome, { sender: s, message: { type: 'open', currentSrc: '', at: { x: 1, y: 1 }, videos: 3, link: 'https://news.example.com/clips/42' } });
+  assert.equal(lastNative(chrome).posted[0].url, 'https://news.example.com/clips/42');
+  assert.equal(chrome.state.log.some((e) => e[0] === 'executeScript'), false, 'only YouTube players are asked');
+});
+
+test('a refused card still offers the streams caught in the tab', async () => {
+  const { chrome, video } = install();
+  await settle();
+  headers(chrome, streamResponse({ url: 'https://cdn.example.com/other.mp4', frameId: 5 }));
+  await video.caughtFor(7);
+  chrome.state.playerFails = true;
+  const card = await openCard(chrome, { sender: youtubeSender(), message: openOn() });
+  assert.deepEqual(views(card)[0].others, [{ key: views(card)[0].others[0].key, label: 'other.mp4 · cdn.example.com' }]);
+});

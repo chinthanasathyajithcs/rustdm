@@ -6,7 +6,7 @@ import { addCaught, classify, documentKey, tabRecordAfterNavigation } from './li
 import { buildChooseMessage, buildStatusMessage, buildVideoMessage } from './lib/contract.js';
 import { POLL_MS, flowStep, startFlow } from './lib/flow.js';
 import { openSession, request } from './lib/native.js';
-import { otherSources, pickSource, resolveSource } from './lib/source.js';
+import { frameAddress, isFeedPage, otherSources, pickSource, refinePage, resolveSource } from './lib/source.js';
 
 const ALL_URLS = { origins: ['<all_urls>'] };
 const CAUGHT_PREFIX = 'caught:';
@@ -24,6 +24,31 @@ const HOVER_SCRIPT = {
 };
 const UNUSABLE = { kind: 'unusable', message: 'rustdm could not use this video.' };
 const BROKE = 'Something went wrong. Close the card and try again.';
+const FEED = 'Open the video you want, then try again.';
+const PLAYER_WAIT_MS = 3000;
+const isYouTube = (address) => {
+  try {
+    return /(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(new URL(address).hostname);
+  } catch {
+    return false;
+  }
+};
+
+// Runs in the page's own world (its player's API lives there): the id of the
+// video the YouTube player under the point (x, y) plays, or "".
+function playerVideoAt(x, y) {
+  let found = null;
+  for (const video of document.querySelectorAll('video')) {
+    const box = video.getBoundingClientRect();
+    const hit = box.width > 0 && box.height > 0 && x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+    if (hit && (!found || box.width * box.height < found.area)) found = { video, area: box.width * box.height };
+  }
+  try {
+    return String(found?.video.closest('.html5-video-player')?.getVideoData?.().video_id ?? '');
+  } catch {
+    return '';
+  }
+}
 
 const caughtKey = (tabId) => `${CAUGHT_PREFIX}${tabId}`;
 const newId = () => crypto.randomUUID().replaceAll('-', '').slice(0, 8);
@@ -209,6 +234,7 @@ export function installVideo(deps) {
       chrome.storage.local.get({ videoBar: true }).catch(() => ({ videoBar: true })),
     ]).then(([on, stored]) => on && stored.videoBar !== false);
     let current = null; // {session, timer, state, resolved, others}
+    let seen = {}; // what the page told about the video: {at, link, videos}
     let generation = 0;
     let closed = false;
 
@@ -260,7 +286,33 @@ export function installVideo(deps) {
     }
 
     // `choose(caught)` gives the source; a newer begin or a closed card wins.
-    async function begin(choose) {
+    // "This page" made precise: the video the YouTube player plays, the
+    // preview's own link, or a feed (refused). A page picked by hand from
+    // "Other sources" is only checked for being a feed.
+    async function videoPage(page, refine) {
+      const address = frameAddress(sender);
+      if (!refine) return isFeedPage(address, seen.videos) ? { type: 'feed' } : page;
+      const playerId = isYouTube(address) ? await askPlayer() : '';
+      return refinePage({ address, playerId, link: seen.link, videos: seen.videos });
+    }
+
+    async function askPlayer() {
+      const at = seen.at;
+      if (!at || !Number.isFinite(at.x) || !Number.isFinite(at.y)) return '';
+      const asked = chrome.scripting
+        .executeScript({
+          target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] },
+          world: 'MAIN',
+          func: playerVideoAt,
+          args: [at.x, at.y],
+        })
+        .then((results) => String(results?.[0]?.result ?? ''))
+        .catch(() => '');
+      const late = new Promise((resolve) => setTimeout(() => resolve(''), PLAYER_WAIT_MS));
+      return Promise.race([asked, late]);
+    }
+
+    async function begin(choose, refine = false) {
       const mine = ++generation;
       end(current);
       current = null;
@@ -271,10 +323,15 @@ export function installVideo(deps) {
         port.disconnect();
         return;
       }
-      const picked = choose(caught);
+      let picked = choose(caught);
+      if (picked?.type === 'page') {
+        picked = await videoPage(picked, refine);
+        if (mine !== generation || closed) return;
+      }
       const resolved = resolveSource(picked, sender, caught);
       if (!resolved.ok) {
-        post({ phase: 'failed', message: UNUSABLE.message }, hostOf(sender.url), []);
+        const message = resolved.reason === 'feed' ? FEED : UNUSABLE.message;
+        post({ phase: 'failed', message }, hostOf(frameAddress(sender)), otherSources(picked ?? { type: 'page' }, caught));
         return;
       }
       const session = openSession({
@@ -304,7 +361,12 @@ export function installVideo(deps) {
 
     port.onMessage.addListener((message) => {
       if (message?.type === 'open') {
-        begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught })).catch(broke);
+        seen = {
+          at: message.at && typeof message.at === 'object' ? { x: Number(message.at.x), y: Number(message.at.y) } : null,
+          link: typeof message.link === 'string' ? message.link : null,
+          videos: Number.isFinite(message.videos) ? message.videos : 1,
+        };
+        begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught }), true).catch(broke);
       } else if (message?.type === 'use') {
         begin(() => message.source).catch(broke);
       } else if (message?.type === 'choose' && current && typeof message.choiceId === 'string') {

@@ -114,6 +114,52 @@
     return fullscreenElement && fullscreenElement.tagName !== 'VIDEO' ? fullscreenElement : root;
   }
 
+  const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+  const LINK_WALK = 12;
+
+  function youtubeIdOf(url) {
+    const host = url.hostname.replace(/^(www|m|music)\./, '');
+    if (host === 'youtu.be') return url.pathname.split('/')[1];
+    if (host !== 'youtube.com') return null;
+    if (url.pathname === '/watch') return url.searchParams.get('v');
+    const [, kind, id] = url.pathname.split('/');
+    return kind === 'shorts' ? id : null;
+  }
+
+  function webUrl(href, base) {
+    try {
+      const url = new URL(href, base);
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The video's own page when the page says which one it is, else null:
+   * a preview that is itself a link; on YouTube, the nearest box around the
+   * video that links to exactly one video (a box naming two names none).
+   */
+  function videoLink(video, pageUrl) {
+    const anchor = video.closest?.('a[href]');
+    const own = anchor && webUrl(anchor.getAttribute('href'), pageUrl);
+    if (own) return own.href;
+    const page = webUrl(pageUrl);
+    if (!page || !/(^|\.)youtube\.com$/.test(page.hostname)) return null;
+    let node = video.parentElement;
+    for (let i = 0; node && i < LINK_WALK; i += 1, node = node.parentElement) {
+      const ids = new Set();
+      for (const link of node.querySelectorAll?.('a[href]') ?? []) {
+        const url = webUrl(link.getAttribute('href'), pageUrl);
+        const id = url && youtubeIdOf(url);
+        if (id && YOUTUBE_ID.test(id)) ids.add(id);
+      }
+      if (ids.size === 1) return `https://www.youtube.com/watch?v=${[...ids][0]}`;
+      if (ids.size > 1) return null;
+    }
+    return null;
+  }
+
   /** The dashboard's format_bytes: binary units, one decimal. */
   function formatBytes(bytes) {
     let value = bytes;
@@ -162,5 +208,6 @@
     formatBytes,
     formatDuration,
     choiceRow,
+    videoLink,
   });
 })();

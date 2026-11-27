@@ -16,6 +16,7 @@
   const BAR_TEXT = 'Download this video';
   const BAR_HINT = 'Download this video with rustdm';
   const LOOKING = 'Looking up the video…';
+  const PROTECTED = "This video is protected and can't be saved.";
 
   const memory = { dismissed: new WeakSet(), played: new WeakSet() };
   const tracked = new Set();
@@ -117,6 +118,10 @@
   function onPointer() {
     frameQueued = false;
     if (!pointer || off || (tracked.size === 0 && !bar.video)) return;
+    if (!chrome.runtime?.id) {
+      stopForGood();
+      return;
+    }
     const { x, y } = pointer;
     if (bar.video && insideOwnUi(x, y)) {
       dispatch({ type: 'hover', video: bar.video, now: now() });
@@ -265,13 +270,22 @@
       return;
     }
     closeCard();
+    const title = document.title || location.host;
+    // A protected (DRM) video can't be saved by anyone: say so without asking rustdm.
+    if (video.mediaKeys) {
+      card = { video, port: null, view: { phase: 'failed', title, message: PROTECTED, others: [] }, othersOpen: false };
+      dispatch({ type: 'card', open: true, now: now() });
+      renderCard();
+      return;
+    }
     let port;
     try {
       port = chrome.runtime.connect({ name: CARD_PORT });
     } catch {
-      return; // the extension was reloaded or removed
+      stopForGood(); // the extension was updated or removed: this copy is left over
+      return;
     }
-    card = { video, port, view: { phase: 'looking', title: document.title || location.host, others: [] }, othersOpen: false };
+    card = { video, port, view: { phase: 'looking', title, others: [] }, othersOpen: false };
     port.onMessage.addListener((message) => {
       if (card?.port !== port || message?.type !== 'view' || typeof message.view !== 'object') return;
       card.view = message.view;
@@ -281,7 +295,14 @@
     port.onDisconnect.addListener(() => {
       if (card?.port === port) closeCard();
     });
-    port.postMessage({ type: 'open', currentSrc: String(video.currentSrc || '') });
+    const box = video.getBoundingClientRect();
+    port.postMessage({
+      type: 'open',
+      currentSrc: String(video.currentSrc || ''),
+      at: { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) },
+      link: H.videoLink(video, location.href),
+      videos: document.querySelectorAll('video').length,
+    });
     dispatch({ type: 'card', open: true, now: now() });
     renderCard();
   }
@@ -291,7 +312,7 @@
     const { port } = card;
     card = null;
     try {
-      port.disconnect();
+      port?.disconnect();
     } catch {
       // Already gone.
     }
@@ -302,7 +323,7 @@
 
   function send(message) {
     try {
-      card?.port.postMessage(message);
+      card?.port?.postMessage(message);
     } catch {
       closeCard();
     }
@@ -438,10 +459,21 @@
       if (key in changes) switches[key] = changes[key].newValue !== false;
     }
     off = !(switches.enabled && switches.videoBar);
-    if (!off) return;
+    if (off) hideAll();
+  }
+
+  function hideAll() {
     closeCard();
     bar = H.createBar();
     removeUi();
+  }
+
+  // After an extension update this copy can no longer reach the extension:
+  // it takes its bar away and stays quiet until the page is reloaded.
+  function stopForGood() {
+    off = true;
+    switches.enabled = false;
+    hideAll();
   }
 
   // --- Page events --------------------------------------------------------

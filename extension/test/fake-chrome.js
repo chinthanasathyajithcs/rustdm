@@ -123,6 +123,11 @@ export function makeChrome({ granted = true, local = {}, session = {} } = {}) {
         state.log.push(['register', scripts.map((s) => s.id)]);
         state.registered.push(...structuredClone(scripts));
       },
+      executeScript: async (injection) => {
+        state.log.push(['executeScript', { target: injection.target, world: injection.world, args: injection.args }]);
+        if (state.playerFails) throw new Error('Cannot access contents of the page.');
+        return [{ frameId: injection.target.frameIds?.[0] ?? 0, result: state.playerId ?? '' }];
+      },
       unregisterContentScripts: async (filter) => {
         state.log.push(['unregister', filter?.ids]);
         state.registered = state.registered.filter((s) => filter?.ids && !filter.ids.includes(s.id));

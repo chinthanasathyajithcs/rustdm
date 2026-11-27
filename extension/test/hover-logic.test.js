@@ -6,7 +6,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source = readFileSync(new URL('../content/hover-logic.js', import.meta.url), 'utf8');
-const context = { WeakSet };
+const context = { WeakSet, URL };
 vm.runInNewContext(source, context);
 const h = context.rdmHover;
 
@@ -247,4 +247,43 @@ test('the gap between the bar and the video counts as the bar', () => {
   const grown = h.inflate(rect(560, 166, 180, 30), 6);
   assert.deepEqual({ ...grown }, { left: 554, top: 160, right: 746, bottom: 202, width: 192, height: 42 });
   assert.equal(h.containsPoint(grown, 600, 199), true);
+});
+
+// A tiny stand-in for page elements: what videoLink reads (closest, parentElement, querySelectorAll).
+function el({ link = null, parent = null, links = [] } = {}) {
+  const node = {
+    parentElement: parent,
+    closest: (selector) => (selector === 'a[href]' ? link : null),
+    querySelectorAll: () => links.map((href) => ({ getAttribute: () => href })),
+  };
+  return node;
+}
+const anchor = (href) => ({ getAttribute: (name) => (name === 'href' ? href : null) });
+
+test('a preview inside a link uses that link', () => {
+  const video = el({ link: anchor('/clips/42?ref=home') });
+  assert.equal(h.videoLink(video, 'https://news.example.com/'), 'https://news.example.com/clips/42?ref=home');
+});
+
+test('a link that is not a web page is ignored', () => {
+  assert.equal(h.videoLink(el({ link: anchor('javascript:void(0)') }), 'https://e.com/'), null);
+});
+
+test('a video in no link on another site has none', () => {
+  const card = el({ links: ['https://e.com/a', 'https://e.com/b'] });
+  assert.equal(h.videoLink(el({ parent: card }), 'https://e.com/'), null);
+});
+
+test('a YouTube preview uses the one video its card links to', () => {
+  const card = el({ links: ['/watch?v=dQw4w9WgXcQ&pp=abc', '/watch?v=dQw4w9WgXcQ', '/@channel'] });
+  const inner = el({ parent: card });
+  assert.equal(h.videoLink(el({ parent: inner }), 'https://www.youtube.com/'), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  const short = el({ links: ['/shorts/abcdefghijk'] });
+  assert.equal(h.videoLink(el({ parent: short }), 'https://m.youtube.com/feed/subscriptions'), 'https://www.youtube.com/watch?v=abcdefghijk');
+});
+
+test('a YouTube box naming two videos names none', () => {
+  const column = el({ links: ['/watch?v=aaaaaaaaaaa', '/watch?v=bbbbbbbbbbb'] });
+  const card = el({ parent: column, links: [] });
+  assert.equal(h.videoLink(el({ parent: card }), 'https://www.youtube.com/'), null);
 });

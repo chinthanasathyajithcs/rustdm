@@ -4,6 +4,39 @@
 import { isWebUrl } from './contract.js';
 
 const PAGE_LABEL = 'This page';
+const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+// Addresses of pages with many videos and none of their own: home, feeds,
+// search, trending. yt-dlp reads them as a list, never as the video.
+const FEED_PATH = /^\/(?:$|home\/?$|feed|explore|search|discover|trending|popular|latest|timeline|for-?you|following)/i;
+const YOUTUBE_VIDEO_PATH = /^\/(?:watch|shorts\/|embed\/|live\/|v\/)/;
+
+function parse(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+const isYouTubeHost = (host) => /(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(host);
+
+/** True for an address that is a list of videos, not one video's page. */
+export function isFeedPage(address, videos) {
+  const url = parse(address);
+  if (!url) return false;
+  if (isYouTubeHost(url.hostname)) return !YOUTUBE_VIDEO_PATH.test(url.pathname);
+  return videos > 1 && FEED_PATH.test(url.pathname);
+}
+
+/**
+ * What a "This page" source becomes when the page says more: the video the
+ * YouTube player plays, the video's own link, or a feed (refused).
+ */
+export function refinePage({ address, playerId, link, videos }) {
+  if (YOUTUBE_ID.test(playerId ?? '')) return { type: 'link', url: `https://www.youtube.com/watch?v=${playerId}` };
+  if (link && isWebUrl(link)) return { type: 'link', url: link };
+  return isFeedPage(address, videos) ? { type: 'feed' } : { type: 'page' };
+}
 
 /** The source for a video: its own http(s) link, else a stream caught in its frame, else the page. */
 export function pickSource({ currentSrc, frameId, caught }) {
@@ -18,7 +51,11 @@ export function otherSources(chosen, caught) {
   const others = caught
     .filter((e) => !(chosen.type === 'caught' && chosen.id === e.id))
     .map((e) => ({ key: e.id, label: `${e.name} · ${e.host}` }));
-  if (chosen.type !== 'page') others.push({ key: 'page', label: PAGE_LABEL });
+  // The page is offered only when it may be the video's: not when the video's
+  // own page was found, and not on a feed.
+  if (chosen.type !== 'page' && chosen.type !== 'link' && chosen.type !== 'feed') {
+    others.push({ key: 'page', label: PAGE_LABEL });
+  }
   return others;
 }
 
@@ -69,6 +106,10 @@ export function resolveSource(source, sender, caught) {
     picked = { url: entry.url, referer: address, kind: entry.kind === 'hls' ? 'stream' : 'file' };
   } else if (source?.type === 'page' && isWebUrl(address ?? '')) {
     picked = { url: address, kind: 'page' };
+  } else if (source?.type === 'link' && isWebUrl(source.url ?? '')) {
+    picked = { url: source.url, kind: 'page' };
+  } else if (source?.type === 'feed') {
+    return { ok: false, reason: 'feed' };
   } else {
     return refused;
   }

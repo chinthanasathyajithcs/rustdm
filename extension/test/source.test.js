@@ -129,3 +129,51 @@ test('a frame keeps its own address', () => {
   frame.tab.url = 'https://blog.example.com/post#comments';
   assert.equal(resolveSource({ type: 'page' }, frame, caught).url, 'https://www.youtube.com/embed/x');
 });
+
+import { isFeedPage, refinePage } from '../lib/source.js';
+
+test('feed pages: YouTube outside a video page, and many videos on a feed address', () => {
+  assert.equal(isFeedPage('https://www.youtube.com/', 1), true);
+  assert.equal(isFeedPage('https://www.youtube.com/@channel/videos', 1), true);
+  assert.equal(isFeedPage('https://www.youtube.com/results?search_query=x', 5), true);
+  assert.equal(isFeedPage('https://www.youtube.com/watch?v=abcdefghijk&list=RD1', 9), false);
+  assert.equal(isFeedPage('https://www.youtube.com/shorts/abcdefghijk', 3), false);
+  assert.equal(isFeedPage('https://www.youtube-nocookie.com/embed/abcdefghijk', 1), false);
+  assert.equal(isFeedPage('https://x.com/home', 4), true);
+  assert.equal(isFeedPage('https://x.com/home', 1), false, 'one video on the page: it is that video');
+  assert.equal(isFeedPage('https://site.example/', 3), true);
+  assert.equal(isFeedPage('https://site.example/news/story-1.html', 3), false);
+});
+
+test('the page source becomes the video page when one is known', () => {
+  const youtube = 'https://www.youtube.com/';
+  assert.deepEqual(refinePage({ address: youtube, playerId: 'abcdefghijk', link: null, videos: 8 }), {
+    type: 'link',
+    url: 'https://www.youtube.com/watch?v=abcdefghijk',
+  });
+  assert.deepEqual(refinePage({ address: youtube, playerId: '', link: 'https://www.youtube.com/watch?v=zzzzzzzzzzz', videos: 8 }), {
+    type: 'link',
+    url: 'https://www.youtube.com/watch?v=zzzzzzzzzzz',
+  });
+  assert.deepEqual(refinePage({ address: youtube, playerId: '', link: null, videos: 8 }), { type: 'feed' });
+  assert.deepEqual(refinePage({ address: 'https://blog.example/post', playerId: '', link: null, videos: 1 }), { type: 'page' });
+  assert.deepEqual(refinePage({ address: 'https://e.com/', playerId: 'not an id!', link: 'javascript:x', videos: 1 }), { type: 'page' });
+});
+
+test('a video page source is looked up like a page, without a referer', () => {
+  const resolved = resolveSource({ type: 'link', url: 'https://www.youtube.com/watch?v=abcdefghijk' }, sender(), caught);
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.url, 'https://www.youtube.com/watch?v=abcdefghijk');
+  assert.equal(resolved.kind, 'page');
+  assert.equal('referer' in resolved, false);
+  assert.deepEqual(resolveSource({ type: 'link', url: 'file:///etc/passwd' }, sender(), caught), { ok: false });
+});
+
+test('a feed is refused with its own reason', () => {
+  assert.deepEqual(resolveSource({ type: 'feed' }, sender(), caught), { ok: false, reason: 'feed' });
+});
+
+test('a video page source offers the caught streams but not the feed page', () => {
+  assert.deepEqual(otherSources({ type: 'link', url: 'https://www.youtube.com/watch?v=abcdefghijk' }, []), []);
+  assert.deepEqual(otherSources({ type: 'feed' }, [caught[0]]), [{ key: 'f2', label: 'b.mp4 · cdn.e.com' }]);
+});
