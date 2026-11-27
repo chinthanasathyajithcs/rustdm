@@ -122,3 +122,58 @@ test('the stream listener is added once, again after the grant arrives', async (
   chrome.permissions.onAdded.fire({ origins: ['<all_urls>'] });
   assert.equal(chrome.webRequest.onHeadersReceived.listeners.length, 1);
 });
+
+const nativeAdds = (chrome) => chrome.state.log.filter((e) => e[0] === 'native').map((e) => e[1]);
+const tab = (over = {}) => ({ id: 7, url: 'https://blog.example.com/post', title: ' Angel One ', incognito: false, ...over });
+
+test('the page menu sends the frame url with the tab title', async () => {
+  const { chrome, video } = install();
+  await video.menuPage({ menuItemId: 'rustdm-download-page', frameUrl: 'https://www.youtube.com/embed/x', pageUrl: 'https://blog.example.com/post' }, tab());
+  const [add] = nativeAdds(chrome);
+  assert.equal(add.type, 'add');
+  assert.equal(add.url, 'https://www.youtube.com/embed/x');
+  assert.equal(add.context.title, 'Angel One');
+  assert.equal('referer' in add.context, false);
+  assert.ok(chrome.state.log.some((e) => e[0] === 'ok'));
+  await video.menuPage({ pageUrl: 'https://blog.example.com/post' }, tab());
+  assert.equal(nativeAdds(chrome)[1].url, 'https://blog.example.com/post');
+});
+
+test('the page menu reports a refusal and skips private windows', async () => {
+  const { chrome, video } = install();
+  chrome.state.nativeReply = { id: 1, ok: false, error: { kind: 'rejected', message: 'no' } };
+  await video.menuPage({ pageUrl: 'https://e.com/' }, tab());
+  assert.deepEqual(chrome.state.log.find((e) => e[0] === 'failure')[1].kind, 'rejected');
+  await video.menuPage({ pageUrl: 'https://e.com/' }, tab({ incognito: true }));
+  assert.equal(nativeAdds(chrome).length, 1);
+});
+
+test('the page menu is shown only while the switch is on', async () => {
+  const { chrome } = install({ local: { enabled: false } });
+  await settle();
+  const updates = () => chrome.state.log.filter((e) => e[0] === 'menu.update');
+  assert.deepEqual(updates().at(-1), ['menu.update', 'rustdm-download-page', { visible: false }]);
+  await chrome.storage.local.set({ enabled: true });
+  await settle();
+  assert.deepEqual(updates().at(-1), ['menu.update', 'rustdm-download-page', { visible: true }]);
+});
+
+test('the blob menu uses the caught stream', async () => {
+  const { chrome, video } = install();
+  await settle();
+  headers(chrome, streamResponse({ url: 'https://cdn.example.com/master.m3u8', type: 'xmlhttprequest', frameId: 2, responseHeaders: [{ name: 'content-type', value: 'application/x-mpegurl' }] }));
+  await video.caughtFor(7);
+  await video.menuBlob({ srcUrl: 'blob:https://player.example.com/1', mediaType: 'video', frameId: 2, frameUrl: 'https://player.example.com/embed', pageUrl: 'https://blog.example.com/post' }, tab());
+  const [add] = nativeAdds(chrome);
+  assert.equal(add.url, 'https://cdn.example.com/master.m3u8');
+  assert.equal(add.context.referer, 'https://player.example.com/embed');
+  assert.equal(add.context.title, 'Angel One');
+});
+
+test('the blob menu without a catch looks up the page', async () => {
+  const { chrome, video } = install();
+  await video.menuBlob({ srcUrl: 'blob:https://e.com/1', mediaType: 'video', frameId: 0, pageUrl: 'https://e.com/watch' }, tab());
+  const [add] = nativeAdds(chrome);
+  assert.equal(add.url, 'https://e.com/watch');
+  assert.equal('referer' in add.context, false);
+});

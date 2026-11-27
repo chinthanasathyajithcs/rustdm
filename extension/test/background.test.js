@@ -35,7 +35,7 @@ globalThis.chrome = {
       if (state.downloadFails) throw new Error('Invalid URL');
     },
   },
-  contextMenus: { onClicked: event('menu'), create: (o) => log.push(['menu', o.id]) },
+  contextMenus: { onClicked: event('menu'), create: (o) => log.push(['menu', o.id]), update: async () => {} },
   runtime: {
     onInstalled: event('installed'),
     openOptionsPage: () => log.push(['options']),
@@ -203,4 +203,43 @@ test('clearing a stale OK never wipes a red badge', async () => {
   session.okBadgeShownAt = Date.now() - 5000;
   await offer({ incognito: true }).done();
   assert.equal(state.badge, '!');
+});
+
+test('the page menu item is created', () => {
+  log.length = 0;
+  listeners.installed({ reason: 'update' });
+  assert.ok(log.some((e) => e[0] === 'menu' && e[1] === 'rustdm-download-page'));
+});
+
+test('a blob video goes to rustdm, not to the browser', async () => {
+  state.reply = { id: 1, ok: true, result: { download_id: 'dl_3' } };
+  log.length = 0;
+  listeners.menu(
+    { menuItemId: 'rustdm-download-link', srcUrl: 'blob:https://e.com/1', mediaType: 'video', frameId: 0, pageUrl: 'https://e.com/watch' },
+    { id: 7, url: 'https://e.com/watch', title: 'Clip', incognito: false },
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(log.find((e) => e[0] === 'download'), undefined);
+  assert.deepEqual(log.find((e) => e[0] === 'native').slice(0, 3), ['native', 'add', 'https://e.com/watch']);
+});
+
+test('a blob link still falls back to the browser', async () => {
+  log.length = 0;
+  listeners.menu(
+    { menuItemId: 'rustdm-download-link', linkUrl: 'blob:https://e.com/2', pageUrl: 'https://e.com/' },
+    { id: 7, incognito: false },
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(log.find((e) => e[0] === 'download'), ['download', 'blob:https://e.com/2']);
+});
+
+test('the page menu entry sends the page to rustdm', async () => {
+  state.reply = { id: 1, ok: true, result: { download_id: 'dl_4' } };
+  log.length = 0;
+  listeners.menu(
+    { menuItemId: 'rustdm-download-page', pageUrl: 'https://e.com/watch?v=9' },
+    { id: 7, url: 'https://e.com/watch?v=9', title: 'Clip', incognito: false },
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(log.find((e) => e[0] === 'native').slice(0, 3), ['native', 'add', 'https://e.com/watch?v=9']);
 });

@@ -3,7 +3,7 @@
 import { buildDownloadMessage, buildMenuMessage, dedupeCookies, isWebUrl } from './lib/contract.js';
 import { describeError, request } from './lib/native.js';
 import { recordPost, shouldTakeOver } from './lib/takeover.js';
-import { installVideo } from './video.js';
+import { PAGE_MENU_ID, installVideo } from './video.js';
 
 const ALL_URLS = { origins: ['<all_urls>'] };
 const MENU_ID = 'rustdm-download-link';
@@ -159,12 +159,17 @@ async function handleMenuClick(info) {
   await fallbackToBrowser(url); // not caught again: it is started by an extension
 }
 
+const isBlobMedia = (info) =>
+  !info.linkUrl && (info.mediaType === 'video' || info.mediaType === 'audio') && String(info.srcUrl ?? '').startsWith('blob:');
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId !== MENU_ID) return;
   // The manifest keeps the extension out of private windows ("not_allowed");
   // this is the second lock, in case that ever changes.
   if (tab?.incognito) return;
-  void handleMenuClick(info);
+  if (info.menuItemId === PAGE_MENU_ID) void video.menuPage(info, tab);
+  else if (info.menuItemId !== MENU_ID) return;
+  else if (isBlobMedia(info)) void video.menuBlob(info, tab);
+  else void handleMenuClick(info);
 });
 
 // Learn which pages were POSTed, so a form download is left to the browser.
@@ -186,7 +191,7 @@ function watchPosts() {
 }
 
 watchPosts();
-installVideo({ chrome, setInterval, clearInterval, now: Date.now, collectCookies, flashOk, showFailure });
+const video = installVideo({ chrome, setInterval, clearInterval, now: Date.now, collectCookies, flashOk, showFailure });
 void clearStaleOkBadge(); // the worker may have stopped before the 4 s timer fired
 chrome.permissions.onAdded.addListener(watchPosts);
 
@@ -196,5 +201,11 @@ chrome.runtime.onInstalled.addListener((details) => {
     title: 'Download with rustdm',
     contexts: ['link', 'video', 'audio'],
   });
+  chrome.contextMenus.create({
+    id: PAGE_MENU_ID,
+    title: 'Download video on this page with rustdm',
+    contexts: ['page', 'frame'],
+  });
+  void video.syncPageMenu();
   if (details.reason === 'install') chrome.runtime.openOptionsPage();
 });
