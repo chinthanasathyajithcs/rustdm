@@ -422,6 +422,7 @@ pub(crate) mod test_support {
             max_bytes_per_sec: 0,
             video: None,
             step: None,
+            added_by: None,
         }
     }
 
@@ -542,6 +543,7 @@ pub(crate) mod test_support {
             max_bytes_per_sec: 0,
             video: None,
             step: None,
+            added_by: None,
         }]);
         app.apply_tick(TelemetryTick {
             id: "dl_1".to_string(),

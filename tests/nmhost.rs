@@ -1,11 +1,11 @@
 //! `rdm-nmhost` end to end: the real host binary, a real `rdmd`, and a local server.
 
 use rustdm::ipc::client::{ClientError, DaemonClient};
-use rustdm::ipc::protocol::DownloadStatus;
+use rustdm::ipc::protocol::{AddDownloadParams, AddedBy, DownloadStatus};
 use rustdm::ipc::transport::IpcEndpoint;
 use rustdm::nmhost::frame::{read_frame, write_frame};
 use rustdm::nmhost::origin::ALLOWED_EXTENSION_IDS;
-use rustdm::testing::{pattern_bytes, Mode, TestServer};
+use rustdm::testing::{pattern_bytes, Mode, Route, TestServer};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -502,6 +502,186 @@ async fn an_add_without_context_still_works_and_sends_no_cookies() {
         assert!(request.referer.is_none(), "{request:?}");
     }
 
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
+
+const MASTER_PLAYLIST: &str = "#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080
+1080/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+720/index.m3u8
+";
+
+fn slow_file_server() -> impl std::future::Future<Output = TestServer> {
+    TestServer::start(
+        pattern_bytes(2 * 1024 * 1024),
+        Mode::Throttle {
+            bytes_per_sec: 64 * 1024,
+        },
+    )
+}
+
+/// Ask the host about `id` until it reports `want`.
+async fn host_status_until(host: &mut Host, id: &str, want: &str) -> Value {
+    let start = Instant::now();
+    loop {
+        let reply = host
+            .call(json!({"type": "status", "id": 7, "download_id": id}))
+            .await;
+        if reply["result"]["status"] == want {
+            return reply;
+        }
+        assert!(
+            start.elapsed() < REPLY_TIMEOUT,
+            "never got to {want}: {reply}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn the_host_reports_its_own_downloads_trimmed_and_nothing_else() {
+    let server = slow_file_server().await;
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+    let added = host
+        .call(
+            json!({"type": "add", "id": 1, "url": server.url().join("a.bin").unwrap().to_string()}),
+        )
+        .await;
+    let id = added["result"]["download_id"].as_str().unwrap().to_string();
+
+    let mine = host
+        .call(json!({"type": "status", "id": 2, "download_id": id}))
+        .await;
+    assert_eq!(mine["ok"], true, "{mine}");
+    assert_eq!(mine["id"], 2);
+    assert_eq!(mine["result"]["download_id"], id.as_str());
+    let text = mine.to_string();
+    assert!(
+        !text.contains("http") && !text.contains("Downloads"),
+        "{text}"
+    );
+
+    let theirs = client
+        .add(AddDownloadParams {
+            url: server.url().join("b.bin").unwrap().to_string(),
+            destination: None,
+            filename: None,
+            connections: None,
+            max_bytes_per_sec: None,
+            context: None,
+            quality: None,
+            added_by: None,
+        })
+        .await
+        .unwrap();
+    let other = host
+        .call(json!({"type": "status", "id": 3, "download_id": theirs.id}))
+        .await;
+    let missing = host
+        .call(json!({"type": "status", "id": 3, "download_id": "dl_999"}))
+        .await;
+    assert_eq!(other["error"]["kind"], "not_found", "{other}");
+    assert_eq!(other, missing, "the browser cannot tell the two apart");
+    let choose = host
+        .call(json!({"type": "choose_quality", "id": 4, "download_id": theirs.id, "choice_id": "720"}))
+        .await;
+    assert_eq!(choose["error"]["kind"], "not_found", "{choose}");
+
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
+
+#[tokio::test]
+async fn status_without_a_daemon_is_not_running_and_starts_none() {
+    let env = Env::new();
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+
+    let reply = host
+        .call(json!({"type": "status", "id": 1, "download_id": "dl_1"}))
+        .await;
+    let choose = host
+        .call(json!({"type": "choose_quality", "id": 2, "download_id": "dl_1", "choice_id": "a"}))
+        .await;
+
+    assert_eq!(reply["error"]["kind"], "not_running", "{reply}");
+    assert_eq!(choose["error"]["kind"], "not_running", "{choose}");
+    assert!(host.finish().await.success());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(matches!(
+        DaemonClient::connect(&env.endpoint).await,
+        Err(ClientError::NotRunning)
+    ));
+}
+
+#[tokio::test]
+async fn a_video_the_browser_sent_is_chosen_through_the_host() {
+    let server = TestServer::start_routes(vec![(
+        "/v/master.m3u8".to_string(),
+        Route::ok(MASTER_PLAYLIST).with_header("Content-Type", "application/vnd.apple.mpegurl"),
+    )])
+    .await;
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+    let added = host
+        .call(json!({
+            "type": "add", "id": 1, "url": server.url().join("v/master.m3u8").unwrap().to_string(),
+            "context": {"title": "Angel One"}
+        }))
+        .await;
+    let id = added["result"]["download_id"].as_str().unwrap().to_string();
+
+    let waiting = host_status_until(&mut host, &id, "choosing").await;
+    let video = &waiting["result"]["video"];
+    assert_eq!(video["title"], "Angel One");
+    assert_eq!(video["choices"][0]["label"], "1080p");
+    assert_eq!(video["choices"][0]["container"], "MP4");
+    let choice = video["choices"][1]["id"].as_str().unwrap().to_string();
+
+    let chosen = host
+        .call(json!({"type": "choose_quality", "id": 5, "download_id": id, "choice_id": choice}))
+        .await;
+    assert_eq!(chosen["ok"], true, "{chosen}");
+    assert_ne!(chosen["result"]["status"], "choosing");
+    assert_eq!(chosen["result"]["video"]["chosen"]["label"], "720p");
+
+    let again = host
+        .call(json!({"type": "choose_quality", "id": 6, "download_id": id, "choice_id": choice}))
+        .await;
+    assert_eq!(again["error"]["kind"], "rejected", "{again}");
+
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
+
+#[tokio::test]
+async fn a_duplicate_from_the_browser_names_the_existing_download() {
+    let server = slow_file_server().await;
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+    let add = json!({"type": "add", "id": 1, "url": server.url().to_string()});
+
+    let first = host.call(add.clone()).await;
+    let second = host.call(add).await;
+
+    assert_eq!(second["error"]["kind"], "duplicate");
+    assert_eq!(
+        second["error"]["existing_id"],
+        first["result"]["download_id"]
+    );
+    let listed = client.list().await.unwrap();
+    assert_eq!(listed[0].added_by, Some(AddedBy::Browser));
     assert!(host.finish().await.success());
     client.shutdown().await.unwrap();
     let _ = daemon.wait().await;

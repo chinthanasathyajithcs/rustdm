@@ -76,6 +76,7 @@ async fn client_skips_telemetry_between_responses() {
             max_bytes_per_sec: None,
             context: None,
             quality: None,
+            added_by: None,
         })
         .await
         .expect("add");
@@ -180,6 +181,7 @@ async fn cancelled_download_stays_cancelled_after_the_engine_stops() {
             max_bytes_per_sec: None,
             context: None,
             quality: None,
+            added_by: None,
         })
         .await
         .expect("add");

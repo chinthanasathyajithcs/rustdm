@@ -29,6 +29,7 @@ fn browser_context() -> RequestContext {
         ],
         referer: Some(BROWSER_REFERER.to_string()),
         user_agent: Some(BROWSER_USER_AGENT.to_string()),
+        title: None,
     }
 }
 

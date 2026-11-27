@@ -53,6 +53,7 @@ async fn downloads_with_video_and_sound(link: &str) {
             max_bytes_per_sec: None,
             context: None,
             quality: Some("360p".to_string()),
+            added_by: None,
         })
         .unwrap();
 

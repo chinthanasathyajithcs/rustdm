@@ -1,4 +1,4 @@
-use crate::ipc::protocol::{DaemonLimits, DownloadStatus, SavedDefaults};
+use crate::ipc::protocol::{AddedBy, DaemonLimits, DownloadStatus, SavedDefaults};
 use crate::video::VideoPlan;
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -57,6 +57,12 @@ pub struct SavedDownload {
     /// The quality the user asked for, as they wrote it. Missing from older queue files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<String>,
+    /// Who added the download, when it was the browser. Missing from older queue files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_by: Option<AddedBy>,
+    /// The title of the page the link came from. Missing from older queue files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_title: Option<String>,
 }
 
 /// Reads and writes the queue file. Saves are serialized and atomic.
@@ -176,6 +182,8 @@ mod tests {
                 user_agent: Some("Mozilla/5.0".to_string()),
                 video: None,
                 quality: None,
+                added_by: None,
+                page_title: None,
             }],
         }
     }
@@ -260,5 +268,26 @@ mod tests {
         .unwrap();
         let snapshot = store.load().unwrap().expect("loads");
         assert_eq!(snapshot.defaults, SavedDefaults::default());
+    }
+
+    #[test]
+    fn an_old_queue_file_without_added_by_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::in_dir(dir.path());
+        std::fs::write(
+            store.path(),
+            br#"{"version":1,"next_id":1,"limits":{"max_active":3,"max_bytes_per_sec":0},
+                "downloads":[{"id":"dl_1","url":"http://example.com/a.iso","directory":"/d",
+                "requested_name":null,"filename":"a.iso","output":null,"connections":8,
+                "status":"queued","total_bytes":null,"downloaded_bytes":0,"error_message":null}]}"#,
+        )
+        .unwrap();
+        let mut snapshot = store.load().unwrap().expect("loads");
+        assert_eq!(snapshot.downloads[0].added_by, None);
+
+        snapshot.downloads[0].added_by = Some(AddedBy::Browser);
+        store.save(&snapshot).unwrap();
+        let back = store.load().unwrap().expect("loads");
+        assert_eq!(back.downloads[0].added_by, Some(AddedBy::Browser));
     }
 }

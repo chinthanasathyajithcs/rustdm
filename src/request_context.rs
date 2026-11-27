@@ -28,6 +28,9 @@ const MAX_DOMAIN_LABEL_BYTES: usize = 63;
 pub const MAX_REFERER_BYTES: usize = 8 * 1024;
 /// Longest User-Agent.
 pub const MAX_USER_AGENT_BYTES: usize = 1024;
+/// A page title longer than this (in characters) is ignored: no real title is
+/// near it, so only a misbehaving page sends one. Titles are never cut.
+pub const MAX_TITLE_CHARS: usize = 1000;
 /// A cookie is never kept longer than this once seeded (browsers cap at 400 days).
 const MAX_COOKIE_LIFETIME_SECS: i64 = 400 * 24 * 60 * 60;
 
@@ -86,6 +89,10 @@ pub struct RequestContext {
     pub referer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// The title of the page the link came from. Names a video whose own
+    /// name is weak; never sent to any server and never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 impl fmt::Debug for RequestContext {
@@ -95,6 +102,7 @@ impl fmt::Debug for RequestContext {
             .field("cookies", &self.cookies.len())
             .field("referer", &self.referer_origin())
             .field("user_agent", &self.user_agent.is_some())
+            .field("title", &self.title.is_some())
             .finish()
     }
 }
@@ -138,8 +146,18 @@ impl RequestContext {
             cookies,
             referer: clean_referer(self.referer.as_deref())?,
             user_agent: clean_user_agent(self.user_agent.as_deref())?,
+            title: clean_title(self.title.as_deref()),
         })
     }
+}
+
+/// The title without control characters and outer spaces. Empty, or longer
+/// than `MAX_TITLE_CHARS`, gives none; the download goes ahead either way.
+fn clean_title(title: Option<&str>) -> Option<String> {
+    let kept: String = title?.chars().filter(|c| !c.is_control()).collect();
+    let kept = kept.trim();
+    let usable = !kept.is_empty() && kept.chars().count() <= MAX_TITLE_CHARS;
+    usable.then(|| kept.to_string())
 }
 
 /// RFC 7230 token characters.
@@ -393,6 +411,7 @@ mod tests {
             }],
             referer: Some("https://example.com/files".to_string()),
             user_agent: Some("Mozilla/5.0".to_string()),
+            title: None,
         };
         let back: RequestContext =
             serde_json::from_str(&serde_json::to_string(&ctx).unwrap()).unwrap();
@@ -409,6 +428,7 @@ mod tests {
             cookies: vec![cookie("SID", "super-secret-value", "example.com")],
             referer: Some("https://example.com/page?token=hunter2".to_string()),
             user_agent: None,
+            title: None,
         };
         let shown = format!("{ctx:?} {:?}", ctx.cookies[0]);
         assert!(!shown.contains("super-secret-value"), "{shown}");
@@ -634,5 +654,50 @@ mod tests {
             Err(Error::Protocol(_))
         ));
         assert!(client_for(&RequestContext::default(), Timeouts::default()).is_ok());
+    }
+
+    fn titled(title: &str) -> Option<String> {
+        RequestContext {
+            title: Some(title.to_string()),
+            ..RequestContext::default()
+        }
+        .validated(NOW)
+        .unwrap()
+        .title
+    }
+
+    #[test]
+    fn a_title_is_trimmed_and_loses_control_characters() {
+        assert_eq!(titled("  Angel\u{0}One\n  ").as_deref(), Some("AngelOne"));
+    }
+
+    #[test]
+    fn an_empty_title_becomes_none() {
+        assert_eq!(titled("   "), None);
+        assert_eq!(titled("\n\t"), None);
+    }
+
+    #[test]
+    fn a_long_real_title_is_kept_whole() {
+        assert_eq!(titled(&"a".repeat(150)), Some("a".repeat(150)));
+        assert_eq!(
+            titled(&"a".repeat(MAX_TITLE_CHARS)),
+            Some("a".repeat(MAX_TITLE_CHARS))
+        );
+    }
+
+    #[test]
+    fn a_title_over_the_safety_limit_is_ignored() {
+        assert_eq!(MAX_TITLE_CHARS, 1000);
+        assert_eq!(titled(&"a".repeat(MAX_TITLE_CHARS + 1)), None);
+    }
+
+    #[test]
+    fn debug_never_shows_the_title() {
+        let ctx = RequestContext {
+            title: Some("Secret Show".to_string()),
+            ..RequestContext::default()
+        };
+        assert!(!format!("{ctx:?}").contains("Secret"));
     }
 }

@@ -54,6 +54,7 @@ fn add_params(mock: &TestServer, name: &str, dir: &Path) -> AddDownloadParams {
         max_bytes_per_sec: None,
         context: None,
         quality: None,
+        added_by: None,
     }
 }
 
@@ -578,6 +579,7 @@ async fn plain_mode_says_how_to_choose_when_a_video_waits_for_a_quality() {
             max_bytes_per_sec: None,
             context: None,
             quality: None,
+            added_by: None,
         })
         .await
         .unwrap();

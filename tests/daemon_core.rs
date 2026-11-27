@@ -85,6 +85,7 @@ async fn test_daemon_add_download_and_complete() {
         max_bytes_per_sec: None,
         context: None,
         quality: None,
+        added_by: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(10),
@@ -155,6 +156,7 @@ async fn test_daemon_pause_and_resume() {
         max_bytes_per_sec: None,
         context: None,
         quality: None,
+        added_by: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(20),
@@ -313,6 +315,7 @@ async fn test_daemon_telemetry_streaming() {
         max_bytes_per_sec: None,
         context: None,
         quality: None,
+        added_by: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(41),
@@ -502,6 +505,7 @@ fn add_to(
         max_bytes_per_sec: None,
         context: None,
         quality: None,
+        added_by: None,
     })
 }
 
@@ -613,6 +617,7 @@ fn add_without_options(url: String) -> AddDownloadParams {
         max_bytes_per_sec: None,
         context: None,
         quality: None,
+        added_by: None,
     }
 }
 
@@ -785,6 +790,8 @@ fn saved_download(
             origin: rustdm::video::PlanOrigin::Page,
         }),
         quality: None,
+        added_by: None,
+        page_title: None,
     }
 }
 

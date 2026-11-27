@@ -26,6 +26,7 @@ fn full_context() -> RequestContext {
         cookies: vec![sign_in_cookie()],
         referer: Some(REFERER.to_string()),
         user_agent: Some(USER_AGENT.to_string()),
+        title: None,
     }
 }
 

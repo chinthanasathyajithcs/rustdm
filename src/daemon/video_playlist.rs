@@ -90,6 +90,7 @@ impl DaemonCore {
             cookies: self.cookies_for(&id),
             referer,
             user_agent,
+            title: None,
         };
         let ctx = Some(&ctx).filter(|ctx| !ctx.is_empty());
         let read = async {

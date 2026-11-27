@@ -112,6 +112,7 @@ impl Setup {
                 max_bytes_per_sec: None,
                 context,
                 quality: Some("1080p".to_string()),
+                added_by: None,
             })
             .unwrap()
     }
@@ -171,6 +172,7 @@ fn cookie_context() -> RequestContext {
         }],
         referer: None,
         user_agent: None,
+        title: None,
     }
 }
 

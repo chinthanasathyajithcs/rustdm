@@ -280,6 +280,7 @@ impl AddDialog {
                 max_bytes_per_sec,
                 context: None,
                 quality: None,
+                added_by: None,
             })
             .collect())
     }
@@ -466,6 +467,7 @@ mod tests {
                 max_bytes_per_sec: Some(512 * 1024),
                 context: None,
                 quality: None,
+                added_by: None,
             }]
         );
         assert!(dialog.is_pending());

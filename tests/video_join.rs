@@ -126,6 +126,7 @@ impl Setup {
                 max_bytes_per_sec: None,
                 context: None,
                 quality: Some(quality.to_string()),
+                added_by: None,
             })
             .unwrap()
     }
