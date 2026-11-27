@@ -117,7 +117,9 @@ export function installVideo(deps) {
       // A list started without a navigation (just installed, reloaded, or
       // switched back on) learns its page now, so the next page clears it.
       const doc = record?.doc ?? (await pageOf(details.tabId));
-      return { ...record, doc, list: addCaught(record?.list ?? [], caught, { id: newId(), now: now() }) };
+      const list = addCaught(record?.list ?? [], caught, { id: newId(), now: now() });
+      if (record && list === record.list && doc === record.doc) return record; // unchanged: no write
+      return { ...record, doc, list };
     });
   }
 

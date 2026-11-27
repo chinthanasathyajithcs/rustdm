@@ -184,3 +184,11 @@ test('a second video on a feed keeps its own playlist', () => {
   list = add(list, hls('https://video.twimg.com/ext/222/pl/avc1/480x852/d.m3u8'), 4000);
   assert.equal(list.length, 2);
 });
+
+test('the newest entry seen again with no bigger size changes nothing', () => {
+  const first = add([], classify(details({ url: 'https://e.com/live.m3u8', type: 'xmlhttprequest', headers: { 'Content-Type': 'application/x-mpegurl' } })));
+  const again = add(first, classify(details({ url: 'https://e.com/live.m3u8', type: 'xmlhttprequest', headers: { 'Content-Type': 'application/x-mpegurl' } })), 9000);
+  assert.equal(again, first, 'the same list, so nothing is written');
+  const bigger = add(add([], classify(details({ url: 'https://e.com/a.mp4' }))), classify(details({ url: 'https://e.com/a.mp4', statusCode: 206, headers: { 'Content-Range': 'bytes 0-1/99999999' } })), 9000);
+  assert.equal(bigger[0].bytes, 99999999);
+});

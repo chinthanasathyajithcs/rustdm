@@ -101,6 +101,10 @@ export function addCaught(list, caught, { id, now }) {
   const url = new URL(key);
   const host = url.host;
   const old = list.find((e) => documentKey(e.url) === key);
+  const grows = typeof caught.bytes === 'number' && !(old?.bytes >= caught.bytes);
+  // The newest entry seen again (a live playlist refreshed, the next range of
+  // a file): nothing new, so nothing is written.
+  if (old && list[0] === old && !grows) return list;
   const rest = list.filter((e) => e !== old);
   if (!old && caught.kind === 'hls' && rest.some((e) => isVariantOf(url, caught.frameId, e))) {
     return list; // a single-quality playlist of one we already have

@@ -548,3 +548,22 @@ test('a card in a hidden tab stops asking rustdm until shown again', async () =>
   await tick();
   assert.equal(native.posted.at(-1).type, 'status');
 });
+
+test('a stream fetched again does not rewrite the tab list', async () => {
+  const { chrome, video } = install();
+  chrome.state.tabUrls = { 7: 'https://e.com/live' };
+  await settle();
+  let writes = 0;
+  const realSet = chrome.storage.session.set;
+  chrome.storage.session.set = async (values) => {
+    writes += 1;
+    return realSet(values);
+  };
+  const playlist = streamResponse({ url: 'https://cdn.e.com/live.m3u8', type: 'xmlhttprequest', responseHeaders: [{ name: 'content-type', value: 'application/x-mpegurl' }] });
+  headers(chrome, playlist);
+  await video.caughtFor(7);
+  headers(chrome, playlist);
+  headers(chrome, playlist);
+  await video.caughtFor(7);
+  assert.equal(writes, 1);
+});
