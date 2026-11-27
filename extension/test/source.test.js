@@ -102,7 +102,7 @@ test('a frame page source uses the frame url and the tab title', () => {
 });
 
 test('a page that is not http is refused', () => {
-  assert.deepEqual(resolveSource({ type: 'page' }, sender({ url: 'about:blank' }), caught), { ok: false });
+  assert.deepEqual(resolveSource({ type: 'page' }, sender({ url: 'about:blank', frameId: 2 }), caught), { ok: false });
 });
 
 test('the card title falls back to the host', () => {
@@ -111,4 +111,21 @@ test('the card title falls back to the host', () => {
   const resolved = resolveSource({ type: 'page' }, untitled, caught);
   assert.equal(resolved.cardTitle, 'e.com');
   assert.equal('title' in resolved, false);
+});
+
+test('the main page uses the tab address, which follows in-page navigation', () => {
+  // YouTube moves from the home page to a Short without loading a new page:
+  // the sender's address stays the first one, the tab's is current.
+  const moved = sender({ url: 'https://www.youtube.com/', frameId: 0 });
+  moved.tab.url = 'https://www.youtube.com/shorts/abc123';
+  const page = resolveSource({ type: 'page' }, moved, caught);
+  assert.equal(page.url, 'https://www.youtube.com/shorts/abc123');
+  const element = resolveSource({ type: 'element', url: 'https://cdn.e.com/v.mp4' }, moved, caught);
+  assert.equal(element.referer, 'https://www.youtube.com/shorts/abc123');
+});
+
+test('a frame keeps its own address', () => {
+  const frame = sender({ url: 'https://www.youtube.com/embed/x', frameId: 4 });
+  frame.tab.url = 'https://blog.example.com/post#comments';
+  assert.equal(resolveSource({ type: 'page' }, frame, caught).url, 'https://www.youtube.com/embed/x');
 });

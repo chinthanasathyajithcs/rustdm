@@ -39,6 +39,18 @@ function hostOf(url) {
 }
 
 /**
+ * The address of the frame the video is in. For the main page it is the tab's:
+ * sites like YouTube move to another video without loading a new page, and
+ * the sender keeps the first address while the tab's follows. A frame keeps
+ * its own (embedded players do not move like that).
+ */
+export function frameAddress(sender) {
+  const tabUrl = sender?.tab?.url;
+  if (sender?.frameId === 0 && tabUrl && isWebUrl(tabUrl)) return tabUrl;
+  return sender?.url;
+}
+
+/**
  * Checks a source against the sender and this tab's caught list.
  * @returns `{ok: true, url, referer?, kind: 'file'|'stream'|'page', title?, cardTitle}` or `{ok: false}`
  */
@@ -47,15 +59,16 @@ export function resolveSource(source, sender, caught) {
   const tab = sender?.tab;
   if (!tab || tab.incognito) return refused;
 
+  const address = frameAddress(sender);
   let picked;
   if (source?.type === 'element' && isWebUrl(source.url ?? '')) {
-    picked = { url: source.url, referer: sender.url, kind: isPlaylistLink(source.url) ? 'stream' : 'file' };
+    picked = { url: source.url, referer: address, kind: isPlaylistLink(source.url) ? 'stream' : 'file' };
   } else if (source?.type === 'caught') {
     const entry = caught.find((e) => e.id === source.id);
     if (!entry) return refused;
-    picked = { url: entry.url, referer: sender.url, kind: entry.kind === 'hls' ? 'stream' : 'file' };
-  } else if (source?.type === 'page' && isWebUrl(sender.url ?? '')) {
-    picked = { url: sender.url, kind: 'page' };
+    picked = { url: entry.url, referer: address, kind: entry.kind === 'hls' ? 'stream' : 'file' };
+  } else if (source?.type === 'page' && isWebUrl(address ?? '')) {
+    picked = { url: address, kind: 'page' };
   } else {
     return refused;
   }
@@ -66,6 +79,6 @@ export function resolveSource(source, sender, caught) {
     ok: true,
     ...picked,
     ...(title ? { title } : {}),
-    cardTitle: title || hostOf(sender.url),
+    cardTitle: title || hostOf(address),
   };
 }

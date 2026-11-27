@@ -180,7 +180,7 @@ test('the blob menu uses the caught stream', async () => {
 
 test('the blob menu without a catch looks up the page', async () => {
   const { chrome, video } = install();
-  await video.menuBlob({ srcUrl: 'blob:https://e.com/1', mediaType: 'video', frameId: 0, pageUrl: 'https://e.com/watch' }, tab());
+  await video.menuBlob({ srcUrl: 'blob:https://e.com/1', mediaType: 'video', frameId: 0, pageUrl: 'https://e.com/watch' }, tab({ url: 'https://e.com/watch' }));
   const [add] = nativeAdds(chrome);
   assert.equal(add.url, 'https://e.com/watch');
   assert.equal('referer' in add.context, false);
@@ -467,4 +467,18 @@ test('an unexpected error in the card shows a failure instead of looking forever
   assert.equal(view?.phase, 'failed');
   assert.match(view.message, /rustdm could not use this video|went wrong/i);
   assert.equal(chrome.state.nativePorts.every((p) => p.disconnected), true, 'no native port left open');
+});
+
+test('the page menu in the main frame uses the tab address', async () => {
+  const { chrome, video } = install();
+  await video.menuPage({ frameId: 0, pageUrl: 'https://www.youtube.com/' }, tab({ url: 'https://www.youtube.com/shorts/abc123' }));
+  assert.equal(nativeAdds(chrome)[0].url, 'https://www.youtube.com/shorts/abc123');
+});
+
+test('a card in the main frame looks up the tab address', async () => {
+  const { chrome } = install();
+  const moved = cardSender({ url: 'https://www.youtube.com/' });
+  moved.tab.url = 'https://www.youtube.com/shorts/abc123';
+  await openCard(chrome, { sender: moved });
+  assert.equal(lastNative(chrome).posted[0].url, 'https://www.youtube.com/shorts/abc123');
 });

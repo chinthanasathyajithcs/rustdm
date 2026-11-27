@@ -124,7 +124,13 @@ export function installVideo(deps) {
     else await showFailure(reply.error);
   }
 
-  const menuSender = (info, tab) => ({ url: info.frameUrl || info.pageUrl, tab });
+  // Chrome gives `frameUrl` only for a click inside a frame; on the main page
+  // the tab's address is the current one (see frameAddress in lib/source.js).
+  const menuSender = (info, tab) => ({
+    url: info.frameUrl || info.pageUrl,
+    frameId: info.frameUrl ? info.frameId || -1 : 0,
+    tab,
+  });
 
   /** "Download video on this page with rustdm": the frame's own page. */
   async function menuPage(info, tab) {
