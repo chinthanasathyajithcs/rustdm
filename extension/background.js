@@ -3,6 +3,7 @@
 import { buildDownloadMessage, buildMenuMessage, dedupeCookies, isWebUrl } from './lib/contract.js';
 import { describeError, request } from './lib/native.js';
 import { recordPost, shouldTakeOver } from './lib/takeover.js';
+import { installVideo } from './video.js';
 
 const ALL_URLS = { origins: ['<all_urls>'] };
 const MENU_ID = 'rustdm-download-link';
@@ -185,6 +186,7 @@ function watchPosts() {
 }
 
 watchPosts();
+installVideo({ chrome, setInterval, clearInterval, now: Date.now, collectCookies, flashOk, showFailure });
 void clearStaleOkBadge(); // the worker may have stopped before the 4 s timer fired
 chrome.permissions.onAdded.addListener(watchPosts);
 

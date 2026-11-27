@@ -66,8 +66,10 @@ globalThis.chrome = {
     setBadgeBackgroundColor: async () => {},
     getBadgeText: async () => state.badge,
   },
-  webRequest: { onBeforeRequest: event('post') },
+  webRequest: { onBeforeRequest: event('post'), onHeadersReceived: event('headers') },
+  tabs: { onUpdated: event('tabUpdated'), onRemoved: event('tabRemoved') },
 };
+chrome.storage.onChanged = event('storageChanged');
 
 await import('../background.js');
 
