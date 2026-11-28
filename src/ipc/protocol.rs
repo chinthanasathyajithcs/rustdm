@@ -42,6 +42,8 @@ pub const CODE_DAEMON_SHUTTING_DOWN: i32 = -32061;
 
 // --- Tools Manager Error Codes (-32080..-32099) ---
 pub const CODE_TOOL_FAILED: i32 = -32080;
+/// `video.look_up` found nothing to offer, or was stopped (message `cancelled`).
+pub const CODE_LOOKUP_FAILED: i32 = -32081;
 
 /// JSON-RPC Message identifier (either integer or string).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -351,6 +353,10 @@ impl RpcError {
         Self::new(CODE_TOOL_FAILED, message, None)
     }
 
+    pub fn lookup_failed(message: impl Into<String>) -> Self {
+        Self::new(CODE_LOOKUP_FAILED, message, None)
+    }
+
     pub fn daemon_shutting_down() -> Self {
         Self::new(
             CODE_DAEMON_SHUTTING_DOWN,
@@ -442,6 +448,32 @@ pub struct AddDownloadParams {
     /// the browser can see and change through the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<AddedBy>,
+    /// For a video: start with this choice (an `id` from `video.look_up`)
+    /// instead of asking. Not together with `quality`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_id: Option<String>,
+    /// The link is a web page: look it up as a video without checking the link first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<bool>,
+}
+
+/// `video.look_up`: look a page or a playlist up for the browser, adding nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LookUpParams {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::request_context::RequestContext>,
+}
+
+/// What `video.look_up` found: the qualities, highest first, and the one to offer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookUpResult {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+    pub choices: Vec<VideoChoice>,
+    /// Index into `choices` of the row a click downloads.
+    pub default: usize,
 }
 
 /// Who added a download, when that matters for who may reach it later.
@@ -888,6 +920,8 @@ mod tests {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),

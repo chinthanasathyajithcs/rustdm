@@ -39,6 +39,7 @@ globalThis.chrome = {
   runtime: {
     onInstalled: event('installed'),
     onConnect: event('connect'),
+    onMessage: event('message'),
     openOptionsPage: () => log.push(['options']),
     sendNativeMessage: async (host, message) => {
       log.push(['native', message.type, message.url, JSON.stringify(message.context)]);

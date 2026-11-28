@@ -54,6 +54,8 @@ async fn downloads_with_video_and_sound(link: &str) {
             context: None,
             quality: Some("360p".to_string()),
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .unwrap();
 

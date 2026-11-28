@@ -82,9 +82,20 @@ export function buildMenuMessage({ id, url, pageUrl, cookies, userAgent }) {
   };
 }
 
-/** The `add` message for a video from the card or the page menu; the session sets `id`. */
-export function buildVideoMessage({ url, referer, title, cookies, userAgent }) {
-  return { type: 'add', url, context: buildContext({ cookies, referer, userAgent, title }) };
+/**
+ * The `add` message for a video from the card or the page menu; the session sets `id`.
+ * `choiceId` starts that quality at once; `page` says the link is a page (spec 1f).
+ */
+export function buildVideoMessage({ url, referer, title, cookies, userAgent, choiceId, page }) {
+  const message = { type: 'add', url, context: buildContext({ cookies, referer, userAgent, title }) };
+  if (choiceId) message.choice_id = choiceId;
+  if (page) message.page = true;
+  return message;
+}
+
+/** The `look_up` message: the video before the click, nothing added (spec 1f). */
+export function buildLookUpMessage({ url, referer, title, cookies, userAgent }) {
+  return { type: 'look_up', url, context: buildContext({ cookies, referer, userAgent, title }) };
 }
 
 export function buildStatusMessage(downloadId) {

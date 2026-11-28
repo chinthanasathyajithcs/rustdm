@@ -281,6 +281,8 @@ impl AddDialog {
                 context: None,
                 quality: None,
                 added_by: None,
+                choice_id: None,
+                page: None,
             })
             .collect())
     }
@@ -468,6 +470,8 @@ mod tests {
                 context: None,
                 quality: None,
                 added_by: None,
+                choice_id: None,
+                page: None,
             }]
         );
         assert!(dialog.is_pending());

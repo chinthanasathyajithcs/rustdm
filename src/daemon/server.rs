@@ -21,6 +21,17 @@ fn respond<T: Serialize>(id: RpcId, result: Result<T, RpcError>) -> RpcResponse 
     }
 }
 
+/// The browser's lookup: it waits on yt-dlp, so it runs here, not on the blocking pool.
+const LOOK_UP_METHOD: &str = "video.look_up";
+
+async fn answer_look_up(core: &DaemonCore, req: RpcRequest) -> RpcResponse {
+    let id = req.id.clone();
+    match parse_params::<LookUpParams>(req.params) {
+        Ok(params) => respond(id, core.look_up_for_hover(params).await),
+        Err(e) => RpcResponse::error(id, e),
+    }
+}
+
 /// Answer `req` on the blocking pool. Requests can touch the disk (a folder's
 /// write test, the queue file), and a slow network share must not hold up
 /// an async worker. A handler that panics is answered with an internal error.
@@ -202,7 +213,11 @@ impl DaemonServer {
                                             if req.method == "subscribe.telemetry" {
                                                 is_subscribed = true;
                                             }
-                                            let resp = handle_off_thread(&client_core, req).await;
+                                            let resp = if req.method == LOOK_UP_METHOD {
+                                                answer_look_up(&client_core, req).await
+                                            } else {
+                                                handle_off_thread(&client_core, req).await
+                                            };
                                             if let Err(e) = sender.send(&resp).await {
                                                 tracing::debug!("Failed to send RPC response: {}", e);
                                                 break;

@@ -117,6 +117,8 @@ impl Setup {
                 context: None,
                 quality: quality.map(String::from),
                 added_by: None,
+                choice_id: None,
+                page: None,
             })
             .unwrap()
     }
@@ -143,6 +145,8 @@ impl Setup {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         }
     }
 

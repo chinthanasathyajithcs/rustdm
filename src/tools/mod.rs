@@ -333,6 +333,12 @@ impl ToolStore {
         blocking(tool, move || files.update(tool, change)).await
     }
 
+    /// The copy of `tool` installed now, if any. Never fetches or updates.
+    pub async fn installed(&self, tool: Tool) -> Option<Installed> {
+        let entry = self.load_file(tool).ok()?.entry(tool);
+        self.current(tool, &entry).await
+    }
+
     fn load_file(&self, tool: Tool) -> Result<ToolsFile, ToolError> {
         self.files.load(tool)
     }

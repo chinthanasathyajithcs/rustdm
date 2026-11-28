@@ -107,6 +107,9 @@ pub struct TaskRecord {
     /// user's resume) goes straight to the lookup without the link check.
     /// Not saved.
     pub lookup_next: bool,
+    /// The choice the browser asked for at add time (spec 1f): taken when the
+    /// qualities are known, the default when it is not among them. Not saved.
+    pub wanted_choice: Option<String>,
     /// How far ffmpeg is in joining a video's streams, while it runs (255 until
     /// it says). Not saved.
     pub join_percent: Option<Arc<AtomicU8>>,
@@ -170,6 +173,7 @@ impl TaskRecord {
             step: None,
             lookup_progress: None,
             lookup_next: false,
+            wanted_choice: None,
             join_percent: None,
             pieces_counter: None,
             progress_base: 0,

@@ -287,3 +287,51 @@ test('a YouTube box naming two videos names none', () => {
   const card = el({ parent: column, links: [] });
   assert.equal(h.videoLink(el({ parent: card }), 'https://www.youtube.com/'), null);
 });
+
+// The hover lookup (spec 1f).
+test('lookup is due after 600 ms on the video', () => {
+  assert.equal(h.LOOKUP_REST_MS, 600);
+  assert.equal(h.lookupDue({ restingSince: 1000, onBar: false, now: 1599, asked: false }), false);
+  assert.equal(h.lookupDue({ restingSince: 1000, onBar: false, now: 1600, asked: false }), true);
+});
+
+test('lookup is due after 200 ms on the bar', () => {
+  assert.equal(h.BAR_LOOKUP_REST_MS, 200);
+  assert.equal(h.lookupDue({ restingSince: 1000, onBar: true, now: 1199, asked: false }), false);
+  assert.equal(h.lookupDue({ restingSince: 1000, onBar: true, now: 1200, asked: false }), true);
+});
+
+test('a quick pass is never due', () => {
+  assert.equal(h.lookupDue({ restingSince: null, onBar: false, now: 5000, asked: false }), false);
+});
+
+test('due only once', () => {
+  assert.equal(h.lookupDue({ restingSince: 1000, onBar: false, now: 9000, asked: true }), false);
+});
+
+const looked = (choice) => ({ title: 'A', choices: [choice, { id: 'audio-m4a', label: 'Audio only' }], default: 0 });
+
+test('bar label with size', () => {
+  const label = h.barLabel(looked({ id: '1080-mp4', label: '1080p', size_bytes: 52 * 1024 * 1024, size_is_estimate: false }));
+  assert.equal(label, 'Download 1080p · 52.0 MiB');
+  const guess = h.barLabel(looked({ id: '1080-mp4', label: '1080p', size_bytes: 52 * 1024 * 1024, size_is_estimate: true }));
+  assert.equal(guess, 'Download 1080p · ~52.0 MiB');
+});
+
+test('bar label without size', () => {
+  assert.equal(h.barLabel(looked({ id: '720-mp4', label: '720p', size_bytes: null })), 'Download 720p');
+  assert.equal(h.barLabel(null), 'Download this video');
+  assert.equal(h.barLabel({ choices: [], default: 0 }), 'Download this video');
+});
+
+test('audio only label', () => {
+  const answer = { choices: [{ id: 'audio-m4a', label: 'Audio only' }], default: 0 };
+  assert.equal(h.barLabel(answer), 'Download Audio only');
+});
+
+test('an answer from another page address is not used', () => {
+  const entry = { page: 'https://www.youtube.com/watch?v=A', found: { choices: [{ id: '1080-mp4', label: '1080p' }], default: 0 } };
+  assert.equal(h.answerOn(entry, 'https://www.youtube.com/watch?v=A'), entry);
+  assert.equal(h.answerOn(entry, 'https://www.youtube.com/watch?v=B'), null);
+  assert.equal(h.answerOn(undefined, 'https://www.youtube.com/watch?v=A'), null);
+});

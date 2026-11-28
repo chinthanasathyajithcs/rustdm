@@ -76,6 +76,9 @@ impl DaemonCore {
         record: &Arc<Mutex<TaskRecord>>,
         cancel: &watch::Receiver<bool>,
     ) -> LookupOutcome {
+        if let Some(saved) = self.saved_answer_for(record) {
+            return saved;
+        }
         let (id, link, referer, user_agent) = {
             let rec = record.lock().unwrap();
             let link = rec.url.clone();
@@ -92,29 +95,39 @@ impl DaemonCore {
             user_agent,
             title: None,
         };
-        let ctx = Some(&ctx).filter(|ctx| !ctx.is_empty());
-        let read = async {
-            let client = stream_client(ctx, &[], Timeouts::default())?;
-            let url = Url::parse(&link).map_err(|_| unreadable())?;
-            let (text, at) = fetch_playlist(&client, &url, cancel).await?;
-            page_of_playlist(&text, &at)
-        };
-        match read.await {
-            Ok(page) => match build_choices(&page) {
-                Ok(choices) => LookupOutcome::Choices(Box::new(page), choices),
-                Err(ChoicesError::Drm) => message(DRM),
-                Err(ChoicesError::NoFormats) => message(crate::pieces::UNREADABLE_PLAYLIST),
-            },
-            Err(Error::Cancelled) => LookupOutcome::Cancelled,
-            Err(Error::Video { message, transient }) => LookupOutcome::Message {
-                text: message,
-                transient,
-            },
-            Err(e) => LookupOutcome::Message {
-                transient: e.is_transient(),
-                text: e.to_string(),
-            },
-        }
+        read_playlist_page(&link, Some(&ctx), cancel).await
+    }
+}
+
+/// The playlist at `link` as a page and its quality list, read with what the
+/// browser (or the download) sent. Needs no download row.
+pub(super) async fn read_playlist_page(
+    link: &str,
+    ctx: Option<&RequestContext>,
+    cancel: &watch::Receiver<bool>,
+) -> LookupOutcome {
+    let ctx = ctx.filter(|ctx| !ctx.is_empty());
+    let read = async {
+        let client = stream_client(ctx, &[], Timeouts::default())?;
+        let url = Url::parse(link).map_err(|_| unreadable())?;
+        let (text, at) = fetch_playlist(&client, &url, cancel).await?;
+        page_of_playlist(&text, &at)
+    };
+    match read.await {
+        Ok(page) => match build_choices(&page) {
+            Ok(choices) => LookupOutcome::Choices(Box::new(page), choices),
+            Err(ChoicesError::Drm) => message(DRM),
+            Err(ChoicesError::NoFormats) => message(crate::pieces::UNREADABLE_PLAYLIST),
+        },
+        Err(Error::Cancelled) => LookupOutcome::Cancelled,
+        Err(Error::Video { message, transient }) => LookupOutcome::Message {
+            text: message,
+            transient,
+        },
+        Err(e) => LookupOutcome::Message {
+            transient: e.is_transient(),
+            text: e.to_string(),
+        },
     }
 }
 
@@ -147,9 +160,12 @@ pub(super) fn is_playlist_download(rec: &TaskRecord) -> bool {
         .video
         .as_ref()
         .is_some_and(|plan| plan.origin == PlanOrigin::Playlist);
-    let m3u8_link =
-        Url::parse(&rec.url).is_ok_and(|url| url.path().to_ascii_lowercase().ends_with(".m3u8"));
-    from_playlist || m3u8_link
+    from_playlist || is_m3u8_link(&rec.url)
+}
+
+/// True for a link whose path ends in `.m3u8`: read as a playlist, not by yt-dlp.
+pub(super) fn is_m3u8_link(link: &str) -> bool {
+    Url::parse(link).is_ok_and(|url| url.path().to_ascii_lowercase().ends_with(".m3u8"))
 }
 
 /// A name for the video from its link: the last part without `.m3u8`, else

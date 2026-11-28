@@ -3,7 +3,7 @@
 // Chrome. `chrome` and the timers are passed in so tests can use fakes.
 
 import { addCaught, classify, documentKey, tabRecordAfterNavigation } from './lib/catch.js';
-import { buildChooseMessage, buildStatusMessage, buildVideoMessage } from './lib/contract.js';
+import { buildChooseMessage, buildLookUpMessage, buildStatusMessage, buildVideoMessage } from './lib/contract.js';
 import { POLL_MS, flowStep, startFlow } from './lib/flow.js';
 import { openSession, request } from './lib/native.js';
 import { frameAddress, isFeedPage, otherSources, pickSource, refinePage, resolveSource } from './lib/source.js';
@@ -26,6 +26,8 @@ const UNUSABLE = { kind: 'unusable', message: 'rustdm could not use this video.'
 const BROKE = 'Something went wrong. Close the card and try again.';
 const FEED = 'Open the video you want, then try again.';
 const PLAYER_WAIT_MS = 3000;
+// A video looked up before the click is kept this long (spec 1f).
+export const SAVED_FOR_MS = 10 * 60_000;
 const isYouTube = (address) => {
   try {
     return /(^|\.)(youtube\.com|youtube-nocookie\.com)$/.test(new URL(address).hostname);
@@ -215,9 +217,14 @@ export function installVideo(deps) {
   });
   void enabled.then(showPageMenu);
   chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.url) void updateTab(tabId, (record) => tabRecordAfterNavigation(record, changeInfo.url));
+    if (!changeInfo.url) return;
+    answers.delete(tabId);
+    void updateTab(tabId, (record) => tabRecordAfterNavigation(record, changeInfo.url));
   });
-  chrome.tabs.onRemoved.addListener((tabId) => void updateTab(tabId, () => undefined));
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    answers.delete(tabId);
+    void updateTab(tabId, () => undefined);
+  });
   chrome.permissions.onAdded.addListener(() => {
     watchStreams();
     void syncHoverScripts();
@@ -226,15 +233,144 @@ export function installVideo(deps) {
   watchStreams();
   void syncHoverScripts();
 
+  // Both switches on. A page opened before a switch went off still has the
+  // bar; its cards and lookups are refused here.
+  function barAllowed() {
+    return Promise.all([
+      enabled,
+      chrome.storage.local.get({ videoBar: true }).catch(() => ({ videoBar: true })),
+    ]).then(([on, stored]) => on && stored.videoBar !== false);
+  }
+
+  // What the page told about the video under the pointer.
+  function seenOf(message) {
+    return {
+      at: message.at && typeof message.at === 'object' ? { x: Number(message.at.x), y: Number(message.at.y) } : null,
+      link: typeof message.link === 'string' ? message.link : null,
+      videos: Number.isFinite(message.videos) ? message.videos : 1,
+    };
+  }
+
+  async function askPlayer(sender, seen) {
+    const at = seen.at;
+    if (!at || !Number.isFinite(at.x) || !Number.isFinite(at.y)) return '';
+    const asked = chrome.scripting
+      .executeScript({
+        target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] },
+        world: 'MAIN',
+        func: playerVideoAt,
+        args: [at.x, at.y],
+      })
+      .then((results) => String(results?.[0]?.result ?? ''))
+      .catch(() => '');
+    const late = new Promise((resolve) => setTimeout(() => resolve(''), PLAYER_WAIT_MS));
+    return Promise.race([asked, late]);
+  }
+
+  // "This page" made precise: the video the YouTube player plays, the
+  // preview's own link, or a feed (refused). A page picked by hand from
+  // "Other sources" is only checked for being a feed.
+  async function videoPage(sender, seen, page, refine) {
+    const address = frameAddress(sender);
+    if (!refine) return isFeedPage(address, seen.videos) ? { type: 'feed' } : page;
+    const playerId = isYouTube(address) ? await askPlayer(sender, seen) : '';
+    return refinePage({ address, playerId, link: seen.link, videos: seen.videos });
+  }
+
+  // The source `choose(caught)` gives, made precise and checked.
+  async function resolveFor(sender, seen, choose, refine) {
+    const caught = await caughtFor(sender.tab?.id);
+    let picked = choose(caught);
+    if (picked?.type === 'page') picked = await videoPage(sender, seen, picked, refine);
+    return { picked, caught, resolved: resolveSource(picked, sender, caught) };
+  }
+
+  // Videos looked up before the click, per tab: {url → {at, found}}.
+  const answers = new Map();
+  let pending = null; // {tabId, url, promise}: the one lookup in flight
+
+  function savedAnswer(tabId, url) {
+    const entry = answers.get(tabId)?.get(url);
+    if (!entry || now() - entry.at >= SAVED_FOR_MS) return null;
+    return entry.found;
+  }
+
+  function keep(tabId, url, found) {
+    const forTab = answers.get(tabId) ?? new Map();
+    forTab.set(url, { at: now(), found });
+    answers.set(tabId, forTab);
+  }
+
+  // The lookup of `resolved` (a page or a stream): saved, in flight, or asked
+  // now. Resolves to `{title, duration_secs?, choices, default}` or null.
+  function lookUp(sender, resolved) {
+    const tabId = sender.tab.id;
+    const saved = savedAnswer(tabId, resolved.url);
+    if (saved) return Promise.resolve(saved);
+    if (pending && pending.tabId === tabId && pending.url === resolved.url) return pending.promise;
+    const session = openSession({
+      connect: (host) => chrome.runtime.connectNative(host),
+      lastError: () => chrome.runtime.lastError,
+    });
+    const promise = collectCookies([resolved.url, sender.tab.url])
+      .then((cookies) =>
+        session.request(buildLookUpMessage({ ...resolved, cookies, userAgent: globalThis.navigator?.userAgent })),
+      )
+      .then((reply) => {
+        session.close();
+        const found = reply.ok ? reply.result : null;
+        if (!Array.isArray(found?.choices) || found.choices.length === 0) return null;
+        keep(tabId, resolved.url, found);
+        return found;
+      })
+      .catch(() => {
+        session.close();
+        return null;
+      });
+    pending = { tabId, url: resolved.url, promise };
+    void promise.then(() => {
+      if (pending?.promise === promise) pending = null;
+    });
+    return promise;
+  }
+
+  // A peek from the bar (spec 1f): look the pointed-at video up ahead of the click.
+  async function peek(message, sender) {
+    if (!sender?.tab || !(await barAllowed())) return null;
+    const seen = seenOf(message);
+    const choose = (caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught });
+    const { resolved } = await resolveFor(sender, seen, choose, true);
+    if (!resolved.ok || resolved.kind === 'file') return null;
+    return lookUp(sender, resolved);
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, respond) => {
+    if (message?.type !== 'peek' || sender?.id !== chrome.runtime.id) return false;
+    peek(message, sender).then(respond, () => respond(null));
+    return true;
+  });
+
+  // How a card starts: the click downloads the default quality of the lookup;
+  // ▾ shows the saved list at once. Anything else starts as before.
+  async function startOptions(sender, resolved, mode) {
+    if (resolved.kind === 'file') return {};
+    if (mode === 'quick') {
+      const found = await lookUp(sender, resolved);
+      const choiceId = found?.choices?.[found.default]?.id;
+      return choiceId ? { choiceId } : {};
+    }
+    if (mode === 'list') {
+      const found = savedAnswer(sender.tab.id, resolved.url);
+      return found ? { answer: found } : {};
+    }
+    return {};
+  }
+
   // The card: one port from the page, one native session per chosen source.
   function onCardConnect(port) {
     if (port.name !== CARD_PORT || port.sender?.id !== chrome.runtime.id) return;
     const sender = port.sender;
-    // A page opened before a switch went off still has the bar; refuse it here.
-    const allowed = Promise.all([
-      enabled,
-      chrome.storage.local.get({ videoBar: true }).catch(() => ({ videoBar: true })),
-    ]).then(([on, stored]) => on && stored.videoBar !== false);
+    const allowed = barAllowed();
     let current = null; // {session, timer, state, resolved, others}
     let seen = {}; // what the page told about the video: {at, link, videos}
     let generation = 0;
@@ -268,7 +404,15 @@ export function installVideo(deps) {
         case 'add':
           void collectCookies([resolved.url, sender.tab.url])
             .then((cookies) =>
-              run.session.request(buildVideoMessage({ ...resolved, cookies, userAgent: globalThis.navigator?.userAgent })),
+              run.session.request(
+                buildVideoMessage({
+                  ...resolved,
+                  cookies,
+                  userAgent: globalThis.navigator?.userAgent,
+                  choiceId: effect.choiceId,
+                  page: resolved.kind === 'page',
+                }),
+              ),
             )
             .then(reply('add_reply'));
           break;
@@ -288,59 +432,31 @@ export function installVideo(deps) {
     }
 
     // `choose(caught)` gives the source; a newer begin or a closed card wins.
-    // "This page" made precise: the video the YouTube player plays, the
-    // preview's own link, or a feed (refused). A page picked by hand from
-    // "Other sources" is only checked for being a feed.
-    async function videoPage(page, refine) {
-      const address = frameAddress(sender);
-      if (!refine) return isFeedPage(address, seen.videos) ? { type: 'feed' } : page;
-      const playerId = isYouTube(address) ? await askPlayer() : '';
-      return refinePage({ address, playerId, link: seen.link, videos: seen.videos });
-    }
-
-    async function askPlayer() {
-      const at = seen.at;
-      if (!at || !Number.isFinite(at.x) || !Number.isFinite(at.y)) return '';
-      const asked = chrome.scripting
-        .executeScript({
-          target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] },
-          world: 'MAIN',
-          func: playerVideoAt,
-          args: [at.x, at.y],
-        })
-        .then((results) => String(results?.[0]?.result ?? ''))
-        .catch(() => '');
-      const late = new Promise((resolve) => setTimeout(() => resolve(''), PLAYER_WAIT_MS));
-      return Promise.race([asked, late]);
-    }
-
-    async function begin(choose, refine = false) {
+    async function begin(choose, refine = false, mode = undefined) {
       const mine = ++generation;
       end(current);
       current = null;
-      const [caught, ok] = await Promise.all([caughtFor(sender.tab?.id), allowed]);
+      const ok = await allowed;
       if (mine !== generation || closed) return;
       if (!ok) {
         closed = true;
         port.disconnect();
         return;
       }
-      let picked = choose(caught);
-      if (picked?.type === 'page') {
-        picked = await videoPage(picked, refine);
-        if (mine !== generation || closed) return;
-      }
-      const resolved = resolveSource(picked, sender, caught);
+      const { picked, caught, resolved } = await resolveFor(sender, seen, choose, refine);
+      if (mine !== generation || closed) return;
       if (!resolved.ok) {
         const message = resolved.reason === 'feed' ? FEED : UNUSABLE.message;
         post({ phase: 'failed', message }, hostOf(frameAddress(sender)), otherSources(picked ?? { type: 'page' }, caught));
         return;
       }
+      const opts = await startOptions(sender, resolved, mode);
+      if (mine !== generation || closed) return;
       const session = openSession({
         connect: (host) => chrome.runtime.connectNative(host),
         lastError: () => chrome.runtime.lastError,
       });
-      const { state, effects } = startFlow(resolved.kind, now());
+      const { state, effects } = startFlow(resolved.kind, now(), opts);
       const run = { session, state, resolved, others: otherSources(picked, caught), timer: null };
       current = run;
       session.onLost(() => dispatch(run, { type: 'native_lost' }));
@@ -363,18 +479,16 @@ export function installVideo(deps) {
 
     port.onMessage.addListener((message) => {
       if (message?.type === 'open') {
-        seen = {
-          at: message.at && typeof message.at === 'object' ? { x: Number(message.at.x), y: Number(message.at.y) } : null,
-          link: typeof message.link === 'string' ? message.link : null,
-          videos: Number.isFinite(message.videos) ? message.videos : 1,
-        };
-        begin((caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught }), true).catch(broke);
+        seen = seenOf(message);
+        const mode = message.mode === 'quick' || message.mode === 'list' ? message.mode : undefined;
+        const choose = (caught) => pickSource({ currentSrc: message.currentSrc, frameId: sender.frameId, caught });
+        begin(choose, true, mode).catch(broke);
       } else if (message?.type === 'use') {
         begin(() => message.source).catch(broke);
       } else if (message?.type === 'visible' && current) {
         dispatch(current, { type: 'hidden', hidden: message.visible === false });
       } else if (message?.type === 'choose' && current && typeof message.choiceId === 'string') {
-        dispatch(current, { type: 'choose', choiceId: message.choiceId });
+        dispatch(current, { type: 'choose', choiceId: message.choiceId, now: now() });
       }
     });
     port.onDisconnect.addListener(() => {

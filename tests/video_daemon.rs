@@ -105,6 +105,8 @@ impl Setup {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         }
     }
 
@@ -473,6 +475,8 @@ async fn no_yt_dlp_and_no_network_says_so_and_retries() {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     };
 
     let added = core.add_download(params).unwrap();
@@ -626,6 +630,8 @@ async fn without_a_tool_store_web_pages_fail_as_before() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .unwrap();
 
@@ -733,6 +739,8 @@ async fn without_a_data_folder_the_lookup_runs_without_cookies() {
             context: Some(cookie_context()),
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .unwrap();
 

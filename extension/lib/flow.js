@@ -21,11 +21,24 @@ const FINAL = new Set(['started', 'failed', 'note']);
 // The phase the card shows: "sending" looks the same as "looking".
 const shownPhase = (phase) => (phase === 'sending' ? 'looking' : phase);
 
+// The list of a lookup as the card shows it.
+function choosingView(video) {
+  const duration = video.duration_secs;
+  return {
+    phase: 'choosing',
+    choices: video.choices,
+    defaultIndex: video.default ?? 0,
+    ...(duration === undefined ? {} : { durationSecs: duration }),
+  };
+}
+
 /**
  * @param kind 'file' | 'stream' | 'page' (see lib/source.js)
  * @param now ms
+ * @param opts `{choiceId}` adds with that quality (the bar's click);
+ *   `{answer}` shows a lookup's list at once, adding only on a pick (▾).
  */
-export function startFlow(kind, now) {
+export function startFlow(kind, now, opts = {}) {
   const state = {
     kind,
     phase: 'sending',
@@ -36,7 +49,12 @@ export function startFlow(kind, now) {
     choosing: false,
     hidden: false,
   };
-  return { state, effects: [{ type: 'add' }, { type: 'view', view: { phase: 'looking' } }] };
+  if (opts.answer) {
+    const listed = { ...state, phase: 'choosing', choosingSince: now };
+    return { state: listed, effects: [{ type: 'view', view: choosingView(opts.answer) }] };
+  }
+  const add = opts.choiceId ? { type: 'add', choiceId: opts.choiceId } : { type: 'add' };
+  return { state, effects: [add, { type: 'view', view: { phase: 'looking' } }] };
 }
 
 // A move to `phase`, with its view only when the card shows something new.
@@ -81,13 +99,7 @@ function onStatusReply(state, { reply, now }) {
   if (isStarted(result, state.kind)) return started(ready, result);
   const rows = result.video?.choices ?? [];
   if (result.status === 'choosing' && rows.length > 0 && state.phase !== 'choosing') {
-    const duration = result.video.duration_secs;
-    return moveTo({ ...ready, choosingSince: now }, 'choosing', {
-      phase: 'choosing',
-      choices: rows,
-      defaultIndex: result.video.default ?? 0,
-      ...(duration === undefined ? {} : { durationSecs: duration }),
-    });
+    return moveTo({ ...ready, choosingSince: now }, 'choosing', choosingView(result.video));
   }
   return { state: ready, effects: [] };
 }
@@ -96,12 +108,20 @@ function onTick(state, { now }) {
   if (state.hidden) return { state, effects: [] };
   if (state.phase === 'looking' && now - state.lookingSince >= LOOKUP_LIMIT_MS) return note(state, STILL_LOOKING);
   if (state.phase === 'choosing' && now - state.choosingSince >= CHOOSING_LIMIT_MS) return note(state, STILL_CHOOSING);
-  if ((state.phase === 'looking' || state.phase === 'choosing') && !state.waiting) return poll(state);
+  const asking = state.phase === 'looking' || state.phase === 'choosing';
+  if (asking && state.downloadId && !state.waiting) return poll(state);
   return { state, effects: [] };
 }
 
 function onChoose(state, { choiceId }) {
   if (state.phase !== 'choosing' || state.choosing) return { state, effects: [] };
+  // A list from a lookup: nothing is in rustdm yet, so the pick adds it.
+  if (!state.downloadId) {
+    return {
+      state: { ...state, phase: 'sending' },
+      effects: [{ type: 'add', choiceId }, { type: 'view', view: { phase: 'looking' } }],
+    };
+  }
   return {
     state: { ...state, choosing: true },
     effects: [{ type: 'choose', downloadId: state.downloadId, choiceId }],

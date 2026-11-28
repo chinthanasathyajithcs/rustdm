@@ -1,5 +1,6 @@
 use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
+use crate::daemon::saved_answers::SavedAnswers;
 use crate::daemon::secrets::SecretStore;
 use crate::daemon::task::TaskRecord;
 use crate::daemon::video_run;
@@ -107,6 +108,10 @@ struct NewDownload {
     /// The quality asked for, with the text it was asked in.
     quality: Option<(Quality, String)>,
     added_by: Option<AddedBy>,
+    /// A choice id from a browser lookup (spec 1f).
+    wanted_choice: Option<String>,
+    /// The link is a page: straight to the video lookup, no link check.
+    page: bool,
 }
 
 /// An add of `url` is turned away while the daemon shuts down, or while that
@@ -161,6 +166,10 @@ pub struct DaemonCore {
     /// Final names that running video downloads have claimed but not yet
     /// written, so two of them never take the same one.
     pub(super) claimed_names: Arc<Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+    /// Videos looked up for the browser before a click (spec 1f).
+    pub(super) saved_answers: Arc<SavedAnswers>,
+    /// Stops the browser's lookup still running when a newer one comes.
+    pub(super) hover_cancel: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl Default for DaemonCore {
@@ -262,6 +271,8 @@ impl DaemonCore {
             secrets,
             extractor_gate: Arc::default(),
             claimed_names: Arc::default(),
+            saved_answers: Arc::default(),
+            hover_cancel: Arc::default(),
         };
         if restored_changes {
             core.persist();
@@ -347,6 +358,11 @@ impl DaemonCore {
                     .map_err(RpcError::invalid_params)
             })
             .transpose()?;
+        if quality.is_some() && params.choice_id.is_some() {
+            return Err(RpcError::invalid_params(
+                "give choice_id or quality, not both",
+            ));
+        }
         if let Some(name) = &params.filename {
             check_file_name(name)?;
         }
@@ -392,6 +408,8 @@ impl DaemonCore {
                             max_bytes_per_sec,
                             quality,
                             added_by: params.added_by,
+                            wanted_choice: params.choice_id,
+                            page: params.page == Some(true),
                         },
                         context.as_ref(),
                     )
@@ -449,6 +467,8 @@ impl DaemonCore {
         );
         task.speed_limiter.set_bytes_per_sec(new.max_bytes_per_sec);
         task.added_by = new.added_by;
+        task.wanted_choice = new.wanted_choice;
+        task.lookup_next = new.page;
         (task.quality, task.quality_text) = match new.quality {
             Some((quality, text)) => (Some(quality), Some(text)),
             None => (None, None),

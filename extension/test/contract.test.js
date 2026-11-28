@@ -4,6 +4,7 @@ import {
   buildChooseMessage,
   buildContext,
   buildDownloadMessage,
+  buildLookUpMessage,
   buildMenuMessage,
   buildStatusMessage,
   buildVideoMessage,
@@ -165,4 +166,22 @@ test('status and choose messages have the host field names', () => {
     download_id: 'dl_1',
     choice_id: '720-mp4',
   });
+});
+
+test('look_up message carries the context', () => {
+  const message = buildLookUpMessage({ url: 'https://e.com/v', referer: 'https://e.com/', title: 'T', userAgent: 'UA' });
+  assert.deepEqual(message, {
+    type: 'look_up',
+    url: 'https://e.com/v',
+    context: { referer: 'https://e.com/', user_agent: 'UA', title: 'T' },
+  });
+});
+
+test('video message carries choice_id and page', () => {
+  const message = buildVideoMessage({ url: 'https://e.com/v.html', choiceId: '1080-mp4', page: true });
+  assert.equal(message.choice_id, '1080-mp4');
+  assert.equal(message.page, true);
+  const plain = buildVideoMessage({ url: 'https://e.com/v' });
+  assert.equal('choice_id' in plain, false);
+  assert.equal('page' in plain, false);
 });

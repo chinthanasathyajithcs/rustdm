@@ -16,6 +16,8 @@ fn test_integration_full_rpc_cycle() {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     };
     let client_req = RpcRequest::new(
         RpcId::Number(1001),
@@ -117,6 +119,8 @@ fn an_add_without_context_sends_no_context_field_and_parses_without_one() {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     };
     let json = serde_json::to_value(&params).unwrap();
     assert!(json.get("context").is_none());

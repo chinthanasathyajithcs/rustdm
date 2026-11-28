@@ -567,3 +567,113 @@ test('a stream fetched again does not rewrite the tab list', async () => {
   await video.caughtFor(7);
   assert.equal(writes, 1);
 });
+
+// The hover lookup (spec 1f): a peek before the click, then a quick or list open.
+const looked = {
+  title: 'Angel One',
+  duration_secs: 60,
+  choices: [
+    { id: '1080-mp4', label: '1080p', container: 'MP4', height: 1080, size_bytes: 52 * MiB, size_is_estimate: false },
+    { id: '720-mp4', label: '720p', container: 'MP4', height: 720, size_bytes: 20 * MiB, size_is_estimate: false },
+  ],
+  default: 0,
+};
+
+async function peek(chrome, { sender = cardSender(), message = { type: 'peek', currentSrc: '' } } = {}) {
+  const replies = [];
+  const kept = chrome.runtime.onMessage.fire(message, sender, (reply) => replies.push(reply));
+  assert.deepEqual(kept, [true], 'the answer comes later');
+  await settle();
+  return replies;
+}
+
+const lookUps = (chrome) => chrome.state.nativePorts.filter((p) => p.posted[0]?.type === 'look_up');
+
+test('a peek looks the video up once and answers the label', async () => {
+  const { chrome } = install();
+  const replies = await peek(chrome);
+  const [native] = lookUps(chrome);
+  assert.equal(native.posted[0].url, 'https://e.com/watch?v=1');
+  assert.equal(native.posted[0].context.title, 'Angel One');
+  await answer(native, 0, { ok: true, result: looked });
+  assert.deepEqual(replies, [looked]);
+  assert.equal(native.disconnected, true);
+});
+
+test('a second peek of the same video sends nothing', async () => {
+  const { chrome } = install();
+  await peek(chrome);
+  await answer(lookUps(chrome)[0], 0, { ok: true, result: looked });
+  const again = await peek(chrome);
+  assert.deepEqual(again, [looked]);
+  assert.equal(lookUps(chrome).length, 1);
+});
+
+test('a peek of a plain file sends nothing', async () => {
+  const { chrome } = install();
+  const replies = await peek(chrome, { message: { type: 'peek', currentSrc: 'https://cdn.e.com/own.mp4' } });
+  assert.deepEqual(replies, [null]);
+  assert.equal(chrome.state.nativePorts.length, 0);
+});
+
+test('a peek is refused while the bar is switched off', async () => {
+  const { chrome } = install({ local: { videoBar: false } });
+  const replies = await peek(chrome);
+  assert.deepEqual(replies, [null]);
+  assert.equal(chrome.state.nativePorts.length, 0);
+});
+
+test('a quick open after the answer adds with the default choice and no lookup', async () => {
+  const { chrome } = install();
+  await peek(chrome);
+  await answer(lookUps(chrome)[0], 0, { ok: true, result: looked });
+  await openCard(chrome, { message: { type: 'open', currentSrc: '', mode: 'quick' } });
+  const add = lastNative(chrome).posted[0];
+  assert.equal(add.type, 'add');
+  assert.equal(add.choice_id, '1080-mp4');
+  assert.equal(add.page, true);
+  assert.equal(lookUps(chrome).length, 1);
+});
+
+test('a quick open before the answer waits for it', async () => {
+  const { chrome } = install();
+  await peek(chrome);
+  await openCard(chrome, { message: { type: 'open', currentSrc: '', mode: 'quick' } });
+  assert.equal(chrome.state.nativePorts.length, 1, 'only the lookup so far');
+  await answer(lookUps(chrome)[0], 0, { ok: true, result: looked });
+  const add = lastNative(chrome).posted[0];
+  assert.equal(add.type, 'add');
+  assert.equal(add.choice_id, '1080-mp4');
+});
+
+test('a quick open whose lookup failed starts as before', async () => {
+  const { chrome } = install();
+  await openCard(chrome, { message: { type: 'open', currentSrc: '', mode: 'quick' } });
+  const [native] = lookUps(chrome);
+  await answer(native, 0, { ok: false, error: { kind: 'lookup_failed', message: 'cancelled' } });
+  const add = lastNative(chrome).posted[0];
+  assert.equal(add.type, 'add');
+  assert.equal('choice_id' in add, false);
+});
+
+test('a list open with an answer shows the list at once', async () => {
+  const { chrome } = install();
+  await peek(chrome);
+  await answer(lookUps(chrome)[0], 0, { ok: true, result: looked });
+  const card = await openCard(chrome, { message: { type: 'open', currentSrc: '', mode: 'list' } });
+  assert.equal(views(card)[0].phase, 'choosing');
+  assert.equal(views(card)[0].choices.length, 2);
+  assert.deepEqual(lastNative(chrome).posted, [], 'nothing added yet');
+  card.deliver({ type: 'choose', choiceId: '720-mp4' });
+  await settle();
+  assert.equal(lastNative(chrome).posted[0].choice_id, '720-mp4');
+});
+
+test('a new page in the tab drops its answers', async () => {
+  const { chrome } = install();
+  await peek(chrome);
+  await answer(lookUps(chrome)[0], 0, { ok: true, result: looked });
+  chrome.tabs.onUpdated.fire(7, { url: 'https://e.com/watch?v=2' }, {});
+  await peek(chrome);
+  assert.equal(lookUps(chrome).length, 2);
+});

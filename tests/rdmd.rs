@@ -114,6 +114,8 @@ async fn rdmd_shutdown_pauses_downloads_so_they_can_resume() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .await
         .expect("add");
@@ -163,6 +165,8 @@ async fn rdmd_finishes_an_interrupted_download_after_a_restart() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .await
         .expect("add");

@@ -13,7 +13,6 @@
 
   const CARD_PORT = 'rdm-card';
   const TICK_MS = 250;
-  const BAR_TEXT = 'Download this video';
   const BAR_HINT = 'Download this video with rustdm';
   const LOOKING = 'Looking up the video…';
   const PROTECTED = "This video is protected and can't be saved.";
@@ -29,6 +28,12 @@
   let crabTemplate = null;
   let followFrame = 0;
   let recheck = 0;
+  // Where the pointer rests (spec 1f): {video, since, onBar}, or null.
+  let rest = null;
+  // A video's lookup on a page address: {page, found}; `found` is null while
+  // asked, or when nothing was found.
+  const peeked = new WeakMap();
+  const lookupOf = (video) => H.answerOn(peeked.get(video), location.href);
   // The page script is registered only while both switches are on; a switch
   // turned off later stops it in pages that are already open.
   const switches = { enabled: true, videoBar: true };
@@ -124,15 +129,62 @@
     }
     const { x, y } = pointer;
     if (bar.video && insideOwnUi(x, y)) {
+      noteRest(bar.video, true);
       dispatch({ type: 'hover', video: bar.video, now: now() });
+      maybePeek();
       return;
     }
     const found = H.pickHovered(candidatesAt(x, y), x, y);
+    if (found) noteRest(found.video, false);
+    else rest = null;
     if (found) dispatch({ type: 'hover', video: found.video, now: now() });
     else if (bar.video || bar.pending) dispatch({ type: 'away', now: now() });
+    maybePeek();
     // A pointer resting on a video sends no more moves: look again once the wait is over.
     clearTimeout(recheck);
     if (bar.pending) recheck = setTimeout(onPointer, H.HOVER_DELAY_MS + 10);
+  }
+
+  // --- The lookup before the click (spec 1f) ------------------------------
+
+  function noteRest(video, onBar) {
+    if (rest?.video !== video || rest.onBar !== onBar) rest = { video, since: now(), onBar };
+  }
+
+  // What the background needs to find the video's source, as for a card.
+  function sourceFields(video) {
+    const box = video.getBoundingClientRect();
+    return {
+      currentSrc: String(video.currentSrc || ''),
+      at: { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) },
+      link: H.videoLink(video, location.href),
+      videos: document.querySelectorAll('video').length,
+    };
+  }
+
+  function maybePeek() {
+    const video = bar.video;
+    if (!video || rest?.video !== video || video.mediaKeys) return;
+    const due = H.lookupDue({ restingSince: rest.since, onBar: rest.onBar, now: now(), asked: Boolean(lookupOf(video)) });
+    if (!due) return;
+    const page = location.href;
+    peeked.set(video, { page, found: null });
+    let asked;
+    try {
+      asked = chrome.runtime.sendMessage({ type: 'peek', ...sourceFields(video) });
+    } catch {
+      stopForGood(); // the extension was updated or removed: this copy is left over
+      return;
+    }
+    Promise.resolve(asked)
+      .then((found) => {
+        if (!found || !Array.isArray(found.choices) || peeked.get(video)?.page !== page) return;
+        peeked.set(video, { page, found });
+        if (bar.video === video) draw();
+      })
+      .catch(() => {
+        // No answer: the bar keeps saying "Download this video".
+      });
   }
 
   // --- The bar ------------------------------------------------------------
@@ -182,8 +234,13 @@
     go.type = 'button';
     go.title = BAR_HINT;
     go.setAttribute('aria-label', BAR_HINT);
-    go.append(crab(), el('span', '', BAR_TEXT));
-    onTrusted(go, 'click', () => toggleCard(bar.video));
+    go.append(crab(), el('span', 'label', H.BAR_TEXT));
+    onTrusted(go, 'click', () => toggleCard(bar.video, 'quick'));
+    const more = el('button', 'more', '▾');
+    more.type = 'button';
+    more.title = 'Choose a quality';
+    more.setAttribute('aria-label', 'Choose a quality');
+    onTrusted(more, 'click', () => toggleCard(bar.video, 'list'));
     const close = el('button', 'x', '✕');
     close.type = 'button';
     close.setAttribute('aria-label', 'Hide for this video');
@@ -192,7 +249,7 @@
       if (card?.video === video) closeCard();
       dispatch({ type: 'dismiss', video });
     });
-    root.append(go, close);
+    root.append(go, more, close);
     return root;
   }
 
@@ -205,6 +262,9 @@
     if (bar.video) {
       ui.barEl ??= layer.appendChild(buildBar());
       ui.barEl.classList.toggle('open', Boolean(card));
+      const label = ui.barEl.querySelector('.label');
+      const text = H.barLabel(lookupOf(bar.video)?.found);
+      if (label && label.textContent !== text) label.textContent = text;
       placeBar();
     } else if (ui.barEl) {
       ui.barEl.remove();
@@ -247,6 +307,7 @@
       const { width, height } = viewport();
       const away = !video.isConnected || rect.bottom <= 0 || rect.top >= height || rect.right <= 0 || rect.left >= width;
       dispatch(away ? { type: 'gone', video } : { type: 'tick', now: now() });
+      if (!away) maybePeek();
     } else {
       draw();
     }
@@ -263,7 +324,8 @@
 
   // --- The card -----------------------------------------------------------
 
-  function toggleCard(video) {
+  // `mode`: 'quick' downloads the default quality, 'list' shows the list.
+  function toggleCard(video, mode) {
     if (!video) return;
     if (card?.video === video) {
       closeCard();
@@ -295,14 +357,7 @@
     port.onDisconnect.addListener(() => {
       if (card?.port === port) closeCard();
     });
-    const box = video.getBoundingClientRect();
-    port.postMessage({
-      type: 'open',
-      currentSrc: String(video.currentSrc || ''),
-      at: { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) },
-      link: H.videoLink(video, location.href),
-      videos: document.querySelectorAll('video').length,
-    });
+    port.postMessage({ type: 'open', mode, ...sourceFields(video) });
     dispatch({ type: 'card', open: true, now: now() });
     renderCard();
   }

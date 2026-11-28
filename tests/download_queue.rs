@@ -41,6 +41,8 @@ fn add_params(mock: &TestServer, name: &str, dir: &Path) -> AddDownloadParams {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     }
 }
 
