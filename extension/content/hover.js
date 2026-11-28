@@ -30,8 +30,10 @@
   let recheck = 0;
   // Where the pointer rests (spec 1f): {video, since, onBar}, or null.
   let rest = null;
-  // A video's lookup: its answer, or null while asked (or when it found nothing).
+  // A video's lookup on a page address: {page, found}; `found` is null while
+  // asked, or when nothing was found.
   const peeked = new WeakMap();
+  const lookupOf = (video) => H.answerOn(peeked.get(video), location.href);
   // The page script is registered only while both switches are on; a switch
   // turned off later stops it in pages that are already open.
   const switches = { enabled: true, videoBar: true };
@@ -163,9 +165,10 @@
   function maybePeek() {
     const video = bar.video;
     if (!video || rest?.video !== video || video.mediaKeys) return;
-    const due = H.lookupDue({ restingSince: rest.since, onBar: rest.onBar, now: now(), asked: peeked.has(video) });
+    const due = H.lookupDue({ restingSince: rest.since, onBar: rest.onBar, now: now(), asked: Boolean(lookupOf(video)) });
     if (!due) return;
-    peeked.set(video, null);
+    const page = location.href;
+    peeked.set(video, { page, found: null });
     let asked;
     try {
       asked = chrome.runtime.sendMessage({ type: 'peek', ...sourceFields(video) });
@@ -175,8 +178,8 @@
     }
     Promise.resolve(asked)
       .then((found) => {
-        if (!found || !Array.isArray(found.choices)) return;
-        peeked.set(video, found);
+        if (!found || !Array.isArray(found.choices) || peeked.get(video)?.page !== page) return;
+        peeked.set(video, { page, found });
         if (bar.video === video) draw();
       })
       .catch(() => {
@@ -260,7 +263,7 @@
       ui.barEl ??= layer.appendChild(buildBar());
       ui.barEl.classList.toggle('open', Boolean(card));
       const label = ui.barEl.querySelector('.label');
-      const text = H.barLabel(peeked.get(bar.video));
+      const text = H.barLabel(lookupOf(bar.video)?.found);
       if (label && label.textContent !== text) label.textContent = text;
       placeBar();
     } else if (ui.barEl) {

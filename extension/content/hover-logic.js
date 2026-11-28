@@ -182,6 +182,14 @@
     return now - restingSince >= (onBar ? BAR_LOOKUP_REST_MS : LOOKUP_REST_MS);
   }
 
+  /**
+   * A video's lookup entry `{page, found}` while the page address is still
+   * `page`, else null: YouTube keeps one <video> as it moves between videos.
+   */
+  function answerOn(entry, page) {
+    return entry && entry.page === page ? entry : null;
+  }
+
   /** The bar's text: the quality a click downloads, once it is known. */
   function barLabel(answer) {
     const choice = answer?.choices?.[answer.default];
@@ -220,6 +228,7 @@
     BAR_LOOKUP_REST_MS,
     BAR_TEXT,
     lookupDue,
+    answerOn,
     barLabel,
     containsPoint,
     pickHovered,

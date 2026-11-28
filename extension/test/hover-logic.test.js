@@ -328,3 +328,10 @@ test('audio only label', () => {
   const answer = { choices: [{ id: 'audio-m4a', label: 'Audio only' }], default: 0 };
   assert.equal(h.barLabel(answer), 'Download Audio only');
 });
+
+test('an answer from another page address is not used', () => {
+  const entry = { page: 'https://www.youtube.com/watch?v=A', found: { choices: [{ id: '1080-mp4', label: '1080p' }], default: 0 } };
+  assert.equal(h.answerOn(entry, 'https://www.youtube.com/watch?v=A'), entry);
+  assert.equal(h.answerOn(entry, 'https://www.youtube.com/watch?v=B'), null);
+  assert.equal(h.answerOn(undefined, 'https://www.youtube.com/watch?v=A'), null);
+});
