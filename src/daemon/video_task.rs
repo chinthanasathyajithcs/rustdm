@@ -8,7 +8,7 @@ use super::video_playlist::is_playlist_download;
 use crate::engine::{Outcome, Progress};
 use crate::error::Error;
 use crate::ipc::protocol::{ChooseQualityParams, DownloadStatus, DownloadSummary, RpcError};
-use crate::request_context::ContextCookie;
+use crate::request_context::{ContextCookie, RequestContext};
 use crate::tools::display::getting_text;
 use crate::tools::{FetchCtx, Freshness, Installed, Tool, ToolError};
 use crate::video::choices::{build_choices, pick};
@@ -73,8 +73,23 @@ impl ExtractorUpdateGate {
     }
 }
 
+/// What a browser lookup says when yt-dlp or deno is not installed yet.
+pub(super) const TOOLS_NOT_READY: &str = "rustdm's video tools are not installed yet.";
+
+/// Where a lookup gets yt-dlp and deno.
+pub(super) enum ToolSource<'a> {
+    /// Fetched or updated as needed, with the progress shown on the row.
+    Row {
+        record: &'a Arc<Mutex<TaskRecord>>,
+        store: &'a crate::tools::ToolStore,
+        step: &'static str,
+    },
+    /// Only what is installed now.
+    InstalledOnly(&'a crate::tools::ToolStore),
+}
+
 /// What a lookup needs of its download, copied out so no lock is held while yt-dlp runs.
-struct Target {
+pub(super) struct Target {
     page_url: Url,
     has_cookies: bool,
     user_agent: Option<String>,
@@ -204,8 +219,23 @@ impl DaemonCore {
             }
         };
         record.lock().unwrap().step = Some(step.to_string());
+        let source = ToolSource::Row {
+            record,
+            store: &tools,
+            step,
+        };
+        self.look_up_page(&target, source, cancel).await
+    }
 
-        let fetch = |tool, fresh| self.fetch_tool(record, &tools, tool, fresh, step, &cancel);
+    /// Look `target` up with yt-dlp, getting the tools from `source`. Also used
+    /// with no download row, for the browser's lookups (spec 1f).
+    pub(super) async fn look_up_page(
+        &self,
+        target: &Target,
+        source: ToolSource<'_>,
+        cancel: watch::Receiver<bool>,
+    ) -> LookupOutcome {
+        let fetch = |tool, fresh| self.tool_from(&source, tool, fresh, &cancel);
         let mut ytdlp = match fetch(Tool::YtDlp, Freshness::CheckIfStale).await {
             Ok(installed) => installed,
             Err(e) => return tool_outcome(e),
@@ -216,7 +246,7 @@ impl DaemonCore {
         };
 
         let dir = self.data_dir().unwrap_or(Path::new(""));
-        let run = |ytdlp: Installed| run_lookup(ytdlp, &deno, &target, dir, cancel.clone());
+        let run = |ytdlp: Installed| run_lookup(ytdlp, &deno, target, dir, cancel.clone());
         let mut result = run(ytdlp.clone()).await;
         if let Err(LookupFailure::Exited { stderr, .. }) = &result {
             let wants_update = is_extractor_error(stderr)
@@ -245,6 +275,31 @@ impl DaemonCore {
                     failure_message(&failure, &site, target.has_cookies, &ytdlp.version);
                 LookupOutcome::Message { text, transient }
             }
+        }
+    }
+
+    /// `tool` from `source`: fetched with the row's progress, or only what is
+    /// installed now (a browser lookup never starts a download of the tools).
+    async fn tool_from(
+        &self,
+        source: &ToolSource<'_>,
+        tool: Tool,
+        fresh: Freshness,
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<Installed, ToolError> {
+        match source {
+            ToolSource::Row {
+                record,
+                store,
+                step,
+            } => {
+                self.fetch_tool(record, store, tool, fresh, step, cancel)
+                    .await
+            }
+            ToolSource::InstalledOnly(store) => store
+                .installed(tool)
+                .await
+                .ok_or_else(|| ToolError::Unusable(TOOLS_NOT_READY.to_string())),
         }
     }
 
@@ -488,6 +543,25 @@ fn chosen_index(rec: &TaskRecord, choice_id: &str) -> Result<usize, RpcError> {
 }
 
 impl Target {
+    /// A lookup of `url` with what the browser sent, for no download row.
+    pub(super) fn from_request(
+        url: &Url,
+        context: Option<&RequestContext>,
+        data_dir: Option<&Path>,
+    ) -> Target {
+        let cookies = match (context, data_dir) {
+            (Some(ctx), Some(_)) => ctx.cookies.clone(),
+            _ => Vec::new(),
+        };
+        Target {
+            page_url: url.clone(),
+            has_cookies: context.is_some_and(|c| !c.cookies.is_empty()),
+            user_agent: context.and_then(|c| c.user_agent.clone()),
+            referer: context.and_then(|c| c.referer.clone()),
+            cookies,
+        }
+    }
+
     fn of(
         record: &Arc<Mutex<TaskRecord>>,
         client_cookies: Vec<ContextCookie>,

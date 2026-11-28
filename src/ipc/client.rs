@@ -121,6 +121,12 @@ impl DaemonClient {
         .await
     }
 
+    /// Look a video up for the browser without adding a download.
+    pub async fn look_up(&mut self, params: LookUpParams) -> Result<LookUpResult, ClientError> {
+        self.call("video.look_up", Some(serde_json::to_value(params)?))
+            .await
+    }
+
     pub async fn list(&mut self) -> Result<Vec<DownloadSummary>, ClientError> {
         self.call("download.list", None).await
     }

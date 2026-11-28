@@ -2,6 +2,7 @@ pub mod core;
 pub mod defaults;
 pub mod fair_share;
 pub mod folder_check;
+mod hover_lookup;
 pub mod launch;
 pub mod log;
 pub mod queue_order;

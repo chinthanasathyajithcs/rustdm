@@ -1,5 +1,6 @@
 use crate::daemon::folder_check::{self, FolderProblem};
 use crate::daemon::queue_store::{QueueSnapshot, QueueStore, QUEUE_VERSION};
+use crate::daemon::saved_answers::SavedAnswers;
 use crate::daemon::secrets::SecretStore;
 use crate::daemon::task::TaskRecord;
 use crate::daemon::video_run;
@@ -161,6 +162,10 @@ pub struct DaemonCore {
     /// Final names that running video downloads have claimed but not yet
     /// written, so two of them never take the same one.
     pub(super) claimed_names: Arc<Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+    /// Videos looked up for the browser before a click (spec 1f).
+    pub(super) saved_answers: Arc<SavedAnswers>,
+    /// Stops the browser's lookup still running when a newer one comes.
+    pub(super) hover_cancel: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl Default for DaemonCore {
@@ -262,6 +267,8 @@ impl DaemonCore {
             secrets,
             extractor_gate: Arc::default(),
             claimed_names: Arc::default(),
+            saved_answers: Arc::default(),
+            hover_cancel: Arc::default(),
         };
         if restored_changes {
             core.persist();
