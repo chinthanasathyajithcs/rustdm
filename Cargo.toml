@@ -58,3 +58,11 @@ tempfile = "3.17"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+
+# Keep debug builds small: target/ was regrowing to ~18 GB within days.
+[profile.dev]
+debug = "line-tables-only" # backtraces keep file:line; no full debugger variable info
+incremental = false        # drop the multi-GB incremental cache
+
+[profile.dev.package."*"]
+debug = false # no debug info for third-party dependencies
