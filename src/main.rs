@@ -315,6 +315,8 @@ async fn run(cli: Cli) -> CliResult {
                 context,
                 quality,
                 added_by: None,
+                choice_id: None,
+                page: None,
             };
             add(&endpoint, params).await
         }

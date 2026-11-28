@@ -65,6 +65,8 @@ fn add_params(
         context,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     }
 }
 

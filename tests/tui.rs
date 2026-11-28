@@ -55,6 +55,8 @@ fn add_params(mock: &TestServer, name: &str, dir: &Path) -> AddDownloadParams {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     }
 }
 
@@ -580,6 +582,8 @@ async fn plain_mode_says_how_to_choose_when_a_video_waits_for_a_quality() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .await
         .unwrap();

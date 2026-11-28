@@ -76,6 +76,9 @@ impl DaemonCore {
         record: &Arc<Mutex<TaskRecord>>,
         cancel: &watch::Receiver<bool>,
     ) -> LookupOutcome {
+        if let Some(saved) = self.saved_answer_for(record) {
+            return saved;
+        }
         let (id, link, referer, user_agent) = {
             let rec = record.lock().unwrap();
             let link = rec.url.clone();

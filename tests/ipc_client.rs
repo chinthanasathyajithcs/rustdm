@@ -77,6 +77,8 @@ async fn client_skips_telemetry_between_responses() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .await
         .expect("add");
@@ -182,6 +184,8 @@ async fn cancelled_download_stays_cancelled_after_the_engine_stops() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .await
         .expect("add");

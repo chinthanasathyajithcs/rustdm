@@ -577,6 +577,8 @@ async fn the_host_reports_its_own_downloads_trimmed_and_nothing_else() {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .await
         .unwrap();

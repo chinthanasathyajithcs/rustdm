@@ -448,6 +448,13 @@ pub struct AddDownloadParams {
     /// the browser can see and change through the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<AddedBy>,
+    /// For a video: start with this choice (an `id` from `video.look_up`)
+    /// instead of asking. Not together with `quality`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice_id: Option<String>,
+    /// The link is a web page: look it up as a video without checking the link first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<bool>,
 }
 
 /// `video.look_up`: look a page or a playlist up for the browser, adding nothing.
@@ -913,6 +920,8 @@ mod tests {
             context: None,
             quality: None,
             added_by: None,
+            choice_id: None,
+            page: None,
         };
         let req = RpcRequest::new(
             RpcId::String("req_01".to_string()),

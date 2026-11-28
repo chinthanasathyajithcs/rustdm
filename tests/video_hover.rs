@@ -4,7 +4,11 @@
 use rustdm::daemon::queue_store::QueueStore;
 use rustdm::daemon::DaemonCore;
 use rustdm::engine::build_client;
-use rustdm::ipc::protocol::{LookUpParams, CODE_LOOKUP_FAILED};
+use rustdm::ipc::protocol::{
+    AddDownloadParams, AddedBy, DownloadStatus, DownloadSummary, LookUpParams, CODE_INVALID_PARAMS,
+    CODE_LOOKUP_FAILED,
+};
+use rustdm::request_context::{ContextCookie, RequestContext};
 use rustdm::testing::fake_releases::test_sources;
 use rustdm::testing::video::{
     recorded_args, video_page_json, write_script, youtube_like, PageSpec, ToolResponse, ToolScript,
@@ -27,6 +31,7 @@ struct Setup {
     world: VideoWorld,
     pages: TestServer,
     _data: tempfile::TempDir,
+    folder: tempfile::TempDir,
     core: DaemonCore,
 }
 
@@ -53,6 +58,7 @@ async fn setup() -> Setup {
         world,
         pages,
         _data: data,
+        folder: tempfile::tempdir().unwrap(),
         core,
     }
 }
@@ -168,4 +174,150 @@ async fn a_caught_playlist_is_read_without_yt_dlp() {
         .unwrap();
     assert_eq!(found.choices.len(), 2, "{:?}", found.choices);
     assert_eq!(s.lookups(), 0);
+}
+
+fn browser_add(s: &Setup, path: &str, choice_id: Option<&str>) -> AddDownloadParams {
+    AddDownloadParams {
+        url: s.url(path),
+        destination: Some(s.folder.path().to_path_buf()),
+        filename: None,
+        connections: Some(2),
+        max_bytes_per_sec: None,
+        context: None,
+        quality: None,
+        added_by: Some(AddedBy::Browser),
+        choice_id: choice_id.map(str::to_string),
+        page: Some(true),
+    }
+}
+
+async fn wait_for_choice(core: &DaemonCore, id: &str) -> DownloadSummary {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let summary = core.get_status(id).unwrap();
+        let chosen = summary.video.as_ref().and_then(|v| v.chosen.clone());
+        if chosen.is_some() || summary.status == DownloadStatus::Completed {
+            return summary;
+        }
+        assert!(
+            summary.status != DownloadStatus::Choosing && summary.status != DownloadStatus::Failed,
+            "{id} is {:?} ({:?})",
+            summary.status,
+            summary.error_message
+        );
+        assert!(Instant::now() < deadline, "{id} never chose a quality");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn chosen_id(summary: &DownloadSummary) -> Option<String> {
+    Some(summary.video.as_ref()?.chosen.as_ref()?.choice_id.clone())
+}
+
+#[tokio::test]
+async fn an_add_with_a_saved_choice_starts_at_once() {
+    let s = setup().await;
+    s.answer(vec![page_answer(&s.page())]);
+    s.core.look_up_for_hover(s.ask("/watch")).await.unwrap();
+    let added = s
+        .core
+        .add_download(browser_add(&s, "/watch", Some("1080-mp4")))
+        .unwrap();
+    let summary = wait_for_choice(&s.core, &added.id).await;
+    assert_eq!(chosen_id(&summary).as_deref(), Some("1080-mp4"));
+    assert_eq!(s.lookups(), 1);
+}
+
+#[tokio::test]
+async fn an_add_after_the_answer_expired_looks_up_and_keeps_the_choice() {
+    let s = setup().await;
+    s.answer(vec![page_answer(&s.page())]);
+    let added = s
+        .core
+        .add_download(browser_add(&s, "/watch", Some("720-mp4")))
+        .unwrap();
+    let summary = wait_for_choice(&s.core, &added.id).await;
+    assert_eq!(chosen_id(&summary).as_deref(), Some("720-mp4"));
+    assert_eq!(s.lookups(), 1);
+}
+
+#[tokio::test]
+async fn a_missing_choice_falls_back_to_the_default() {
+    let s = setup().await;
+    s.answer(vec![page_answer(&s.page())]);
+    let added = s
+        .core
+        .add_download(browser_add(&s, "/watch", Some("9999-mp4")))
+        .unwrap();
+    let summary = wait_for_choice(&s.core, &added.id).await;
+    assert_eq!(chosen_id(&summary).as_deref(), Some("1080-mp4"));
+}
+
+#[tokio::test]
+async fn a_page_add_skips_the_link_check() {
+    let s = setup().await;
+    s.answer(vec![page_answer(&s.page())]);
+    let added = s
+        .core
+        .add_download(browser_add(&s, "/watch.html", Some("1080-mp4")))
+        .unwrap();
+    let summary = wait_for_choice(&s.core, &added.id).await;
+    assert_eq!(chosen_id(&summary).as_deref(), Some("1080-mp4"));
+    let checked = s
+        .pages
+        .requests()
+        .iter()
+        .filter(|r| r.path == "/watch.html")
+        .count();
+    assert_eq!(checked, 0);
+}
+
+#[tokio::test]
+async fn a_saved_answer_without_cookies_is_not_used_with_cookies() {
+    let s = setup().await;
+    s.answer(vec![page_answer(&s.page()), page_answer(&s.page())]);
+    s.core.look_up_for_hover(s.ask("/watch")).await.unwrap();
+    let params = AddDownloadParams {
+        context: Some(cookie_context()),
+        ..browser_add(&s, "/watch", Some("1080-mp4"))
+    };
+    let added = s.core.add_download(params).unwrap();
+    wait_for_choice(&s.core, &added.id).await;
+    assert_eq!(s.lookups(), 2);
+}
+
+#[tokio::test]
+async fn a_choice_and_a_quality_together_are_refused() {
+    let core = DaemonCore::new();
+    let params = AddDownloadParams {
+        url: "https://video.test/watch".to_string(),
+        destination: Some(std::env::temp_dir()),
+        filename: None,
+        connections: None,
+        max_bytes_per_sec: None,
+        context: None,
+        quality: Some("720p".to_string()),
+        added_by: Some(AddedBy::Browser),
+        choice_id: Some("720-mp4".to_string()),
+        page: Some(true),
+    };
+    let error = core.add_download(params).unwrap_err();
+    assert_eq!(error.code, CODE_INVALID_PARAMS);
+}
+
+fn cookie_context() -> RequestContext {
+    RequestContext {
+        cookies: vec![ContextCookie {
+            name: "sid".to_string(),
+            value: "abc".to_string(),
+            domain: "127.0.0.1".to_string(),
+            path: "/".to_string(),
+            secure: false,
+            host_only: true,
+            expires: None,
+        }],
+        referer: None,
+        user_agent: None,
+        title: None,
+    }
 }

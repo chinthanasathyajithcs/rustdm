@@ -5,10 +5,12 @@
 use super::core::DaemonCore;
 use super::saved_answers::AnswerKey;
 use super::sign_in;
+use super::task::TaskRecord;
 use super::video_playlist::{is_m3u8_link, read_playlist_page};
 use super::video_task::{LookupOutcome, Target, ToolSource, TOOLS_NOT_READY};
-use crate::ipc::protocol::{LookUpParams, LookUpResult, RpcError};
-use crate::video::{PlanOrigin, VideoChoices};
+use crate::ipc::protocol::{AddedBy, LookUpParams, LookUpResult, RpcError};
+use crate::video::VideoChoices;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::watch;
 use url::Url;
@@ -31,31 +33,47 @@ impl DaemonCore {
             return Ok(result_of(&saved.choices));
         }
         let cancel = self.take_hover_turn();
-        let (outcome, origin) = if is_m3u8_link(&params.url) {
-            let read = read_playlist_page(&params.url, context.as_ref(), &cancel).await;
-            (read, PlanOrigin::Playlist)
+        let outcome = if is_m3u8_link(&params.url) {
+            read_playlist_page(&params.url, context.as_ref(), &cancel).await
         } else {
             let Some(tools) = self.tools.clone() else {
                 return Err(RpcError::lookup_failed(TOOLS_NOT_READY));
             };
             let target = Target::from_request(&url, context.as_ref(), self.data_dir());
             let source = ToolSource::InstalledOnly(&tools);
-            (
-                self.look_up_page(&target, source, cancel).await,
-                PlanOrigin::Page,
-            )
+            self.look_up_page(&target, source, cancel).await
         };
         match outcome {
             LookupOutcome::Choices(info, choices) => {
                 let result = result_of(&choices);
-                self.saved_answers
-                    .put(key, *info, choices, origin, Instant::now());
+                self.saved_answers.put(key, *info, choices, Instant::now());
                 Ok(result)
             }
             LookupOutcome::Message { text, .. } => Err(RpcError::lookup_failed(text)),
             LookupOutcome::NoTools(e) => Err(RpcError::lookup_failed(e.to_string())),
             LookupOutcome::Cancelled => Err(RpcError::lookup_failed(LOOKUP_CANCELLED)),
         }
+    }
+
+    /// The browser's saved lookup of this download's link, for a download the
+    /// browser added, taken instead of a second lookup.
+    pub(super) fn saved_answer_for(
+        &self,
+        record: &Arc<Mutex<TaskRecord>>,
+    ) -> Option<LookupOutcome> {
+        let key = {
+            let rec = record.lock().unwrap();
+            if rec.added_by != Some(AddedBy::Browser) {
+                return None;
+            }
+            AnswerKey {
+                url: rec.url.clone(),
+                has_cookies: rec.has_cookies,
+            }
+        };
+        let saved = self.saved_answers.get(&key, Instant::now())?;
+        tracing::info!("{}: using the browser's lookup", record.lock().unwrap().id);
+        Some(LookupOutcome::Choices(Box::new(saved.info), saved.choices))
     }
 
     /// A stop signal for this lookup; the one still running is stopped.

@@ -205,6 +205,9 @@ impl DaemonCore {
         step: &'static str,
         cancel: watch::Receiver<bool>,
     ) -> LookupOutcome {
+        if let Some(saved) = self.saved_answer_for(record) {
+            return saved;
+        }
         let Some(tools) = self.tools.clone() else {
             let missing = ToolError::Unusable("This daemon has no tools folder.".to_string());
             return LookupOutcome::NoTools(missing);
@@ -456,10 +459,15 @@ impl DaemonCore {
                 rec.lookup_next = false;
                 // A playlist link with one quality has nothing to choose (spec 1c, 6.3).
                 let only_one = origin == PlanOrigin::Playlist && choices.choices.len() == 1;
-                let run_now = match rec.quality {
-                    Some(quality) => apply_choice(&mut rec, pick(choices, quality)),
-                    None if only_one => apply_choice(&mut rec, 0),
-                    None => {
+                let wanted = rec.wanted_choice.take().map(|id| {
+                    let found = choices.choices.iter().position(|c| c.id == id);
+                    found.unwrap_or(choices.default)
+                });
+                let run_now = match (wanted, rec.quality) {
+                    (Some(index), _) => apply_choice(&mut rec, index),
+                    (None, Some(quality)) => apply_choice(&mut rec, pick(choices, quality)),
+                    (None, None) if only_one => apply_choice(&mut rec, 0),
+                    (None, None) => {
                         rec.status = DownloadStatus::Choosing;
                         let default = choices.choices.get(choices.default);
                         let container = default.map_or(Container::Mp4, |c| c.container);

@@ -86,6 +86,8 @@ async fn test_daemon_add_download_and_complete() {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(10),
@@ -157,6 +159,8 @@ async fn test_daemon_pause_and_resume() {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(20),
@@ -316,6 +320,8 @@ async fn test_daemon_telemetry_streaming() {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     };
     let add_req = RpcRequest::new(
         RpcId::Number(41),
@@ -506,6 +512,8 @@ fn add_to(
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     })
 }
 
@@ -618,6 +626,8 @@ fn add_without_options(url: String) -> AddDownloadParams {
         context: None,
         quality: None,
         added_by: None,
+        choice_id: None,
+        page: None,
     }
 }
 

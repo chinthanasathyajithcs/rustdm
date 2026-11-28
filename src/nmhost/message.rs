@@ -297,6 +297,8 @@ pub fn add_params(
         context: context.cloned(),
         quality: None,
         added_by: Some(AddedBy::Browser),
+        choice_id: None,
+        page: None,
     }
 }
 

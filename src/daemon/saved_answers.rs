@@ -2,7 +2,7 @@
 //! in memory for ten minutes, so the click's download needs no second lookup.
 
 use crate::video::info::PageInfo;
-use crate::video::{PlanOrigin, VideoChoices};
+use crate::video::VideoChoices;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -25,7 +25,6 @@ pub(super) struct AnswerKey {
 pub(super) struct SavedAnswer {
     pub info: PageInfo,
     pub choices: VideoChoices,
-    pub origin: PlanOrigin,
 }
 
 /// The looked-up videos, oldest first.
@@ -36,25 +35,10 @@ pub(super) struct SavedAnswers {
 
 impl SavedAnswers {
     /// Keep an answer; one for the same key is replaced and counts from `now`.
-    pub(super) fn put(
-        &self,
-        key: AnswerKey,
-        info: PageInfo,
-        choices: VideoChoices,
-        origin: PlanOrigin,
-        now: Instant,
-    ) {
+    pub(super) fn put(&self, key: AnswerKey, info: PageInfo, choices: VideoChoices, now: Instant) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|(k, _, _)| *k != key);
-        entries.push_back((
-            key,
-            SavedAnswer {
-                info,
-                choices,
-                origin,
-            },
-            now,
-        ));
+        entries.push_back((key, SavedAnswer { info, choices }, now));
         while entries.len() > MAX_SAVED {
             entries.pop_front();
         }
@@ -93,7 +77,7 @@ mod tests {
     }
 
     fn put(saved: &SavedAnswers, k: AnswerKey, title: &str, at: Instant) {
-        saved.put(k, PageInfo::default(), choices(title), PlanOrigin::Page, at);
+        saved.put(k, PageInfo::default(), choices(title), at);
     }
 
     #[test]

@@ -30,6 +30,8 @@ async fn real_youtube_video_downloads() {
             context: None,
             quality: Some("360p".to_string()),
             added_by: None,
+            choice_id: None,
+            page: None,
         })
         .unwrap();
 

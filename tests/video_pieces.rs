@@ -236,6 +236,8 @@ impl Setup {
                 context: None,
                 quality: Some(quality.to_string()),
                 added_by: None,
+                choice_id: None,
+                page: None,
             })
             .unwrap()
     }

@@ -113,6 +113,8 @@ impl Setup {
                 context,
                 quality: Some("1080p".to_string()),
                 added_by: None,
+                choice_id: None,
+                page: None,
             })
             .unwrap()
     }

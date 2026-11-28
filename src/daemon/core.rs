@@ -108,6 +108,10 @@ struct NewDownload {
     /// The quality asked for, with the text it was asked in.
     quality: Option<(Quality, String)>,
     added_by: Option<AddedBy>,
+    /// A choice id from a browser lookup (spec 1f).
+    wanted_choice: Option<String>,
+    /// The link is a page: straight to the video lookup, no link check.
+    page: bool,
 }
 
 /// An add of `url` is turned away while the daemon shuts down, or while that
@@ -354,6 +358,11 @@ impl DaemonCore {
                     .map_err(RpcError::invalid_params)
             })
             .transpose()?;
+        if quality.is_some() && params.choice_id.is_some() {
+            return Err(RpcError::invalid_params(
+                "give choice_id or quality, not both",
+            ));
+        }
         if let Some(name) = &params.filename {
             check_file_name(name)?;
         }
@@ -399,6 +408,8 @@ impl DaemonCore {
                             max_bytes_per_sec,
                             quality,
                             added_by: params.added_by,
+                            wanted_choice: params.choice_id,
+                            page: params.page == Some(true),
                         },
                         context.as_ref(),
                     )
@@ -456,6 +467,8 @@ impl DaemonCore {
         );
         task.speed_limiter.set_bytes_per_sec(new.max_bytes_per_sec);
         task.added_by = new.added_by;
+        task.wanted_choice = new.wanted_choice;
+        task.lookup_next = new.page;
         (task.quality, task.quality_text) = match new.quality {
             Some((quality, text)) => (Some(quality), Some(text)),
             None => (None, None),
