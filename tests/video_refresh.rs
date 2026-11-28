@@ -3,7 +3,9 @@
 
 use rustdm::daemon::queue_store::QueueStore;
 use rustdm::daemon::DaemonCore;
-use rustdm::ipc::protocol::{AddDownloadParams, DownloadStatus, DownloadSummary};
+use rustdm::ipc::protocol::{
+    AddDownloadParams, AddedBy, DownloadStatus, DownloadSummary, LookUpParams,
+};
 use rustdm::request_context::{ContextCookie, RequestContext};
 use rustdm::testing::video::{
     recorded_args, recorded_cookies, video_page_json, write_script, youtube_like, PageSpec,
@@ -313,4 +315,40 @@ async fn a_refresh_keeps_the_sign_in() {
     let seen = recorded_cookies(&s.world.ytdlp.exe);
     assert_eq!(seen.len(), 2, "both lookups carried the cookies");
     assert!(seen[1].content.contains("sid\tabc"), "{}", seen[1].content);
+}
+
+#[tokio::test]
+async fn a_video_looked_up_on_hover_gets_fresh_links_from_yt_dlp() {
+    let s = setup(slow_video()).await;
+    s.answers(&[
+        s.page(VIDEO_PATH, VIDEO_BYTES),
+        s.page(FRESH_VIDEO_PATH, VIDEO_BYTES),
+    ]);
+    let url = s.server.url().join("/watch").unwrap().to_string();
+    let ask = LookUpParams {
+        url: url.clone(),
+        context: None,
+    };
+    s.core.look_up_for_hover(ask).await.unwrap();
+    let added = s
+        .core
+        .add_download(AddDownloadParams {
+            url,
+            destination: Some(s.folder.path().to_path_buf()),
+            filename: None,
+            connections: Some(2),
+            max_bytes_per_sec: None,
+            context: None,
+            quality: None,
+            added_by: Some(AddedBy::Browser),
+            choice_id: Some("1080-mp4".to_string()),
+            page: Some(true),
+        })
+        .unwrap();
+    s.expire_after(&added.id, EXPIRE_AFTER).await;
+    let done = wait_for(&s.core, &added.id, DownloadStatus::Completed).await;
+
+    assert_eq!(s.lookups(), 2, "the refresh asked yt-dlp");
+    assert!(s.bytes_asked(FRESH_VIDEO_PATH) > 0);
+    assert_eq!(std::fs::read(&done.destination).unwrap(), joined_bytes());
 }

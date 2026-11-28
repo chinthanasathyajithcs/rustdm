@@ -56,21 +56,28 @@ impl DaemonCore {
     }
 
     /// The browser's saved lookup of this download's link, for a download the
-    /// browser added, taken instead of a second lookup.
+    /// browser added, taken instead of its first lookup. A download that has a
+    /// plan already is refreshing links that failed: those need yt-dlp again,
+    /// and the saved answer (with the same links) is dropped.
     pub(super) fn saved_answer_for(
         &self,
         record: &Arc<Mutex<TaskRecord>>,
     ) -> Option<LookupOutcome> {
-        let key = {
+        let (key, first_lookup) = {
             let rec = record.lock().unwrap();
             if rec.added_by != Some(AddedBy::Browser) {
                 return None;
             }
-            AnswerKey {
+            let key = AnswerKey {
                 url: rec.url.clone(),
                 has_cookies: rec.has_cookies,
-            }
+            };
+            (key, rec.video.is_none())
         };
+        if !first_lookup {
+            self.saved_answers.forget(&key);
+            return None;
+        }
         let saved = self.saved_answers.get(&key, Instant::now())?;
         tracing::info!("{}: using the browser's lookup", record.lock().unwrap().id);
         Some(LookupOutcome::Choices(Box::new(saved.info), saved.choices))

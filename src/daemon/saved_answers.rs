@@ -44,6 +44,12 @@ impl SavedAnswers {
         }
     }
 
+    /// Drop the answer for `key`: its links failed.
+    pub(super) fn forget(&self, key: &AnswerKey) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|(k, _, _)| k != key);
+    }
+
     /// The answer for `key` while it is younger than `SAVED_FOR`; older ones go.
     pub(super) fn get(&self, key: &AnswerKey, now: Instant) -> Option<SavedAnswer> {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
@@ -128,5 +134,16 @@ mod tests {
         );
         let got = saved.get(&key("https://a/1", false), t0 + Duration::from_secs(900));
         assert_eq!(got.map(|a| a.choices.title), Some("second".to_string()));
+    }
+
+    #[test]
+    fn a_forgotten_answer_is_gone() {
+        let saved = SavedAnswers::default();
+        let t0 = Instant::now();
+        put(&saved, key("https://a/1", false), "one", t0);
+        put(&saved, key("https://a/2", false), "two", t0);
+        saved.forget(&key("https://a/1", false));
+        assert!(saved.get(&key("https://a/1", false), t0).is_none());
+        assert!(saved.get(&key("https://a/2", false), t0).is_some());
     }
 }
