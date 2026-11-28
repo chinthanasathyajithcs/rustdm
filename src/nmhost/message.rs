@@ -30,6 +30,16 @@ enum WireRequest {
         filename: Option<String>,
         #[serde(default)]
         context: Option<Map<String, Value>>,
+        #[serde(default)]
+        choice_id: Option<String>,
+        #[serde(default)]
+        page: Option<bool>,
+    },
+    LookUp {
+        id: u64,
+        url: String,
+        #[serde(default)]
+        context: Option<Map<String, Value>>,
     },
     Status {
         id: u64,
@@ -53,6 +63,16 @@ pub enum HostRequest {
         id: u64,
         url: String,
         filename: Option<String>,
+        context: Option<RequestContext>,
+        /// A quality id from `look_up`: start with it instead of asking.
+        choice_id: Option<String>,
+        /// The link is a page: look it up without checking the link first.
+        page: bool,
+    },
+    /// Look a video up before the click, adding nothing (spec 1f).
+    LookUp {
+        id: u64,
+        url: String,
         context: Option<RequestContext>,
     },
     /// How a download the browser added is doing.
@@ -91,15 +111,26 @@ impl HostRequest {
                 url,
                 filename,
                 context,
+                choice_id,
+                page,
             } => {
                 let context = check_add(&url, filename.as_deref(), context)
                     .map_err(|message| (Some(id), message))?;
+                if let Some(choice) = &choice_id {
+                    check_choice_id(choice).map_err(|m| (Some(id), m))?;
+                }
                 Ok(Self::Add {
                     id,
                     url,
                     filename,
                     context,
+                    choice_id,
+                    page: page == Some(true),
                 })
+            }
+            WireRequest::LookUp { id, url, context } => {
+                let context = check_add(&url, None, context).map_err(|m| (Some(id), m))?;
+                Ok(Self::LookUp { id, url, context })
             }
             WireRequest::Status { id, download_id } => {
                 check_download_id(&download_id).map_err(|m| (Some(id), m))?;
@@ -125,6 +156,7 @@ impl HostRequest {
         match self {
             Self::Ping { id }
             | Self::Add { id, .. }
+            | Self::LookUp { id, .. }
             | Self::Status { id, .. }
             | Self::ChooseQuality { id, .. } => *id,
         }
@@ -142,6 +174,8 @@ pub enum HostErrorKind {
     Invalid,
     TooLarge,
     NotFound,
+    /// `look_up` found nothing to offer, or was stopped by a newer one.
+    LookupFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -287,6 +321,8 @@ pub fn add_params(
     url: &str,
     filename: Option<&str>,
     context: Option<&RequestContext>,
+    choice_id: Option<&str>,
+    page: bool,
 ) -> AddDownloadParams {
     AddDownloadParams {
         url: url.to_string(),
@@ -297,8 +333,8 @@ pub fn add_params(
         context: context.cloned(),
         quality: None,
         added_by: Some(AddedBy::Browser),
-        choice_id: None,
-        page: None,
+        choice_id: choice_id.map(str::to_string),
+        page: page.then_some(true),
     }
 }
 
@@ -464,13 +500,19 @@ mod tests {
             referer: Some("https://example.com/".to_string()),
             ..RequestContext::default()
         };
-        let params = add_params("https://example.com/x", Some("x.zip"), Some(&context));
+        let params = add_params(
+            "https://example.com/x",
+            Some("x.zip"),
+            Some(&context),
+            None,
+            false,
+        );
         assert_eq!(
             serde_json::to_value(params).unwrap(),
             json!({"url": "https://example.com/x", "filename": "x.zip",
                 "context": {"referer": "https://example.com/"}, "added_by": "browser"})
         );
-        let bare = add_params("https://example.com/x", None, None);
+        let bare = add_params("https://example.com/x", None, None, None, false);
         assert_eq!(
             serde_json::to_value(bare).unwrap(),
             json!({"url": "https://example.com/x", "added_by": "browser"})
@@ -583,7 +625,7 @@ mod tests {
     #[test]
     fn the_host_marks_its_adds_as_browser() {
         assert_eq!(
-            add_params("https://e.com/x", None, None).added_by,
+            add_params("https://e.com/x", None, None, None, false).added_by,
             Some(AddedBy::Browser)
         );
     }
@@ -594,5 +636,57 @@ mod tests {
             serde_json::to_value(HostErrorKind::NotFound).unwrap(),
             json!("not_found")
         );
+    }
+
+    #[test]
+    fn a_look_up_is_parsed_with_its_context() {
+        let request = parse(json!({
+            "type": "look_up", "id": 4, "url": "https://example.com/watch?v=1",
+            "context": {"referer": "https://example.com/", "title": "A video"},
+        }))
+        .unwrap();
+        let HostRequest::LookUp { id, url, context } = request else {
+            panic!("not a look_up: {request:?}");
+        };
+        assert_eq!(id, 4);
+        assert_eq!(url, "https://example.com/watch?v=1");
+        assert_eq!(context.unwrap().title.as_deref(), Some("A video"));
+        let bad = parse(json!({"type": "look_up", "id": 5, "url": "ftp://example.com/x"}));
+        assert_eq!(bad.unwrap_err().0, Some(5));
+    }
+
+    #[test]
+    fn an_add_carries_choice_id_and_page() {
+        let request = parse(json!({
+            "type": "add", "id": 6, "url": "https://example.com/watch.html",
+            "choice_id": "1080-mp4", "page": true,
+        }))
+        .unwrap();
+        let HostRequest::Add {
+            choice_id, page, ..
+        } = &request
+        else {
+            panic!("not an add: {request:?}");
+        };
+        assert_eq!(choice_id.as_deref(), Some("1080-mp4"));
+        assert!(*page);
+        let params = add_params(
+            "https://example.com/watch.html",
+            None,
+            None,
+            Some("1080-mp4"),
+            true,
+        );
+        assert_eq!(params.choice_id.as_deref(), Some("1080-mp4"));
+        assert_eq!(params.page, Some(true));
+    }
+
+    #[test]
+    fn a_choice_id_too_long_is_refused() {
+        let long = "x".repeat(MAX_ID_BYTES + 1);
+        let request = parse(json!({
+            "type": "add", "id": 7, "url": "https://example.com/watch", "choice_id": long,
+        }));
+        assert_eq!(request.unwrap_err().0, Some(7));
     }
 }

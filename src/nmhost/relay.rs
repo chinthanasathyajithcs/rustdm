@@ -1,11 +1,12 @@
 //! The host's main loop: read a request frame, ask `rdmd`, write a reply frame.
-//! Only `ping` and `add` can reach the daemon; nothing else is forwarded.
+//! Only the requests in `HostRequest` reach the daemon; only `add` may start it.
 
 use crate::daemon::launch::{daemon_exe_path, spawn_detached};
 use crate::ipc::client::{connect_or_spawn, ClientError, DaemonClient};
 use crate::ipc::protocol::{
-    AddedBy, ChooseQualityParams, DownloadStatus, DownloadSummary, CODE_DOWNLOAD_NOT_FOUND,
-    CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS,
+    AddDownloadParams, AddedBy, ChooseQualityParams, DownloadStatus, DownloadSummary, LookUpParams,
+    LookUpResult, CODE_DOWNLOAD_NOT_FOUND, CODE_DUPLICATE_DOWNLOAD, CODE_INVALID_PARAMS,
+    CODE_LOOKUP_FAILED,
 };
 use crate::ipc::transport::IpcEndpoint;
 use crate::nmhost::frame::{read_frame, write_frame, FrameError};
@@ -13,6 +14,7 @@ use crate::nmhost::message::{
     add_params, check_download_id, HostErrorKind, HostReply, HostRequest, PROTOCOL_VERSION,
 };
 use crate::request_context::RequestContext;
+use crate::video::VideoChoice;
 use serde_json::{json, Map, Value};
 use std::io;
 use std::time::Duration;
@@ -160,17 +162,19 @@ async fn handle<S: Fn() -> io::Result<()>>(
             url,
             filename,
             context,
+            choice_id,
+            page,
         } => {
-            add(
-                id,
+            let params = add_params(
                 &url,
                 filename.as_deref(),
                 context.as_ref(),
-                endpoint,
-                spawn,
-            )
-            .await
+                choice_id.as_deref(),
+                page,
+            );
+            add(id, params, endpoint, spawn).await
         }
+        HostRequest::LookUp { id, url, context } => look_up(id, url, context, endpoint).await,
         HostRequest::Status { id, download_id } => status(id, &download_id, endpoint).await,
         HostRequest::ChooseQuality {
             id,
@@ -198,15 +202,14 @@ async fn ping(id: u64, endpoint: &IpcEndpoint) -> HostReply {
 
 async fn add<S: Fn() -> io::Result<()>>(
     id: u64,
-    url: &str,
-    filename: Option<&str>,
-    context: Option<&RequestContext>,
+    params: AddDownloadParams,
     endpoint: &IpcEndpoint,
     spawn: &S,
 ) -> HostReply {
+    let url = params.url.clone();
     let outcome = async {
         let mut client = connect_or_spawn(endpoint, spawn, SPAWN_TIMEOUT).await?;
-        client.add(add_params(url, filename, context)).await
+        client.add(params).await
     }
     .await;
     match outcome {
@@ -216,9 +219,53 @@ async fn add<S: Fn() -> io::Result<()>>(
         ),
         Err(e) => {
             let reply = failure_for(id, e);
-            log_failure(url, &reply);
+            log_failure(&url, &reply);
             reply
         }
+    }
+}
+
+/// Look a video up before the click (spec 1f). Never starts the daemon: a
+/// pointer resting on a video is not a request to run rustdm.
+async fn look_up(
+    id: u64,
+    url: String,
+    context: Option<RequestContext>,
+    endpoint: &IpcEndpoint,
+) -> HostReply {
+    let mut client = match DaemonClient::connect(endpoint).await {
+        Ok(client) => client,
+        Err(e) => return failure_for(id, e),
+    };
+    match client.look_up(LookUpParams { url, context }).await {
+        Ok(found) => look_up_reply(id, &found),
+        Err(e) => look_up_failure(id, e),
+    }
+}
+
+fn look_up_reply(id: u64, found: &LookUpResult) -> HostReply {
+    let mut out = Map::new();
+    out.insert("title".into(), json!(found.title));
+    if let Some(secs) = found.duration_secs {
+        out.insert("duration_secs".into(), json!(secs));
+    }
+    let choices = found.choices.iter().map(trimmed_choice).collect();
+    out.insert("choices".into(), Value::Array(choices));
+    out.insert("default".into(), json!(found.default));
+    HostReply::success(id, Value::Object(out))
+}
+
+/// A lookup that found nothing says why in plain words, unless the words
+/// name a link or a path.
+fn look_up_failure(id: u64, error: ClientError) -> HostReply {
+    match error {
+        ClientError::Rpc(rpc) if rpc.code == CODE_LOOKUP_FAILED => HostReply::failure(
+            Some(id),
+            HostErrorKind::LookupFailed,
+            Some(rpc.code),
+            safe_error(&rpc.message),
+        ),
+        other => failure_for(id, other),
     }
 }
 
@@ -305,20 +352,7 @@ fn trimmed_status(summary: &DownloadSummary) -> Value {
         );
     }
     if let Some(video) = &summary.video {
-        let choices: Vec<Value> = video
-            .choices
-            .iter()
-            .map(|c| {
-                json!({
-                    "id": c.id,
-                    "label": c.label,
-                    "container": c.container.label(),
-                    "height": c.height,
-                    "size_bytes": c.size_bytes,
-                    "size_is_estimate": c.size_is_estimate,
-                })
-            })
-            .collect();
+        let choices: Vec<Value> = video.choices.iter().map(trimmed_choice).collect();
         let mut v = Map::new();
         v.insert("title".into(), json!(video.title));
         if let Some(secs) = video.duration_secs {
@@ -342,6 +376,18 @@ fn trimmed_status(summary: &DownloadSummary) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// A quality as the browser may see it: no stream, format or link.
+fn trimmed_choice(c: &VideoChoice) -> Value {
+    json!({
+        "id": c.id,
+        "label": c.label,
+        "container": c.container.label(),
+        "height": c.height,
+        "size_bytes": c.size_bytes,
+        "size_is_estimate": c.size_is_estimate,
+    })
 }
 
 /// `message`, unless it names a link or a path on this computer.
@@ -760,5 +806,64 @@ mod tests {
             ..summary(DownloadStatus::Retrying)
         };
         assert!(trimmed_status(&row).get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_look_up_with_no_daemon_does_not_start_one() {
+        let mut input = Vec::new();
+        let frame = br#"{"type":"look_up","id":3,"url":"https://example.com/watch"}"#;
+        write_frame(&mut input, frame).await.unwrap();
+        let mut output = Vec::new();
+        let endpoint = IpcEndpoint::test_endpoint("relay_look_up");
+        let spawned = std::sync::atomic::AtomicUsize::new(0);
+        run_host_with(&mut &input[..], &mut output, &endpoint, || {
+            spawned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(io::Error::other("no daemon in unit tests"))
+        })
+        .await
+        .unwrap();
+        let body = read_frame(&mut &output[..]).await.unwrap().unwrap();
+        let reply: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(reply["id"], 3);
+        assert_eq!(reply["error"]["kind"], "not_running");
+        assert_eq!(spawned.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_lookup_failure_naming_a_path_is_hidden() {
+        let rpc = RpcError::new(
+            CODE_LOOKUP_FAILED,
+            r"yt-dlp failed writing C:\Users\x\video.part",
+            None,
+        );
+        let reply = look_up_failure(9, ClientError::Rpc(rpc));
+        let error = reply.error.unwrap();
+        assert_eq!(error.kind, HostErrorKind::LookupFailed);
+        assert_eq!(error.message, HIDDEN_ERROR);
+        let plain = RpcError::new(CODE_LOOKUP_FAILED, "No video was found on this page.", None);
+        let reply = look_up_failure(9, ClientError::Rpc(plain));
+        assert_eq!(
+            reply.error.unwrap().message,
+            "No video was found on this page."
+        );
+    }
+
+    #[test]
+    fn a_look_up_answer_carries_no_stream_links() {
+        let video = choosing_video();
+        let found = LookUpResult {
+            title: video.title.clone(),
+            duration_secs: video.duration_secs,
+            choices: video.choices.clone(),
+            default: 0,
+        };
+        let reply = look_up_reply(2, &found);
+        let text = serde_json::to_string(&reply).unwrap();
+        assert!(!text.contains("fmt-137-secret"), "{text}");
+        let result = reply.result.unwrap();
+        assert_eq!(result["choices"][0]["id"], "1080-mp4");
+        assert_eq!(result["choices"][0]["size_bytes"], 40_000_000);
+        assert_eq!(result["default"], 0);
+        assert_eq!(result["duration_secs"], 60);
     }
 }

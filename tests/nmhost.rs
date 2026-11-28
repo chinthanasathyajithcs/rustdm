@@ -688,3 +688,38 @@ async fn a_duplicate_from_the_browser_names_the_existing_download() {
     client.shutdown().await.unwrap();
     let _ = daemon.wait().await;
 }
+
+#[tokio::test]
+async fn a_look_up_reaches_the_daemon_and_adds_nothing() {
+    let master = "#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS=\"avc1.64002a,mp4a.40.2\",RESOLUTION=1920x1080
+1080/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS=\"avc1.640020,mp4a.40.2\",RESOLUTION=1280x720
+720/index.m3u8
+";
+    let server = TestServer::start_routes(vec![(
+        "/m/master.m3u8".to_string(),
+        Route::ok(master).with_header("Content-Type", "application/vnd.apple.mpegurl"),
+    )])
+    .await;
+    let env = Env::new();
+    let mut daemon = env.spawn_rdmd();
+    let mut client = env.wait_for_daemon().await;
+    let mut host = env.spawn_host(&[&allowed_origin()]);
+
+    let url = server.url().join("/m/master.m3u8").unwrap().to_string();
+    let reply = host
+        .call(json!({"type": "look_up", "id": 3, "url": url}))
+        .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["result"]["choices"].as_array().unwrap().len(), 2);
+    let page = host
+        .call(json!({"type": "look_up", "id": 4, "url": "https://video.test/watch"}))
+        .await;
+    assert_eq!(page["error"]["kind"], "lookup_failed", "{page}");
+    assert!(client.list().await.unwrap().is_empty());
+
+    assert!(host.finish().await.success());
+    client.shutdown().await.unwrap();
+    let _ = daemon.wait().await;
+}
