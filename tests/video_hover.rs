@@ -9,13 +9,13 @@ use rustdm::ipc::protocol::{
     CODE_LOOKUP_FAILED,
 };
 use rustdm::request_context::{ContextCookie, RequestContext};
-use rustdm::testing::fake_releases::test_sources;
+use rustdm::testing::fake_releases::{publish_ytdlp, test_sources};
 use rustdm::testing::video::{
-    recorded_args, video_page_json, write_script, youtube_like, PageSpec, ToolResponse, ToolScript,
-    VideoWorld,
+    recorded_args, test_tool_program_scripted, video_page_json, write_script, youtube_like,
+    PageSpec, ToolResponse, ToolScript, VideoWorld,
 };
 use rustdm::testing::{pattern_bytes, Route, TestServer};
-use rustdm::tools::ToolStore;
+use rustdm::tools::{FetchCtx, Freshness, Tool, ToolStore};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -320,4 +320,56 @@ fn cookie_context() -> RequestContext {
         user_agent: None,
         title: None,
     }
+}
+
+#[tokio::test]
+async fn a_hover_leaves_the_hourly_yt_dlp_update_to_the_download() {
+    let s = setup().await;
+    let extractor_error = || ToolResponse {
+        stderr: "ERROR: [youtube] testVideo01: Unable to extract initial player response"
+            .to_string(),
+        exit_code: 1,
+        ..ToolResponse::default()
+    };
+    s.answer(vec![extractor_error(), extractor_error()]);
+    let newer = ToolScript {
+        responses: vec![page_answer(&s.page())],
+    };
+    publish_ytdlp(
+        &s.world.server,
+        "2026.11.14",
+        &test_tool_program_scripted("2026.11.14", &newer),
+    );
+
+    assert!(s.core.look_up_for_hover(s.ask("/watch")).await.is_err());
+    let added = s
+        .core
+        .add_download(AddDownloadParams {
+            added_by: None,
+            choice_id: None,
+            page: None,
+            ..browser_add(&s, "/watch", None)
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let row = s.core.get_status(&added.id).unwrap();
+        if row.status == DownloadStatus::Choosing {
+            break;
+        }
+        assert!(
+            row.status != DownloadStatus::Failed,
+            "{:?}",
+            row.error_message
+        );
+        assert!(Instant::now() < deadline, "{:?}", row.status);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let installed = s
+        .world
+        .store
+        .ensure(Tool::YtDlp, Freshness::AsInstalled, FetchCtx::new())
+        .await
+        .unwrap();
+    assert_eq!(installed.version, "2026.11.14");
 }

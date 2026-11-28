@@ -252,7 +252,10 @@ impl DaemonCore {
         let run = |ytdlp: Installed| run_lookup(ytdlp, &deno, target, dir, cancel.clone());
         let mut result = run(ytdlp.clone()).await;
         if let Err(LookupFailure::Exited { stderr, .. }) = &result {
-            let wants_update = is_extractor_error(stderr)
+            // Only a download asks for a newer yt-dlp: a browser lookup cannot
+            // install one, and would use up the hour's check for nothing.
+            let wants_update = matches!(source, ToolSource::Row { .. })
+                && is_extractor_error(stderr)
                 && !*cancel.borrow()
                 && self.extractor_gate.may_update(Instant::now());
             if wants_update {
