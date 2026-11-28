@@ -49,6 +49,8 @@ button:focus-visible { outline: 2px solid var(--rdm-amber); outline-offset: 1px;
 .bar:hover, .bar:focus-within, .bar.open { border-color: var(--rdm-amber); opacity: 1; }
 .bar .go { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 5px; color: var(--rdm-bright); }
 .bar .go svg { width: 16px; height: 16px; flex: none; }
+.bar .more { display: grid; place-items: center; width: 18px; height: 24px; margin-left: -6px; border-radius: 4px; color: var(--rdm-muted); font-size: 11px; }
+.bar .more:hover { color: var(--rdm-bright); background: var(--rdm-button-bg); }
 .bar .x { visibility: hidden; margin: 0 3px 0 -4px; }
 .bar:hover .x, .bar:focus-within .x { visibility: visible; }
 .x { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 4px; color: var(--rdm-muted); font-size: 12px; }

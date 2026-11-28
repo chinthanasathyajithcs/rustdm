@@ -11,6 +11,11 @@
   // The pointer stays this long on a video before its bar shows: a pass over a
   // page's previews shows nothing.
   const HOVER_DELAY_MS = 150;
+  // The pointer rests this long before the video is looked up ahead of the
+  // click (spec 1f): on the video, or on the bar itself.
+  const LOOKUP_REST_MS = 600;
+  const BAR_LOOKUP_REST_MS = 200;
+  const BAR_TEXT = 'Download this video';
   const INSET_PX = 8;
   const GAP_PX = 4;
   const FOUR_K_HEIGHT = 2160;
@@ -171,6 +176,21 @@
     return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${UNITS[unit]}`;
   }
 
+  /** True once the pointer has rested long enough and nothing was asked yet. */
+  function lookupDue({ restingSince, onBar, now, asked }) {
+    if (asked || typeof restingSince !== 'number') return false;
+    return now - restingSince >= (onBar ? BAR_LOOKUP_REST_MS : LOOKUP_REST_MS);
+  }
+
+  /** The bar's text: the quality a click downloads, once it is known. */
+  function barLabel(answer) {
+    const choice = answer?.choices?.[answer.default];
+    if (!choice?.label) return BAR_TEXT;
+    const bytes = typeof choice.size_bytes === 'number' ? choice.size_bytes : null;
+    const size = bytes === null ? '' : ` · ${choice.size_is_estimate ? '~' : ''}${formatBytes(bytes)}`;
+    return `Download ${choice.label}${size}`;
+  }
+
   /** The dashboard's format_duration: "m:ss", or "h:mm:ss" from an hour. */
   function formatDuration(secs) {
     const two = (n) => String(n).padStart(2, '0');
@@ -196,6 +216,11 @@
     INSET_PX,
     GAP_PX,
     HOVER_DELAY_MS,
+    LOOKUP_REST_MS,
+    BAR_LOOKUP_REST_MS,
+    BAR_TEXT,
+    lookupDue,
+    barLabel,
     containsPoint,
     pickHovered,
     barPlacement,
