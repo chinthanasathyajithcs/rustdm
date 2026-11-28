@@ -268,7 +268,15 @@ export function installVideo(deps) {
         case 'add':
           void collectCookies([resolved.url, sender.tab.url])
             .then((cookies) =>
-              run.session.request(buildVideoMessage({ ...resolved, cookies, userAgent: globalThis.navigator?.userAgent })),
+              run.session.request(
+                buildVideoMessage({
+                  ...resolved,
+                  cookies,
+                  userAgent: globalThis.navigator?.userAgent,
+                  choiceId: effect.choiceId,
+                  page: resolved.kind === 'page',
+                }),
+              ),
             )
             .then(reply('add_reply'));
           break;
@@ -374,7 +382,7 @@ export function installVideo(deps) {
       } else if (message?.type === 'visible' && current) {
         dispatch(current, { type: 'hidden', hidden: message.visible === false });
       } else if (message?.type === 'choose' && current && typeof message.choiceId === 'string') {
-        dispatch(current, { type: 'choose', choiceId: message.choiceId });
+        dispatch(current, { type: 'choose', choiceId: message.choiceId, now: now() });
       }
     });
     port.onDisconnect.addListener(() => {

@@ -297,3 +297,48 @@ test('a list left open gives up after ten minutes', () => {
   assert.deepEqual(after.views.at(-1), { phase: 'note', message: 'Still waiting for a quality; pick it in rustdm.' });
   assert.equal(after.effects.at(-1).type, 'stop');
 });
+
+const answer = { title: 'Angel One', duration_secs: 60, choices, default: 1 };
+
+test('a quick start adds with the choice', () => {
+  const { state, effects } = startFlow('page', T0, { choiceId: '720-mp4' });
+  assert.equal(state.phase, 'sending');
+  assert.deepEqual(effects, [{ type: 'add', choiceId: '720-mp4' }, { type: 'view', view: { phase: 'looking' } }]);
+});
+
+test('a start from an answer lists at once and asks nothing', () => {
+  const { state, effects } = startFlow('page', T0, { answer });
+  assert.equal(state.phase, 'choosing');
+  assert.equal(state.downloadId, null);
+  assert.deepEqual(effects, [
+    { type: 'view', view: { phase: 'choosing', choices, defaultIndex: 1, durationSecs: 60 } },
+  ]);
+});
+
+test('a pick from an answer adds with that choice then polls', () => {
+  let { state } = startFlow('page', T0, { answer });
+  const picked = flowStep(state, { type: 'choose', choiceId: '1080-mp4' });
+  assert.deepEqual(picked.effects, [{ type: 'add', choiceId: '1080-mp4' }, { type: 'view', view: { phase: 'looking' } }]);
+  state = picked.state;
+  assert.equal(state.phase, 'sending');
+  const added = flowStep(state, { type: 'add_reply', reply: ok({ download_id: 'dl_7' }), now: T0 + 10 });
+  assert.deepEqual(added.effects, [{ type: 'status', downloadId: 'dl_7' }]);
+  const running = { download_id: 'dl_7', status: 'active', filename: 'Angel One.mp4', video: { title: 'Angel One', choices: [], chosen: { label: '1080p', container: 'MP4' } } };
+  const done = flowStep(added.state, { type: 'status_reply', reply: ok(running), now: T0 + 20 });
+  assert.equal(done.state.phase, 'started');
+});
+
+test('no polling before there is a download', () => {
+  const { state } = startFlow('page', T0, { answer });
+  assert.deepEqual(flowStep(state, { type: 'tick', now: T0 + 5_000 }).effects, []);
+});
+
+test('a pick long after the list opened gets the whole lookup time', () => {
+  const { state } = startFlow('page', T0, { answer });
+  const later = T0 + 120_000;
+  const picked = flowStep(state, { type: 'choose', choiceId: '1080-mp4', now: later });
+  const added = flowStep(picked.state, { type: 'add_reply', reply: ok({ download_id: 'dl_7' }), now: later + 10 });
+  const waiting = flowStep(added.state, { type: 'status_reply', reply: ok({ download_id: 'dl_7', status: 'active', filename: 'x' }), now: later + 20 });
+  const tick = flowStep(waiting.state, { type: 'tick', now: later + 1_000 });
+  assert.notEqual(tick.state.phase, 'note');
+});
