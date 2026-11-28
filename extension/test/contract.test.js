@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildChooseMessage,
+  buildContext,
   buildDownloadMessage,
   buildMenuMessage,
+  buildStatusMessage,
+  buildVideoMessage,
   dedupeCookies,
   safeFilename,
   toContextCookie,
@@ -120,4 +124,45 @@ test('the menu message uses the page as the referer', () => {
       context: { referer: 'https://example.com/watch', user_agent: 'UA' },
     },
   );
+});
+
+test('a title is trimmed into the context', () => {
+  assert.equal(buildContext({ title: '  Angel One \n' }).title, 'Angel One');
+});
+
+test('an empty title is left out', () => {
+  assert.equal('title' in buildContext({ title: '   ' }), false);
+  assert.equal('title' in buildContext({}), false);
+});
+
+test('a long title is sent whole', () => {
+  assert.equal(buildContext({ title: 'a'.repeat(5000) }).title.length, 5000);
+});
+
+test('the video message has no id and no referer when none is given', () => {
+  const message = buildVideoMessage({ url: 'https://e.com/v', title: 'T', userAgent: 'UA' });
+  assert.deepEqual(message, {
+    type: 'add',
+    url: 'https://e.com/v',
+    context: { user_agent: 'UA', title: 'T' },
+  });
+});
+
+test('the video message carries the referer and cookies', () => {
+  const message = buildVideoMessage({
+    url: 'https://e.com/v.m3u8',
+    referer: 'https://e.com/watch',
+    cookies: [cookie()],
+  });
+  assert.equal(message.context.referer, 'https://e.com/watch');
+  assert.equal(message.context.cookies.length, 1);
+});
+
+test('status and choose messages have the host field names', () => {
+  assert.deepEqual(buildStatusMessage('dl_1'), { type: 'status', download_id: 'dl_1' });
+  assert.deepEqual(buildChooseMessage('dl_1', '720-mp4'), {
+    type: 'choose_quality',
+    download_id: 'dl_1',
+    choice_id: '720-mp4',
+  });
 });

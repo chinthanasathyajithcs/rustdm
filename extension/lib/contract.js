@@ -47,12 +47,15 @@ export function safeFilename(path) {
   return name;
 }
 
-function buildContext({ cookies, referer, userAgent }) {
+/** The `context` object. A title is trimmed only; the host decides the rest. */
+export function buildContext({ cookies, referer, userAgent, title }) {
   const context = {};
   const mapped = dedupeCookies(cookies ?? []).map(toContextCookie);
   if (mapped.length > 0) context.cookies = mapped;
   if (referer && isWebUrl(referer)) context.referer = referer;
   if (userAgent) context.user_agent = userAgent;
+  const trimmed = typeof title === 'string' ? title.trim() : '';
+  if (trimmed) context.title = trimmed;
   return context;
 }
 
@@ -77,6 +80,19 @@ export function buildMenuMessage({ id, url, pageUrl, cookies, userAgent }) {
     url,
     context: buildContext({ cookies, referer: pageUrl, userAgent }),
   };
+}
+
+/** The `add` message for a video from the card or the page menu; the session sets `id`. */
+export function buildVideoMessage({ url, referer, title, cookies, userAgent }) {
+  return { type: 'add', url, context: buildContext({ cookies, referer, userAgent, title }) };
+}
+
+export function buildStatusMessage(downloadId) {
+  return { type: 'status', download_id: downloadId };
+}
+
+export function buildChooseMessage(downloadId, choiceId) {
+  return { type: 'choose_quality', download_id: downloadId, choice_id: choiceId };
 }
 
 export { isWebUrl };
