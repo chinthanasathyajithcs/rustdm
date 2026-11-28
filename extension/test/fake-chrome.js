@@ -81,6 +81,7 @@ export function makeChrome({ granted = true, local = {}, session = {} } = {}) {
       id: 'rustdm-extension-id',
       lastError: undefined,
       onConnect: event(),
+      onMessage: event(),
       connectNative: (host) => {
         const port = fakePort({ name: host });
         state.nativePorts.push(port);
